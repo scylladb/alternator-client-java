@@ -1,0 +1,110 @@
+SHELL := bash
+.ONESHELL:
+.SHELLFLAGS := -eo pipefail -c
+
+mvn = mvn
+
+ifdef IS_CICD
+    mvn = mvn --no-transfer-progress
+endif
+
+MAKEFILE_PATH := $(abspath $(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
+BIN := $(MAKEFILE_PATH)/bin
+OS := $(shell uname | tr '[:upper:]' '[:lower:]')
+ARCH := $(shell uname -m)
+DOCKER_COMPOSE_VERSION := 2.34.0
+
+ifeq ($(ARCH),aarch64)
+	DOCKER_COMPOSE_DOWNLOAD_URL := "https://github.com/docker/compose/releases/download/v$(DOCKER_COMPOSE_VERSION)/docker-compose-$(OS)-aarch64"
+else ifeq ($(ARCH),x86_64)
+	DOCKER_COMPOSE_DOWNLOAD_URL := "https://github.com/docker/compose/releases/download/v$(DOCKER_COMPOSE_VERSION)/docker-compose-$(OS)-x86_64"
+else
+	@printf 'Unknown architecture "%s"\n', "$(GOARCH)"
+	@exit 69
+endif
+
+COMPOSE = bin/docker-compose -f $(MAKEFILE_PATH)/test/docker-compose.yml
+
+.PHONY: clean verify fix compile compile-test test test-unit test-integration release-prepare release release-dry-run
+
+clean:
+	${mvn} clean
+
+verify:
+	${mvn} verify
+	${mvn} javadoc:test-javadoc javadoc:test-aggregate javadoc:test-aggregate-jar javadoc:test-jar javadoc:test-resource-bundle
+	${mvn} javadoc:jar javadoc:aggregate javadoc:aggregate-jar javadoc:resource-bundle
+
+fix:
+	${mvn} com.coveo:fmt-maven-plugin:format
+	echo y | ${mvn} javadoc:fix
+	echo y | ${mvn} javadoc:test-fix
+
+compile:
+	${mvn} compile
+
+compile-test:
+	${mvn} test-compile
+
+test-unit:
+	${mvn} test
+
+.PHONY: test-integration
+test-integration: scylla-start
+	@echo "Waiting for Scylla cluster to be ready..."
+	sleep 30
+	INTEGRATION_TESTS=true ALTERNATOR_HOST=172.39.0.2 ALTERNATOR_PORT=9998 ALTERNATOR_HTTPS=false \
+		${mvn} test -Dtest=AlternatorIntegrationTest || (make scylla-stop && exit 1)
+	${mvn} exec:java -Dexec.mainClass=com.scylladb.alternator.test.Demo2 -Dexec.classpathScope=test -Dexec.args="--endpoint http://172.39.0.2:9998" || (make scylla-stop && exit 1)
+	${mvn} exec:java -Dexec.mainClass=com.scylladb.alternator.test.Demo3 -Dexec.classpathScope=test -Dexec.args="--endpoint http://172.39.0.2:9998" || (make scylla-stop && exit 1)
+	make scylla-stop
+
+.PHONY: release-prepare
+release-prepare:
+	${mvn} versions:set -DnewVersion=${RELEASE_VERSION}
+	${mvn} clean verify -Prelease
+
+.PHONY: release
+release:
+	${mvn} clean deploy -Prelease
+
+.PHONY: release-dry-run
+release-dry-run:
+	${mvn} clean deploy -Prelease -DskipRemoteStaging=true
+
+.prepare-environment-update-aio-max-nr:
+	@if (( $$(< /proc/sys/fs/aio-max-nr) < 2097152 )); then
+		echo 2097152 | sudo tee /proc/sys/fs/aio-max-nr >/dev/null
+	fi
+
+.prepare-docker-compose: .prepare-bin
+	@if [[ -f "$(BIN)/docker-compose" ]] && "$(BIN)/docker-compose" --version 2>/dev/null | grep "$(DOCKER_COMPOSE_VERSION)" >/dev/null; then
+		echo "docker-compose $(DOCKER_COMPOSE_VERSION) is already installed"
+	else
+		echo "Downloading $(BIN)/docker-compose";
+		curl --progress-bar -L $(DOCKER_COMPOSE_DOWNLOAD_URL) --output "$(BIN)/docker-compose";
+		chmod +x "$(BIN)/docker-compose";
+	fi
+
+.prepare-bin:
+	@[ -d "$(BIN)" ] || mkdir "$(BIN)";
+
+.PHONY: .prepare-cert
+.prepare-cert:
+	@[ -f "${MAKEFILE_PATH}/test/scylla/db.key" ] || (echo "Prepare certificate" && cd ${MAKEFILE_PATH}/test/scylla/ && openssl req -subj "/C=US/ST=Denial/L=Springfield/O=Dis/CN=www.example.com" -x509 -newkey rsa:4096 -keyout db.key -out db.crt -days 3650 -nodes && chmod 644 db.key)
+
+.PHONY: scylla-start
+scylla-start: .prepare-cert .prepare-docker-compose .prepare-environment-update-aio-max-nr
+	$(COMPOSE) up -d
+
+.PHONY: scylla-stop
+scylla-stop: .prepare-docker-compose
+	$(COMPOSE) down
+
+.PHONY: scylla-kill
+scylla-kill: .prepare-docker-compose
+	$(COMPOSE) kill
+
+.PHONY: scylla-rm
+scylla-rm: .prepare-docker-compose
+	$(COMPOSE) rm -f
