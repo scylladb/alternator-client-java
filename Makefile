@@ -25,6 +25,12 @@ endif
 
 COMPOSE = bin/docker-compose -f $(MAKEFILE_PATH)/test/docker-compose.yml
 
+SCYLLA_IMAGE := scylladb/scylla:2025.1
+DOCKER_CACHE_DIR := $(MAKEFILE_PATH)/.docker-cache
+DOCKER_CACHE_FILE := $(DOCKER_CACHE_DIR)/scylla-image.tar
+CERT_CACHE_DIR := $(MAKEFILE_PATH)/.cert-cache
+CERT_DIR := $(MAKEFILE_PATH)/test/scylla
+
 .PHONY: clean verify fix compile compile-test test test-unit test-integration release-prepare release release-dry-run
 
 clean:
@@ -94,7 +100,7 @@ release-dry-run:
 	@[ -f "${MAKEFILE_PATH}/test/scylla/db.key" ] || (echo "Prepare certificate" && cd ${MAKEFILE_PATH}/test/scylla/ && openssl req -subj "/C=US/ST=Denial/L=Springfield/O=Dis/CN=www.example.com" -x509 -newkey rsa:4096 -keyout db.key -out db.crt -days 3650 -nodes && chmod 644 db.key)
 
 .PHONY: scylla-start
-scylla-start: .prepare-cert .prepare-docker-compose .prepare-environment-update-aio-max-nr
+scylla-start: cert-cache-load .prepare-docker-compose .prepare-environment-update-aio-max-nr docker-cache-load
 	$(COMPOSE) up -d
 
 .PHONY: scylla-stop
@@ -108,3 +114,38 @@ scylla-kill: .prepare-docker-compose
 .PHONY: scylla-rm
 scylla-rm: .prepare-docker-compose
 	$(COMPOSE) rm -f
+
+.PHONY: docker-pull
+docker-pull:
+	docker pull $(SCYLLA_IMAGE)
+
+.PHONY: docker-cache-save
+docker-cache-save: docker-pull
+	@mkdir -p $(DOCKER_CACHE_DIR)
+	docker save $(SCYLLA_IMAGE) -o $(DOCKER_CACHE_FILE)
+
+.PHONY: docker-cache-load
+docker-cache-load:
+	@if [ -f "$(DOCKER_CACHE_FILE)" ]; then \
+		echo "Loading Docker image from cache..."; \
+		docker load -i $(DOCKER_CACHE_FILE); \
+	else \
+		echo "Cache file not found, pulling image..."; \
+		$(MAKE) docker-pull; \
+	fi
+
+.PHONY: cert-cache-save
+cert-cache-save: .prepare-cert
+	@mkdir -p $(CERT_CACHE_DIR)
+	cp $(CERT_DIR)/db.key $(CERT_DIR)/db.crt $(CERT_CACHE_DIR)/
+
+.PHONY: cert-cache-load
+cert-cache-load:
+	@if [ -f "$(CERT_CACHE_DIR)/db.key" ] && [ -f "$(CERT_CACHE_DIR)/db.crt" ]; then \
+		echo "Loading certificates from cache..."; \
+		cp $(CERT_CACHE_DIR)/db.key $(CERT_CACHE_DIR)/db.crt $(CERT_DIR)/; \
+		chmod 644 $(CERT_DIR)/db.key; \
+	else \
+		echo "Certificate cache not found, generating..."; \
+		$(MAKE) .prepare-cert; \
+	fi
