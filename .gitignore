@@ -3,6 +3,7 @@ test/scylla/db.*
 .idea/
 target/
 .docker-cache/
+.cert-cache/
 
 TODO.md
 
