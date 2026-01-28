@@ -8,11 +8,17 @@ import java.net.URISyntaxException;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
+import software.amazon.awssdk.core.interceptor.Context;
+import software.amazon.awssdk.core.interceptor.ExecutionAttributes;
+import software.amazon.awssdk.core.interceptor.ExecutionInterceptor;
+import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.*;
 
 /**
@@ -265,6 +271,185 @@ public class AlternatorIntegrationTest {
     // Test that wrapper exposes live nodes directly
     List<URI> nodes = client.getLiveNodes();
     assertNotNull("Should be able to access live nodes from wrapper", nodes);
+
+    client.close();
+  }
+
+  @Test
+  public void testClientWithCompressionEnabled() throws Exception {
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withDatacenter(datacenter)
+            .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
+            .withMinCompressionSizeBytes(512)
+            .build();
+
+    AlternatorDynamoDbClientWrapper client =
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(seedUri)
+            .credentialsProvider(credentialsProvider)
+            .withAlternatorConfig(config)
+            .buildWithAlternatorAPI();
+
+    // Verify client is functional with compression enabled
+    List<URI> nodes = client.getLiveNodes();
+    assertFalse("Should have at least one node", nodes.isEmpty());
+
+    // Perform a simple operation to verify compression doesn't break requests
+    try {
+      client.listTables(ListTablesRequest.builder().build());
+    } catch (Exception e) {
+      // ListTables should work with compression enabled
+      fail("ListTables should succeed with compression enabled: " + e.getMessage());
+    }
+
+    client.close();
+  }
+
+  @Test
+  public void testAsyncClientWithCompressionEnabled() throws Exception {
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
+            .build();
+
+    AlternatorDynamoDbAsyncClientWrapper client =
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(seedUri)
+            .credentialsProvider(credentialsProvider)
+            .withAlternatorConfig(config)
+            .buildWithAlternatorAPI();
+
+    // Verify async client is functional with compression enabled
+    List<URI> nodes = client.getLiveNodes();
+    assertFalse("Should have at least one node", nodes.isEmpty());
+
+    // Perform a simple async operation to verify compression doesn't break requests
+    try {
+      client.listTables(ListTablesRequest.builder().build()).get();
+    } catch (Exception e) {
+      fail("Async ListTables should succeed with compression enabled: " + e.getMessage());
+    }
+
+    client.close();
+  }
+
+  @Test
+  public void testCompressionWithLargePayload() throws Exception {
+    // Track if Content-Encoding: gzip header was seen
+    AtomicBoolean compressionHeaderSeen = new AtomicBoolean(false);
+
+    ExecutionInterceptor compressionVerifier =
+        new ExecutionInterceptor() {
+          @Override
+          public void beforeTransmission(
+              Context.BeforeTransmission context, ExecutionAttributes executionAttributes) {
+            context
+                .httpRequest()
+                .firstMatchingHeader("Content-Encoding")
+                .ifPresent(
+                    value -> {
+                      if (value.contains("gzip")) {
+                        compressionHeaderSeen.set(true);
+                      }
+                    });
+          }
+        };
+
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
+            .withMinCompressionSizeBytes(100) // Low threshold to ensure compression kicks in
+            .build();
+
+    // Build client with the compression verifier interceptor
+    ClientOverrideConfiguration overrideConfig =
+        ClientOverrideConfiguration.builder().addExecutionInterceptor(compressionVerifier).build();
+
+    DynamoDbClient client =
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(seedUri)
+            .credentialsProvider(credentialsProvider)
+            .overrideConfiguration(overrideConfig)
+            .withAlternatorConfig(config)
+            .build();
+
+    // Create a large payload that should trigger compression (> 100 bytes threshold)
+    StringBuilder largeValue = new StringBuilder();
+    for (int i = 0; i < 100; i++) {
+      largeValue.append("This is a test value that should be compressed. ");
+    }
+
+    // Perform an operation with the large payload
+    try {
+      client.putItem(
+          PutItemRequest.builder()
+              .tableName("nonexistent_table_for_compression_test")
+              .item(
+                  java.util.Map.of(
+                      "ID", AttributeValue.builder().s("compression-test").build(),
+                      "LargeData", AttributeValue.builder().s(largeValue.toString()).build()))
+              .build());
+    } catch (ResourceNotFoundException e) {
+      // Table doesn't exist - that's expected, we just want to verify the request was compressed
+    }
+
+    assertTrue(
+        "Content-Encoding: gzip header should be present for large payloads",
+        compressionHeaderSeen.get());
+
+    client.close();
+  }
+
+  @Test
+  public void testNoCompressionForSmallPayload() throws Exception {
+    // Track if Content-Encoding: gzip header was seen
+    AtomicBoolean compressionHeaderSeen = new AtomicBoolean(false);
+
+    ExecutionInterceptor compressionVerifier =
+        new ExecutionInterceptor() {
+          @Override
+          public void beforeTransmission(
+              Context.BeforeTransmission context, ExecutionAttributes executionAttributes) {
+            context
+                .httpRequest()
+                .firstMatchingHeader("Content-Encoding")
+                .ifPresent(
+                    value -> {
+                      if (value.contains("gzip")) {
+                        compressionHeaderSeen.set(true);
+                      }
+                    });
+          }
+        };
+
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
+            .withMinCompressionSizeBytes(10000) // High threshold - small requests won't compress
+            .build();
+
+    ClientOverrideConfiguration overrideConfig =
+        ClientOverrideConfiguration.builder().addExecutionInterceptor(compressionVerifier).build();
+
+    DynamoDbClient client =
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(seedUri)
+            .credentialsProvider(credentialsProvider)
+            .overrideConfiguration(overrideConfig)
+            .withAlternatorConfig(config)
+            .build();
+
+    // Perform a small operation (listTables request is small)
+    try {
+      client.listTables(ListTablesRequest.builder().build());
+    } catch (Exception e) {
+      // Ignore errors - we just want to check the header
+    }
+
+    assertFalse(
+        "Content-Encoding: gzip header should NOT be present for small payloads",
+        compressionHeaderSeen.get());
 
     client.close();
   }

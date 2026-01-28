@@ -221,3 +221,63 @@ After building with `mvn package`, you can run this demo with the command:
 ```
 mvn exec:java -Dexec.mainClass=com.scylladb.alternator.test.Demo3 -Dexec.classpathScope=test
 ```
+
+### Request Compression
+
+The library supports optional GZIP compression for HTTP request bodies, which can
+reduce network bandwidth usage when sending large payloads to Alternator.
+
+#### Why not use AWS SDK's built-in compression?
+
+AWS SDK for Java v2 includes a `CompressionConfiguration` feature, but it **only works
+for AWS services that have the `@requestCompression` trait** in their service model
+(e.g., CloudWatch's `PutMetricData`). DynamoDB does not support this trait, so the
+SDK's built-in compression cannot be used for DynamoDB or Alternator requests.
+
+This library provides its own compression implementation using an `ExecutionInterceptor`
+that works with any DynamoDB/Alternator operation.
+
+#### Enabling compression
+
+To enable request compression, configure `AlternatorConfig` with a compression algorithm:
+
+```java
+import com.scylladb.alternator.AlternatorConfig;
+import com.scylladb.alternator.AlternatorDynamoDbClient;
+import com.scylladb.alternator.RequestCompressionAlgorithm;
+
+AlternatorConfig config = AlternatorConfig.builder()
+    .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
+    .build();
+
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://127.0.0.1:8043"))
+    .credentialsProvider(myCredentials)
+    .withAlternatorConfig(config)
+    .build();
+```
+
+#### Compression threshold
+
+By default, only requests with bodies >= 1024 bytes (1 KB) are compressed. This avoids
+the overhead of compressing small payloads that may not benefit from compression.
+You can customize this threshold:
+
+```java
+AlternatorConfig config = AlternatorConfig.builder()
+    .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
+    .withMinCompressionSizeBytes(2048)  // Only compress requests >= 2KB
+    .build();
+```
+
+#### When to use compression
+
+Request compression is recommended for:
+- Large item attributes (documents, JSON blobs)
+- Batch operations with many items (`BatchWriteItem`, `BatchGetItem`)
+- Text-heavy data that compresses well
+
+Request compression may not be beneficial for:
+- Small requests (< 1KB)
+- Already-compressed binary data
+- Low-latency requirements where CPU overhead matters

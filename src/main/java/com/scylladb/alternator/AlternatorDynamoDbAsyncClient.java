@@ -471,6 +471,13 @@ public class AlternatorDynamoDbAsyncClient {
         alternatorConfig = AlternatorConfig.builder().build();
       }
 
+      // Apply compression configuration if enabled
+      ClientOverrideConfiguration compressionConfig =
+          alternatorConfig.applyCompressionConfig(delegate.overrideConfiguration());
+      if (compressionConfig != null) {
+        delegate.overrideConfiguration(compressionConfig);
+      }
+
       // Configure async HTTP client to disable certificate checking if requested and no custom
       // client was set
       if (disableCertificateChecks && httpClientSet) {
