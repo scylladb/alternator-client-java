@@ -25,6 +25,10 @@ endif
 
 COMPOSE = bin/docker-compose -f $(MAKEFILE_PATH)/test/docker-compose.yml
 
+SCYLLA_IMAGE := scylladb/scylla:2025.1
+DOCKER_CACHE_DIR := $(MAKEFILE_PATH)/.docker-cache
+DOCKER_CACHE_FILE := $(DOCKER_CACHE_DIR)/scylla-image.tar
+
 .PHONY: clean verify fix compile compile-test test test-unit test-integration release-prepare release release-dry-run
 
 clean:
@@ -94,7 +98,7 @@ release-dry-run:
 	@[ -f "${MAKEFILE_PATH}/test/scylla/db.key" ] || (echo "Prepare certificate" && cd ${MAKEFILE_PATH}/test/scylla/ && openssl req -subj "/C=US/ST=Denial/L=Springfield/O=Dis/CN=www.example.com" -x509 -newkey rsa:4096 -keyout db.key -out db.crt -days 3650 -nodes && chmod 644 db.key)
 
 .PHONY: scylla-start
-scylla-start: .prepare-cert .prepare-docker-compose .prepare-environment-update-aio-max-nr
+scylla-start: .prepare-cert .prepare-docker-compose .prepare-environment-update-aio-max-nr docker-cache-load
 	$(COMPOSE) up -d
 
 .PHONY: scylla-stop
@@ -108,3 +112,26 @@ scylla-kill: .prepare-docker-compose
 .PHONY: scylla-rm
 scylla-rm: .prepare-docker-compose
 	$(COMPOSE) rm -f
+
+.PHONY: docker-pull
+docker-pull:
+	docker pull $(SCYLLA_IMAGE)
+
+.PHONY: docker-cache-save
+docker-cache-save: docker-pull
+	@mkdir -p $(DOCKER_CACHE_DIR)
+	docker save $(SCYLLA_IMAGE) -o $(DOCKER_CACHE_FILE)
+
+.PHONY: docker-cache-load
+docker-cache-load:
+	@if [ -f "$(DOCKER_CACHE_FILE)" ]; then \
+		echo "Loading Docker image from cache..."; \
+		docker load -i $(DOCKER_CACHE_FILE); \
+	else \
+		echo "Cache file not found, pulling image..."; \
+		$(MAKE) docker-pull; \
+	fi
+
+.PHONY: docker-cache-key
+docker-cache-key:
+	@echo "scylla-docker-$(SCYLLA_IMAGE)" | sed 's/:/-/g'

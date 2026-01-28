@@ -99,5 +99,16 @@ jobs:
           java-version: 11
           cache: maven
 
+      - name: Cache Docker image
+        id: docker-cache
+        uses: actions/cache@v4
+        with:
+          path: .docker-cache
+          key: scylla-docker-scylladb-scylla-2025.1
+
+      - name: Save Docker image to cache
+        if: steps.docker-cache.outputs.cache-hit != 'true'
+        run: make docker-cache-save
+
       - name: Run integration tests
         run: make test-integration
