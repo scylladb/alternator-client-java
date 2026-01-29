@@ -380,3 +380,14 @@ When `withAuthenticationEnabled(false)` is set:
 - The client uses anonymous credentials (no AWS signature)
 - When header optimization is enabled, authentication headers (`Authorization`, `X-Amz-Date`)
   are automatically excluded from the whitelist
+
+**Auto-detection:** When using `AlternatorDynamoDbClient` or `AlternatorDynamoDbAsyncClient` builders,
+authentication is automatically detected based on whether `credentialsProvider()` was called. If no
+credentials provider is set, the client automatically uses anonymous credentials:
+
+```java
+// Automatic: no credentials provider = no authentication
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("http://localhost:8000"))
+    .build();
+```
