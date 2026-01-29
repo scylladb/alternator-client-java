@@ -169,8 +169,7 @@ public class AlternatorConfigHeadersTest {
 
   @Test
   public void testAuthenticationDisabled() {
-    AlternatorConfig config =
-        AlternatorConfig.builder().authenticationEnabled(false).build();
+    AlternatorConfig config = AlternatorConfig.builder().authenticationEnabled(false).build();
 
     assertFalse(config.isAuthenticationEnabled());
   }
@@ -178,10 +177,7 @@ public class AlternatorConfigHeadersTest {
   @Test
   public void testAuthenticationDisabledUsesNoAuthWhitelist() {
     AlternatorConfig config =
-        AlternatorConfig.builder()
-            .authenticationEnabled(false)
-            .withOptimizeHeaders(true)
-            .build();
+        AlternatorConfig.builder().authenticationEnabled(false).withOptimizeHeaders(true).build();
 
     Set<String> whitelist = config.getHeadersWhitelist();
 

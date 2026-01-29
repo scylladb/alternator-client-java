@@ -104,9 +104,7 @@ public class Demo3 {
 
     // Build the async client using AlternatorDynamoDbAsyncClient
     AlternatorDynamoDbAsyncClient.AlternatorDynamoDbAsyncClientBuilder b =
-        AlternatorDynamoDbAsyncClient.builder()
-            .region(region)
-            .asyncConfiguration(cas);
+        AlternatorDynamoDbAsyncClient.builder().region(region).asyncConfiguration(cas);
 
     // Set datacenter and rack if specified
     if (datacenter != null && !datacenter.isEmpty()) {

@@ -12,6 +12,7 @@ import java.util.*;
  * (for reproducible sequences) or generated randomly (for non-deterministic behavior).
  *
  * <p>Example usage:
+ *
  * <pre>{@code
  * List<URI> activeNodes = Arrays.asList(uri1, uri2, uri3);
  * List<URI> quarantinedNodes = Arrays.asList(uri4, uri5);
@@ -121,8 +122,8 @@ public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
   }
 
   /**
-   * Returns an iterator over the nodes in this query plan. Note that this returns the same
-   * instance (after resetting), so only one iteration can be active at a time.
+   * Returns an iterator over the nodes in this query plan. Note that this returns the same instance
+   * (after resetting), so only one iteration can be active at a time.
    *
    * @return this query plan as an iterator, reset to the beginning
    */
@@ -133,8 +134,8 @@ public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
   }
 
   /**
-   * Returns a copy of all nodes in this query plan in their shuffled order. This is useful when
-   * you need to examine the full sequence without consuming the iterator.
+   * Returns a copy of all nodes in this query plan in their shuffled order. This is useful when you
+   * need to examine the full sequence without consuming the iterator.
    *
    * @return an unmodifiable list of all nodes in shuffled order (active nodes first, then
    *     quarantined)

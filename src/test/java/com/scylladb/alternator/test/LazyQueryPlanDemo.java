@@ -130,8 +130,8 @@ public class LazyQueryPlanDemo {
       LazyQueryPlan nullActive = new LazyQueryPlan(null, quarantinedNodes);
       System.out.println("ERROR: Should have thrown IllegalArgumentException");
     } catch (IllegalArgumentException e) {
-      System.out.println("Correctly threw IllegalArgumentException for null activeNodes: "
-          + e.getMessage());
+      System.out.println(
+          "Correctly threw IllegalArgumentException for null activeNodes: " + e.getMessage());
     }
 
     try {
@@ -139,7 +139,8 @@ public class LazyQueryPlanDemo {
       exhausted.next();
       System.out.println("ERROR: Should have thrown NoSuchElementException");
     } catch (NoSuchElementException e) {
-      System.out.println("Correctly threw NoSuchElementException when exhausted: " + e.getMessage());
+      System.out.println(
+          "Correctly threw NoSuchElementException when exhausted: " + e.getMessage());
     }
     System.out.println();
 
@@ -170,7 +171,8 @@ public class LazyQueryPlanDemo {
   private static List<URI> createUriList(String prefix, int count) throws URISyntaxException {
     List<URI> uris = new ArrayList<>();
     for (int i = 1; i <= count; i++) {
-      uris.add(new URI("http", null, prefix + "-node" + i + ".example.com", 8000, null, null, null));
+      uris.add(
+          new URI("http", null, prefix + "-node" + i + ".example.com", 8000, null, null, null));
     }
     return uris;
   }

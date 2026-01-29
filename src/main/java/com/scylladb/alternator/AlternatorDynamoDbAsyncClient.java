@@ -4,12 +4,10 @@ import com.scylladb.alternator.internal.AlternatorLiveNodes;
 import java.net.URI;
 import java.util.Collection;
 import java.util.function.Consumer;
-
 import software.amazon.awssdk.auth.credentials.AnonymousCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
 import software.amazon.awssdk.core.client.config.ClientAsyncConfiguration;
 import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
-import software.amazon.awssdk.core.interceptor.ExecutionInterceptor;
 import software.amazon.awssdk.core.internal.http.loader.DefaultSdkAsyncHttpClientBuilder;
 import software.amazon.awssdk.http.SdkHttpConfigurationOption;
 import software.amazon.awssdk.http.async.SdkAsyncHttpClient;
@@ -29,8 +27,8 @@ import software.amazon.awssdk.utils.AttributeMap;
  *
  * <p>The builder implements {@link DynamoDbAsyncClientBuilder}, ensuring compatibility with
  * standard AWS SDK v2 patterns while adding Alternator-specific configuration via methods like
- * {@link AlternatorDynamoDbAsyncClientBuilder#withDatacenter(String)} and
- * {@link AlternatorDynamoDbAsyncClientBuilder#withRack(String)}.
+ * {@link AlternatorDynamoDbAsyncClientBuilder#withDatacenter(String)} and {@link
+ * AlternatorDynamoDbAsyncClientBuilder#withRack(String)}.
  *
  * <p>Example usage:
  *
@@ -58,8 +56,8 @@ import software.amazon.awssdk.utils.AttributeMap;
 public class AlternatorDynamoDbAsyncClient {
 
   /**
-   * Creates a new builder instance using the standard builder pattern, similar to
-   * {@link DynamoDbAsyncClient#builder()}.
+   * Creates a new builder instance using the standard builder pattern, similar to {@link
+   * DynamoDbAsyncClient#builder()}.
    *
    * @return a new {@link AlternatorDynamoDbAsyncClientBuilder} configured for Alternator load
    *     balancing
@@ -79,8 +77,8 @@ public class AlternatorDynamoDbAsyncClient {
    * datacenter/rack configuration, then creates an {@link AlternatorEndpointProvider} during the
    * {@link #build()} phase.
    *
-   * <p>Note: Some AWS-specific features are not supported by Alternator and will throw
-   * {@link UnsupportedOperationException}, including endpoint discovery, FIPS mode, and dual-stack
+   * <p>Note: Some AWS-specific features are not supported by Alternator and will throw {@link
+   * UnsupportedOperationException}, including endpoint discovery, FIPS mode, and dual-stack
    * networking.
    */
   public static class AlternatorDynamoDbAsyncClientBuilder implements DynamoDbAsyncClientBuilder {
@@ -100,8 +98,8 @@ public class AlternatorDynamoDbAsyncClient {
     /**
      * Sets the target datacenter for load balancing.
      *
-     * <p>When specified, only nodes from this datacenter will be used for load balancing.
-     * If not set, all nodes will be used.
+     * <p>When specified, only nodes from this datacenter will be used for load balancing. If not
+     * set, all nodes will be used.
      *
      * @param datacenter the datacenter name
      * @return this builder instance
@@ -114,8 +112,8 @@ public class AlternatorDynamoDbAsyncClient {
     /**
      * Sets the target rack for load balancing.
      *
-     * <p>When specified along with a datacenter, only nodes from this rack will be used
-     * for load balancing.
+     * <p>When specified along with a datacenter, only nodes from this rack will be used for load
+     * balancing.
      *
      * @param rack the rack name
      * @return this builder instance
@@ -149,7 +147,8 @@ public class AlternatorDynamoDbAsyncClient {
      * @return this builder instance
      * @throws IllegalArgumentException if minCompressionSizeBytes is negative
      */
-    public AlternatorDynamoDbAsyncClientBuilder withMinCompressionSizeBytes(int minCompressionSizeBytes) {
+    public AlternatorDynamoDbAsyncClientBuilder withMinCompressionSizeBytes(
+        int minCompressionSizeBytes) {
       configBuilder.withMinCompressionSizeBytes(minCompressionSizeBytes);
       return this;
     }
@@ -157,8 +156,8 @@ public class AlternatorDynamoDbAsyncClient {
     /**
      * Enables or disables HTTP header optimization.
      *
-     * <p>When enabled, outgoing requests will have their HTTP headers filtered to include
-     * only those in the configured whitelist, reducing network traffic overhead.
+     * <p>When enabled, outgoing requests will have their HTTP headers filtered to include only
+     * those in the configured whitelist, reducing network traffic overhead.
      *
      * @param optimizeHeaders true to enable header filtering, false to disable
      * @return this builder instance
@@ -187,9 +186,9 @@ public class AlternatorDynamoDbAsyncClient {
      * certificates. Never use this in production as it makes connections vulnerable to
      * man-in-the-middle attacks.
      *
-     * <p>This method configures the HTTP client to trust all certificates. If you've already
-     * set a custom HTTP client via {@link #httpClient(SdkAsyncHttpClient)} or
-     * {@link #httpClientBuilder(SdkAsyncHttpClient.Builder)}, this method will have no effect.
+     * <p>This method configures the HTTP client to trust all certificates. If you've already set a
+     * custom HTTP client via {@link #httpClient(SdkAsyncHttpClient)} or {@link
+     * #httpClientBuilder(SdkAsyncHttpClient.Builder)}, this method will have no effect.
      *
      * @return this builder instance
      */
@@ -216,8 +215,8 @@ public class AlternatorDynamoDbAsyncClient {
     }
 
     /**
-     * Sets the AWS credentials provider. This method matches
-     * {@link DynamoDbAsyncClientBuilder#credentialsProvider(AwsCredentialsProvider)}.
+     * Sets the AWS credentials provider. This method matches {@link
+     * DynamoDbAsyncClientBuilder#credentialsProvider(AwsCredentialsProvider)}.
      *
      * <p>The credentials are used for authentication with Alternator. Common providers include:
      *
@@ -228,8 +227,8 @@ public class AlternatorDynamoDbAsyncClient {
      *       environment-based credentials
      * </ul>
      *
-     * <p>If no credentials provider is set, the client will automatically use anonymous
-     * credentials and exclude authentication headers when header optimization is enabled.
+     * <p>If no credentials provider is set, the client will automatically use anonymous credentials
+     * and exclude authentication headers when header optimization is enabled.
      *
      * @param credentialsProvider the AWS credentials provider
      * @return this builder instance
@@ -271,8 +270,8 @@ public class AlternatorDynamoDbAsyncClient {
     }
 
     /**
-     * Sets a custom async HTTP client. This method matches
-     * {@link DynamoDbAsyncClientBuilder#httpClient(SdkAsyncHttpClient)}.
+     * Sets a custom async HTTP client. This method matches {@link
+     * DynamoDbAsyncClientBuilder#httpClient(SdkAsyncHttpClient)}.
      *
      * <p>Use this to configure custom HTTP client settings such as connection pooling, timeouts, or
      * proxy settings. If not specified, the AWS SDK will create a default HTTP client.
@@ -288,8 +287,8 @@ public class AlternatorDynamoDbAsyncClient {
     }
 
     /**
-     * Sets a custom async HTTP client builder. This method matches
-     * {@link DynamoDbAsyncClientBuilder#httpClientBuilder(SdkAsyncHttpClient.Builder)}.
+     * Sets a custom async HTTP client builder. This method matches {@link
+     * DynamoDbAsyncClientBuilder#httpClientBuilder(SdkAsyncHttpClient.Builder)}.
      *
      * <p>Use this to configure HTTP client settings using a builder pattern. This is an alternative
      * to {@link #httpClient(SdkAsyncHttpClient)} when you want to customize the HTTP client
@@ -317,8 +316,8 @@ public class AlternatorDynamoDbAsyncClient {
     }
 
     /**
-     * Sets client override configuration. This method matches
-     * {@link DynamoDbAsyncClientBuilder#overrideConfiguration(ClientOverrideConfiguration)}.
+     * Sets client override configuration. This method matches {@link
+     * DynamoDbAsyncClientBuilder#overrideConfiguration(ClientOverrideConfiguration)}.
      *
      * <p>Use this to configure advanced client settings such as:
      *
@@ -340,8 +339,8 @@ public class AlternatorDynamoDbAsyncClient {
     }
 
     /**
-     * Sets client override configuration using a builder consumer. This method matches
-     * {@link DynamoDbAsyncClientBuilder#overrideConfiguration(Consumer)}.
+     * Sets client override configuration using a builder consumer. This method matches {@link
+     * DynamoDbAsyncClientBuilder#overrideConfiguration(Consumer)}.
      *
      * <p>This is a convenience method that allows configuring the override settings inline without
      * creating a separate {@link ClientOverrideConfiguration} instance.
@@ -366,8 +365,8 @@ public class AlternatorDynamoDbAsyncClient {
     }
 
     /**
-     * Sets async client configuration. This method matches
-     * {@link DynamoDbAsyncClientBuilder#asyncConfiguration(ClientAsyncConfiguration)}.
+     * Sets async client configuration. This method matches {@link
+     * DynamoDbAsyncClientBuilder#asyncConfiguration(ClientAsyncConfiguration)}.
      *
      * <p>Use this to configure async-specific settings such as the future completion executor.
      *
@@ -382,8 +381,8 @@ public class AlternatorDynamoDbAsyncClient {
     }
 
     /**
-     * Sets async client configuration using a builder consumer. This method matches
-     * {@link DynamoDbAsyncClientBuilder#asyncConfiguration(Consumer)}.
+     * Sets async client configuration using a builder consumer. This method matches {@link
+     * DynamoDbAsyncClientBuilder#asyncConfiguration(Consumer)}.
      *
      * @param builderConsumer a consumer that configures the async configuration builder
      * @return this builder instance
@@ -398,8 +397,9 @@ public class AlternatorDynamoDbAsyncClient {
     /**
      * This method is not supported by AlternatorDynamoDbAsyncClient.
      *
-     * <p>The endpoint provider is automatically configured to use {@link AlternatorEndpointProvider}
-     * for load balancing. Use {@link #endpointOverride(URI)} to specify the seed endpoint instead.
+     * <p>The endpoint provider is automatically configured to use {@link
+     * AlternatorEndpointProvider} for load balancing. Use {@link #endpointOverride(URI)} to specify
+     * the seed endpoint instead.
      *
      * @param endpointProvider ignored
      * @return never returns
@@ -450,8 +450,8 @@ public class AlternatorDynamoDbAsyncClient {
     /**
      * This method is not supported by AlternatorDynamoDbAsyncClient.
      *
-     * <p>FIPS (Federal Information Processing Standards) mode is an AWS-specific feature that is not
-     * applicable to Alternator.
+     * <p>FIPS (Federal Information Processing Standards) mode is an AWS-specific feature that is
+     * not applicable to Alternator.
      *
      * @param fipsEnabled ignored
      * @return never returns
@@ -498,7 +498,8 @@ public class AlternatorDynamoDbAsyncClient {
      *   <li>Discover all nodes in the Alternator cluster via the {@code /localnodes} API
      *   <li>Distribute requests across discovered nodes using round-robin load balancing
      *   <li>Periodically refresh the node list (every 5 seconds) to handle topology changes
-     *   <li>Filter nodes by datacenter/rack if configured via {@link #withDatacenter} and {@link #withRack}
+     *   <li>Filter nodes by datacenter/rack if configured via {@link #withDatacenter} and {@link
+     *       #withRack}
      * </ul>
      *
      * <p>If you need access to Alternator-specific APIs (such as {@code getLiveNodes()} or {@code
@@ -523,8 +524,8 @@ public class AlternatorDynamoDbAsyncClient {
      * <ul>
      *   <li>{@link AlternatorDynamoDbAsyncClientWrapper#getLiveNodes()} - Get current live nodes
      *   <li>{@link AlternatorDynamoDbAsyncClientWrapper#nextAsURI()} - Get next node in round-robin
-     *   <li>{@link AlternatorDynamoDbAsyncClientWrapper#checkIfRackDatacenterFeatureIsSupported()} -
-     *       Check server capabilities
+     *   <li>{@link AlternatorDynamoDbAsyncClientWrapper#checkIfRackDatacenterFeatureIsSupported()}
+     *       - Check server capabilities
      *   <li>{@link AlternatorDynamoDbAsyncClientWrapper#getAlternatorEndpointProvider()} - Access
      *       the endpoint provider
      * </ul>
@@ -610,7 +611,8 @@ public class AlternatorDynamoDbAsyncClient {
 
       // Build the underlying client and wrap it with Alternator metadata
       DynamoDbAsyncClient client = delegate.build();
-      return new AlternatorDynamoDbAsyncClientWrapper(client, liveNodes, alternatorEndpointProvider);
+      return new AlternatorDynamoDbAsyncClientWrapper(
+          client, liveNodes, alternatorEndpointProvider);
     }
   }
 }

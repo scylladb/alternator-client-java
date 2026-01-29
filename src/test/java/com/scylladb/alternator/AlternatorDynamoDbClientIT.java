@@ -505,7 +505,8 @@ public class AlternatorDynamoDbClientIT {
     }
 
     // Custom whitelist headers should be present
-    assertTrue("User-Agent should be present (custom whitelist)", seenHeaders.contains("User-Agent"));
+    assertTrue(
+        "User-Agent should be present (custom whitelist)", seenHeaders.contains("User-Agent"));
     assertTrue("Host header should be present", seenHeaders.contains("Host"));
 
     // Headers not in custom whitelist should be filtered
@@ -615,7 +616,9 @@ public class AlternatorDynamoDbClientIT {
     }
 
     // Verify both features work together
-    assertTrue("Content-Encoding should be present for compression", seenHeaders.contains("Content-Encoding"));
+    assertTrue(
+        "Content-Encoding should be present for compression",
+        seenHeaders.contains("Content-Encoding"));
     assertTrue("Compression should have been applied", compressionHeaderSeen.get());
 
     // Note: Header filtering happens at HTTP client level (after SDK interceptors run).

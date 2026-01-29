@@ -87,7 +87,8 @@ public class AlternatorDynamoDbClientWrapper implements AutoCloseable {
    * @return true if rack/datacenter filtering is supported, false otherwise
    * @throws AlternatorLiveNodes.FailedToCheck if the check cannot be completed
    */
-  public boolean checkIfRackDatacenterFeatureIsSupported() throws AlternatorLiveNodes.FailedToCheck {
+  public boolean checkIfRackDatacenterFeatureIsSupported()
+      throws AlternatorLiveNodes.FailedToCheck {
     return liveNodes.checkIfRackDatacenterFeatureIsSupported();
   }
 
@@ -111,9 +112,7 @@ public class AlternatorDynamoDbClientWrapper implements AutoCloseable {
     return endpointProvider;
   }
 
-  /**
-   * Closes the underlying DynamoDbClient.
-   */
+  /** Closes the underlying DynamoDbClient. */
   @Override
   public void close() {
     client.close();
