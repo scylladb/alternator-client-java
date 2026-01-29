@@ -1,11 +1,13 @@
 package com.scylladb.alternator;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
-import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
+import software.amazon.awssdk.core.interceptor.ExecutionInterceptor;
 
 /**
  * Configuration class for Alternator load balancing settings. Contains datacenter and rack
@@ -19,9 +21,9 @@ public class AlternatorConfig {
   public static final int DEFAULT_MIN_COMPRESSION_SIZE_BYTES = 1024;
 
   /**
-   * Default set of HTTP headers to preserve when header optimization is enabled.
+   * Base HTTP headers required for proper operation with Alternator.
    *
-   * <p>These headers are required for proper operation with Alternator:
+   * <p>These headers are always required regardless of configuration:
    *
    * <ul>
    *   <li>{@code Host} - Required by HTTP/1.1
@@ -29,44 +31,57 @@ public class AlternatorConfig {
    *   <li>{@code Content-Type} - MIME type for DynamoDB API (application/x-amz-json-1.0)
    *   <li>{@code Content-Length} - Required for request body
    *   <li>{@code Accept-Encoding} - For response compression negotiation
-   *   <li>{@code Content-Encoding} - For request compression (when enabled)
-   *   <li>{@code Authorization} - AWS SigV4 signature
-   *   <li>{@code X-Amz-Date} - Timestamp for AWS signature
-   *   <li>{@code X-Amz-Content-Sha256} - Content hash for AWS SigV4
    * </ul>
    *
    * @since 1.0.6
    */
-  public static final Set<String> DEFAULT_HEADERS_WHITELIST =
+  public static final Set<String> BASE_REQUIRED_HEADERS =
       Collections.unmodifiableSet(
           new HashSet<>(
-              Arrays.asList(
-                  "Host",
-                  "X-Amz-Target",
-                  "Content-Type",
-                  "Content-Length",
-                  "Accept-Encoding",
-                  "Content-Encoding",
-                  "Authorization",
-                  "X-Amz-Date")));
+              Arrays.asList("Host", "X-Amz-Target", "Content-Type", "Content-Length", "Accept-Encoding")));
 
   /**
-   * Default set of HTTP headers to preserve when header optimization is enabled and authentication
-   * is disabled.
+   * HTTP headers required when compression is enabled.
    *
-   * <p>This whitelist excludes authentication headers ({@code Authorization}, {@code X-Amz-Date},
-   * {@code X-Amz-Content-Sha256}) for use with Alternator clusters that have authentication
-   * disabled.
+   * <ul>
+   *   <li>{@code Content-Encoding} - For request compression (e.g., gzip)
+   * </ul>
    *
    * @since 1.0.6
-   * @see #DEFAULT_HEADERS_WHITELIST
    */
-  public static final Set<String> DEFAULT_HEADERS_WHITELIST_NO_AUTH =
-      Collections.unmodifiableSet(
-          new HashSet<>(
-              Arrays.asList(
-                  "Host", "X-Amz-Target", "Content-Type", "Content-Length",
-                  "Accept-Encoding", "Content-Encoding")));
+  public static final Set<String> COMPRESSION_HEADERS =
+      Collections.unmodifiableSet(new HashSet<>(Arrays.asList("Content-Encoding")));
+
+  /**
+   * HTTP headers required when authentication is enabled.
+   *
+   * <ul>
+   *   <li>{@code Authorization} - AWS SigV4 signature
+   *   <li>{@code X-Amz-Date} - Timestamp for AWS signature
+   * </ul>
+   *
+   * @since 1.0.6
+   */
+  public static final Set<String> AUTHENTICATION_HEADERS =
+      Collections.unmodifiableSet(new HashSet<>(Arrays.asList("Authorization", "X-Amz-Date")));
+
+  /**
+   * Computes the set of required HTTP headers based on the given configuration options.
+   *
+   * <p>This is a package-private helper method used internally to compute required headers.
+   *
+   * @return an unmodifiable set of required header names
+   */
+  protected Set<String> computeRequiredHeaders() {
+    Set<String> required = new HashSet<>(BASE_REQUIRED_HEADERS);
+    if (compressionAlgorithm != null && compressionAlgorithm != RequestCompressionAlgorithm.NONE) {
+      required.addAll(COMPRESSION_HEADERS);
+    }
+    if (authenticationEnabled) {
+      required.addAll(AUTHENTICATION_HEADERS);
+    }
+    return Collections.unmodifiableSet(required);
+  }
 
   private final String datacenter;
   private final String rack;
@@ -103,10 +118,13 @@ public class AlternatorConfig {
         minCompressionSizeBytes >= 0 ? minCompressionSizeBytes : DEFAULT_MIN_COMPRESSION_SIZE_BYTES;
     this.optimizeHeaders = optimizeHeaders;
     this.authenticationEnabled = authenticationEnabled;
-    this.headersWhitelist =
-        headersWhitelist != null
-            ? Collections.unmodifiableSet(new HashSet<>(headersWhitelist))
-            : (authenticationEnabled ? DEFAULT_HEADERS_WHITELIST : DEFAULT_HEADERS_WHITELIST_NO_AUTH);
+
+    // Compute default whitelist based on configuration if not provided
+    if (headersWhitelist != null) {
+      this.headersWhitelist = Collections.unmodifiableSet(new HashSet<>(headersWhitelist));
+    } else {
+      this.headersWhitelist = computeRequiredHeaders();
+    }
   }
 
   /**
@@ -201,6 +219,19 @@ public class AlternatorConfig {
   }
 
   /**
+   * Returns the set of HTTP headers required for this configuration.
+   *
+   * <p>This method returns the minimum set of headers needed based on the current settings
+   * (compression algorithm and authentication state).
+   *
+   * @return an unmodifiable set of required header names
+   * @since 1.0.6
+   */
+  public Set<String> getRequiredHeaders() {
+    return computeRequiredHeaders();
+  }
+
+  /**
    * Creates a new builder for AlternatorConfig.
    *
    * @return a new {@link Builder}
@@ -210,104 +241,28 @@ public class AlternatorConfig {
   }
 
   /**
-   * Applies compression configuration to a ClientOverrideConfiguration builder if compression is
-   * enabled in this config.
+   * Returns a list of SDK-level execution interceptors configured for this AlternatorConfig.
    *
-   * <p>This is a helper method used internally by {@link AlternatorDynamoDbClient} and {@link
-   * AlternatorDynamoDbAsyncClient} builders to apply compression settings to the AWS SDK client.
+   * <p>The returned list may include:
    *
-   * <p>When compression is enabled, this adds a {@link GzipRequestInterceptor} that compresses
-   * request bodies exceeding the minimum size threshold.
+   * <ul>
+   *   <li>{@link GzipRequestInterceptor} - if compression is enabled
+   * </ul>
    *
-   * @param existingConfig the existing ClientOverrideConfiguration, or null if none exists
-   * @return a ClientOverrideConfiguration with compression settings applied, or the existing config
-   *     if compression is disabled
-   * @since 1.0.5
-   */
-  public ClientOverrideConfiguration applyCompressionConfig(
-      ClientOverrideConfiguration existingConfig) {
-    if (!compressionAlgorithm.isEnabled()) {
-      return existingConfig;
-    }
-
-    ClientOverrideConfiguration.Builder overrideBuilder;
-    if (existingConfig != null) {
-      overrideBuilder = existingConfig.toBuilder();
-    } else {
-      overrideBuilder = ClientOverrideConfiguration.builder();
-    }
-
-    // Add GZIP compression interceptor
-    overrideBuilder.addExecutionInterceptor(new GzipRequestInterceptor(minCompressionSizeBytes));
-
-    return overrideBuilder.build();
-  }
-
-  /**
-   * Applies header optimization configuration to a ClientOverrideConfiguration builder if header
-   * optimization is enabled in this config.
+   * <p>Note: Header filtering is handled at the HTTP client level (not via SDK interceptors) to
+   * ensure all headers including SDK-internal ones (User-Agent, amz-sdk-request) are filtered.
    *
-   * <p>This is a helper method used internally by {@link AlternatorDynamoDbClient} and {@link
-   * AlternatorDynamoDbAsyncClient} builders to apply header filtering to the AWS SDK client.
-   *
-   * <p>When header optimization is enabled, this adds a {@link HeadersFilterInterceptor} that
-   * removes headers not in the configured whitelist.
-   *
-   * @param existingConfig the existing ClientOverrideConfiguration, or null if none exists
-   * @return a ClientOverrideConfiguration with header filtering applied, or the existing config if
-   *     optimization is disabled
+   * @return a list of execution interceptors, may be empty but never null
    * @since 1.0.6
    */
-  public ClientOverrideConfiguration applyHeadersConfig(
-      ClientOverrideConfiguration existingConfig) {
-    return applyHeadersConfig(existingConfig, authenticationEnabled);
-  }
+  public List<ExecutionInterceptor> getInterceptors() {
+    List<ExecutionInterceptor> interceptors = new ArrayList<>();
 
-  /**
-   * Applies header optimization configuration to a ClientOverrideConfiguration builder if header
-   * optimization is enabled in this config.
-   *
-   * <p>This overload allows explicitly specifying whether authentication is available, which
-   * determines whether authentication headers should be included in the whitelist.
-   *
-   * @param existingConfig the existing ClientOverrideConfiguration, or null if none exists
-   * @param hasAuthentication true if credentials are available, false to exclude auth headers
-   * @return a ClientOverrideConfiguration with header filtering applied, or the existing config if
-   *     optimization is disabled
-   * @since 1.0.6
-   */
-  public ClientOverrideConfiguration applyHeadersConfig(
-      ClientOverrideConfiguration existingConfig, boolean hasAuthentication) {
-    if (!optimizeHeaders) {
-      return existingConfig;
+    if (compressionAlgorithm.isEnabled()) {
+      interceptors.add(new GzipRequestInterceptor(minCompressionSizeBytes));
     }
 
-    ClientOverrideConfiguration.Builder overrideBuilder;
-    if (existingConfig != null) {
-      overrideBuilder = existingConfig.toBuilder();
-    } else {
-      overrideBuilder = ClientOverrideConfiguration.builder();
-    }
-
-    // Determine which whitelist to use:
-    // - If custom whitelist was provided, use it
-    // - Otherwise, use default based on authentication availability
-    Set<String> effectiveWhitelist;
-    if (headersWhitelist != null
-        && !headersWhitelist.equals(DEFAULT_HEADERS_WHITELIST)
-        && !headersWhitelist.equals(DEFAULT_HEADERS_WHITELIST_NO_AUTH)) {
-      // Custom whitelist was provided, use it as-is
-      effectiveWhitelist = headersWhitelist;
-    } else if (hasAuthentication) {
-      effectiveWhitelist = DEFAULT_HEADERS_WHITELIST;
-    } else {
-      effectiveWhitelist = DEFAULT_HEADERS_WHITELIST_NO_AUTH;
-    }
-
-    // Add headers filter interceptor
-    overrideBuilder.addExecutionInterceptor(new HeadersFilterInterceptor(effectiveWhitelist));
-
-    return overrideBuilder.build();
+    return interceptors;
   }
 
   public static class Builder {
@@ -316,11 +271,45 @@ public class AlternatorConfig {
     private RequestCompressionAlgorithm compressionAlgorithm = RequestCompressionAlgorithm.NONE;
     private int minCompressionSizeBytes = DEFAULT_MIN_COMPRESSION_SIZE_BYTES;
     private boolean optimizeHeaders = false;
-    private Set<String> headersWhitelist = null; // null means use default based on authenticationEnabled
+    private Set<String> headersWhitelist = null; // null means use default based on config
+    private boolean headersWhitelistWasSet = false;
     private boolean authenticationEnabled = true;
 
     /** Package-private constructor. Use {@link AlternatorConfig#builder()} to create instances. */
     Builder() {}
+
+    /**
+     * Returns the set of HTTP headers required for the current configuration.
+     *
+     * <p>This method computes the minimum set of headers needed based on the current builder
+     * settings (compression algorithm and authentication state). Use this to understand what
+     * headers must be included when providing a custom whitelist.
+     *
+     * <p>Example:
+     *
+     * <pre>{@code
+     * AlternatorConfig.Builder builder = AlternatorConfig.builder()
+     *     .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
+     *     .withAuthenticationEnabled(true);
+     *
+     * Set<String> required = builder.getRequiredHeaders();
+     * // required contains: Host, X-Amz-Target, Content-Type, Content-Length,
+     * //                    Accept-Encoding, Content-Encoding, Authorization, X-Amz-Date
+     * }</pre>
+     *
+     * @return an unmodifiable set of required header names for the current configuration
+     * @since 1.0.6
+     */
+    public Set<String> getRequiredHeaders() {
+      Set<String> required = new HashSet<>(BASE_REQUIRED_HEADERS);
+      if (compressionAlgorithm != null && compressionAlgorithm.isEnabled()) {
+        required.addAll(COMPRESSION_HEADERS);
+      }
+      if (authenticationEnabled) {
+        required.addAll(AUTHENTICATION_HEADERS);
+      }
+      return Collections.unmodifiableSet(required);
+    }
 
     /**
      * Sets the target datacenter. When specified, only nodes from this datacenter will be used for
@@ -390,14 +379,9 @@ public class AlternatorConfig {
      *
      * @param minCompressionSizeBytes minimum request size in bytes, must be non-negative
      * @return this builder instance
-     * @throws IllegalArgumentException if minCompressionSizeBytes is negative
      * @since 1.0.5
      */
     public Builder withMinCompressionSizeBytes(int minCompressionSizeBytes) {
-      if (minCompressionSizeBytes < 0) {
-        throw new IllegalArgumentException(
-            "minCompressionSizeBytes must be non-negative, but was: " + minCompressionSizeBytes);
-      }
       this.minCompressionSizeBytes = minCompressionSizeBytes;
       return this;
     }
@@ -434,32 +418,36 @@ public class AlternatorConfig {
      * <p>Only headers in this list will be sent with requests when header optimization is enabled.
      * All other headers will be removed. Header names are matched case-insensitively per RFC 7230.
      *
-     * <p>Default: {@link AlternatorConfig#DEFAULT_HEADERS_WHITELIST} when authentication is enabled,
-     * or {@link AlternatorConfig#DEFAULT_HEADERS_WHITELIST_NO_AUTH} when authentication is disabled.
+     * <p>The provided whitelist must include all headers required for the current configuration.
+     * Use {@link #getRequiredHeaders()} to see which headers are required. If required headers
+     * are missing, an {@link IllegalArgumentException} will be thrown at build time.
+     *
+     * <p>Default: Computed automatically based on compression and authentication settings.
+     * See {@link AlternatorConfig#getRequiredHeaders()}.
      *
      * <p>Example:
      *
      * <pre>{@code
-     * AlternatorConfig config = AlternatorConfig.builder()
-     *     .withOptimizeHeaders(true)
-     *     .withHeadersWhitelist(Arrays.asList(
-     *         "Host", "Authorization", "X-Amz-Date", "X-Amz-Target",
-     *         "Content-Length", "Content-Encoding", "X-Custom-Header"))
+     * AlternatorConfig.Builder builder = AlternatorConfig.builder()
+     *     .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
+     *     .withOptimizeHeaders(true);
+     *
+     * // Get required headers and add custom ones
+     * Set<String> whitelist = new HashSet<>(builder.getRequiredHeaders());
+     * whitelist.add("X-Custom-Header");
+     *
+     * AlternatorConfig config = builder
+     *     .withHeadersWhitelist(whitelist)
      *     .build();
      * }</pre>
      *
-     * @param headers collection of header names to preserve (case-insensitive)
+     * @param headers collection of header names to preserve (case-insensitive), must not be null
      * @return this builder instance
-     * @throws IllegalArgumentException if headers is null or empty
      * @since 1.0.6
      */
     public Builder withHeadersWhitelist(Collection<String> headers) {
-      if (headers == null || headers.isEmpty()) {
-        throw new IllegalArgumentException(
-            "headersWhitelist cannot be null or empty. "
-                + "To disable optimization, use withOptimizeHeaders(false)");
-      }
-      this.headersWhitelist = new HashSet<>(headers);
+      this.headersWhitelist = headers != null ? new HashSet<>(headers) : null;
+      this.headersWhitelistWasSet = true;
       return this;
     }
 
@@ -507,8 +495,45 @@ public class AlternatorConfig {
      * Builds and returns an {@link AlternatorConfig} instance with the configured settings.
      *
      * @return a new {@link AlternatorConfig} instance
+     * @throws IllegalArgumentException if minCompressionSizeBytes is negative, or if
+     *     headersWhitelist is empty or missing required headers
      */
     public AlternatorConfig build() {
+      // Validate minCompressionSizeBytes
+      if (minCompressionSizeBytes < 0) {
+        throw new IllegalArgumentException(
+            "minCompressionSizeBytes must be non-negative, but was: " + minCompressionSizeBytes);
+      }
+
+      // Validate headersWhitelist if it was explicitly set
+      if (headersWhitelistWasSet) {
+        if (headersWhitelist == null || headersWhitelist.isEmpty()) {
+          throw new IllegalArgumentException(
+              "headersWhitelist cannot be null or empty. "
+                  + "To disable optimization, use withOptimizeHeaders(false)");
+        }
+
+        // Validate that all required headers are present (case-insensitive)
+        Set<String> required = getRequiredHeaders();
+        Set<String> headersLowerCase = new HashSet<>();
+        for (String h : headersWhitelist) {
+          headersLowerCase.add(h.toLowerCase());
+        }
+
+        Set<String> missing = new HashSet<>();
+        for (String requiredHeader : required) {
+          if (!headersLowerCase.contains(requiredHeader.toLowerCase())) {
+            missing.add(requiredHeader);
+          }
+        }
+
+        if (!missing.isEmpty()) {
+          throw new IllegalArgumentException(
+              "Custom headers whitelist is missing required headers: " + missing + ". "
+                  + "Use getRequiredHeaders() to see all required headers for the current configuration.");
+        }
+      }
+
       return new AlternatorConfig(
           datacenter,
           rack,

@@ -19,7 +19,8 @@ public class AlternatorConfigHeadersTest {
     AlternatorConfig config = AlternatorConfig.builder().build();
 
     assertFalse(config.isOptimizeHeaders());
-    assertEquals(AlternatorConfig.DEFAULT_HEADERS_WHITELIST, config.getHeadersWhitelist());
+    // Without compression, Content-Encoding is not required
+    assertEquals(config.getRequiredHeaders(), config.getHeadersWhitelist());
   }
 
   @Test
@@ -27,12 +28,16 @@ public class AlternatorConfigHeadersTest {
     AlternatorConfig config = AlternatorConfig.builder().withOptimizeHeaders(true).build();
 
     assertTrue(config.isOptimizeHeaders());
-    assertEquals(AlternatorConfig.DEFAULT_HEADERS_WHITELIST, config.getHeadersWhitelist());
+    // Without compression, Content-Encoding is not required
+    assertEquals(config.getRequiredHeaders(), config.getHeadersWhitelist());
   }
 
   @Test
   public void testCustomHeadersWhitelist() {
-    Set<String> customHeaders = new HashSet<>(Arrays.asList("Host", "Authorization", "X-Custom"));
+    // Get required headers first, then add custom ones
+    Set<String> requiredHeaders = AlternatorConfig.builder().getRequiredHeaders();
+    Set<String> customHeaders = new HashSet<>(requiredHeaders);
+    customHeaders.add("X-Custom");
 
     AlternatorConfig config =
         AlternatorConfig.builder()
@@ -56,7 +61,9 @@ public class AlternatorConfigHeadersTest {
 
   @Test
   public void testHeadersWhitelistIsImmutable() {
-    Set<String> customHeaders = new HashSet<>(Arrays.asList("Host", "Authorization"));
+    // Get required headers first, then add custom ones
+    Set<String> requiredHeaders = AlternatorConfig.builder().getRequiredHeaders();
+    Set<String> customHeaders = new HashSet<>(requiredHeaders);
 
     AlternatorConfig config =
         AlternatorConfig.builder()
@@ -81,7 +88,8 @@ public class AlternatorConfigHeadersTest {
     assertEquals("us-east", config.getDatacenter());
     assertEquals("rack1", config.getRack());
     assertTrue(config.isOptimizeHeaders());
-    assertEquals(AlternatorConfig.DEFAULT_HEADERS_WHITELIST, config.getHeadersWhitelist());
+    // Without compression, Content-Encoding is not required
+    assertEquals(config.getRequiredHeaders(), config.getHeadersWhitelist());
   }
 
   @Test
@@ -94,6 +102,9 @@ public class AlternatorConfigHeadersTest {
 
     assertEquals(RequestCompressionAlgorithm.GZIP, config.getCompressionAlgorithm());
     assertTrue(config.isOptimizeHeaders());
+    // With compression, Content-Encoding should be included
+    assertTrue(config.getHeadersWhitelist().contains("Content-Encoding"));
+    assertTrue(config.getRequiredHeaders().contains("Content-Encoding"));
   }
 
   @Test
@@ -106,7 +117,8 @@ public class AlternatorConfigHeadersTest {
     assertEquals("rack1", config.getRack());
     // Headers optimization defaults to disabled
     assertFalse(config.isOptimizeHeaders());
-    assertEquals(AlternatorConfig.DEFAULT_HEADERS_WHITELIST, config.getHeadersWhitelist());
+    // Default whitelist is based on current config (no compression, with auth)
+    assertEquals(config.getRequiredHeaders(), config.getHeadersWhitelist());
   }
 
   @Test
@@ -117,26 +129,32 @@ public class AlternatorConfigHeadersTest {
   }
 
   @Test
-  public void testDefaultHeadersWhitelistContents() {
-    // Verify the default whitelist contains expected headers
-    Set<String> defaultHeaders = AlternatorConfig.DEFAULT_HEADERS_WHITELIST;
+  public void testFullHeadersWhitelistContents() {
+    // Config with compression=true, auth=true should have all headers
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
+            .withAuthenticationEnabled(true)
+            .build();
+    Set<String> headers = config.getRequiredHeaders();
 
-    assertTrue(defaultHeaders.contains("Host"));
-    assertTrue(defaultHeaders.contains("X-Amz-Target"));
-    assertTrue(defaultHeaders.contains("Content-Type"));
-    assertTrue(defaultHeaders.contains("Content-Length"));
-    assertTrue(defaultHeaders.contains("Accept-Encoding"));
-    assertTrue(defaultHeaders.contains("Content-Encoding"));
-    assertTrue(defaultHeaders.contains("Authorization"));
-    assertTrue(defaultHeaders.contains("X-Amz-Date"));
-    assertEquals(8, defaultHeaders.size());
+    assertTrue(headers.contains("Host"));
+    assertTrue(headers.contains("X-Amz-Target"));
+    assertTrue(headers.contains("Content-Type"));
+    assertTrue(headers.contains("Content-Length"));
+    assertTrue(headers.contains("Accept-Encoding"));
+    assertTrue(headers.contains("Content-Encoding"));
+    assertTrue(headers.contains("Authorization"));
+    assertTrue(headers.contains("X-Amz-Date"));
+    assertEquals(8, headers.size());
   }
 
   @Test
-  public void testDefaultHeadersWhitelistIsImmutable() {
+  public void testRequiredHeadersIsImmutable() {
+    AlternatorConfig config = AlternatorConfig.builder().build();
     try {
-      AlternatorConfig.DEFAULT_HEADERS_WHITELIST.add("X-Should-Fail");
-      fail("DEFAULT_HEADERS_WHITELIST should be immutable");
+      config.getRequiredHeaders().add("X-Should-Fail");
+      fail("getRequiredHeaders() should return immutable set");
     } catch (UnsupportedOperationException e) {
       // Expected
     }
@@ -167,19 +185,25 @@ public class AlternatorConfigHeadersTest {
 
     Set<String> whitelist = config.getHeadersWhitelist();
 
-    // Should use the no-auth whitelist by default
+    // Should use the computed whitelist based on config (no compression, no auth)
     assertTrue(whitelist.contains("Host"));
     assertTrue(whitelist.contains("X-Amz-Target"));
     assertTrue(whitelist.contains("Content-Type"));
     assertTrue(whitelist.contains("Content-Length"));
     assertFalse(whitelist.contains("Authorization"));
     assertFalse(whitelist.contains("X-Amz-Date"));
-    assertEquals(AlternatorConfig.DEFAULT_HEADERS_WHITELIST_NO_AUTH, whitelist);
+    // Without compression enabled, Content-Encoding is not included
+    assertFalse(whitelist.contains("Content-Encoding"));
+    assertEquals(config.getRequiredHeaders(), whitelist);
   }
 
   @Test
   public void testAuthenticationDisabledWithCustomWhitelist() {
-    Set<String> customHeaders = new HashSet<>(Arrays.asList("Host", "X-Custom"));
+    // Get required headers for no-auth config
+    Set<String> requiredHeaders =
+        AlternatorConfig.builder().withAuthenticationEnabled(false).getRequiredHeaders();
+    Set<String> customHeaders = new HashSet<>(requiredHeaders);
+    customHeaders.add("X-Custom");
 
     AlternatorConfig config =
         AlternatorConfig.builder()
@@ -188,13 +212,19 @@ public class AlternatorConfigHeadersTest {
             .withHeadersWhitelist(customHeaders)
             .build();
 
-    // Custom whitelist should override the default no-auth whitelist
+    // Custom whitelist should override the default
     assertEquals(customHeaders, config.getHeadersWhitelist());
   }
 
   @Test
-  public void testDefaultHeadersWhitelistNoAuthContents() {
-    Set<String> noAuthHeaders = AlternatorConfig.DEFAULT_HEADERS_WHITELIST_NO_AUTH;
+  public void testHeadersWhitelistNoAuthContents() {
+    // Config with compression=true, auth=false
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
+            .withAuthenticationEnabled(false)
+            .build();
+    Set<String> noAuthHeaders = config.getRequiredHeaders();
 
     assertTrue(noAuthHeaders.contains("Host"));
     assertTrue(noAuthHeaders.contains("X-Amz-Target"));
@@ -205,5 +235,108 @@ public class AlternatorConfigHeadersTest {
     assertFalse(noAuthHeaders.contains("Authorization"));
     assertFalse(noAuthHeaders.contains("X-Amz-Date"));
     assertEquals(6, noAuthHeaders.size());
+  }
+
+  @Test
+  public void testComputeRequiredHeadersVariations() {
+    // Test the internal helper via built configs
+    AlternatorConfig noCompressionNoAuth =
+        AlternatorConfig.builder()
+            .withCompressionAlgorithm(RequestCompressionAlgorithm.NONE)
+            .withAuthenticationEnabled(false)
+            .build();
+    assertEquals(5, noCompressionNoAuth.getRequiredHeaders().size());
+    assertFalse(noCompressionNoAuth.getRequiredHeaders().contains("Content-Encoding"));
+    assertFalse(noCompressionNoAuth.getRequiredHeaders().contains("Authorization"));
+
+    AlternatorConfig withCompressionNoAuth =
+        AlternatorConfig.builder()
+            .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
+            .withAuthenticationEnabled(false)
+            .build();
+    assertEquals(6, withCompressionNoAuth.getRequiredHeaders().size());
+    assertTrue(withCompressionNoAuth.getRequiredHeaders().contains("Content-Encoding"));
+    assertFalse(withCompressionNoAuth.getRequiredHeaders().contains("Authorization"));
+
+    AlternatorConfig noCompressionWithAuth =
+        AlternatorConfig.builder()
+            .withCompressionAlgorithm(RequestCompressionAlgorithm.NONE)
+            .withAuthenticationEnabled(true)
+            .build();
+    assertEquals(7, noCompressionWithAuth.getRequiredHeaders().size());
+    assertFalse(noCompressionWithAuth.getRequiredHeaders().contains("Content-Encoding"));
+    assertTrue(noCompressionWithAuth.getRequiredHeaders().contains("Authorization"));
+
+    AlternatorConfig withCompressionWithAuth =
+        AlternatorConfig.builder()
+            .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
+            .withAuthenticationEnabled(true)
+            .build();
+    assertEquals(8, withCompressionWithAuth.getRequiredHeaders().size());
+    assertTrue(withCompressionWithAuth.getRequiredHeaders().contains("Content-Encoding"));
+    assertTrue(withCompressionWithAuth.getRequiredHeaders().contains("Authorization"));
+  }
+
+  @Test
+  public void testBuilderGetRequiredHeaders() {
+    // Test builder's getRequiredHeaders method
+    AlternatorConfig.Builder builder = AlternatorConfig.builder();
+    Set<String> defaultRequired = builder.getRequiredHeaders();
+    // Default is no compression, with auth
+    assertEquals(7, defaultRequired.size());
+    assertFalse(defaultRequired.contains("Content-Encoding"));
+    assertTrue(defaultRequired.contains("Authorization"));
+
+    // Enable compression
+    builder.withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP);
+    Set<String> withCompression = builder.getRequiredHeaders();
+    assertEquals(8, withCompression.size());
+    assertTrue(withCompression.contains("Content-Encoding"));
+
+    // Disable auth
+    builder.withAuthenticationEnabled(false);
+    Set<String> noAuth = builder.getRequiredHeaders();
+    assertEquals(6, noAuth.size());
+    assertTrue(noAuth.contains("Content-Encoding"));
+    assertFalse(noAuth.contains("Authorization"));
+  }
+
+  @Test
+  public void testConfigGetRequiredHeaders() {
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
+            .withAuthenticationEnabled(true)
+            .build();
+
+    Set<String> required = config.getRequiredHeaders();
+    assertEquals(8, required.size());
+    assertTrue(required.contains("Content-Encoding"));
+    assertTrue(required.contains("Authorization"));
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testCustomWhitelistMissingRequiredHeadersThrows() {
+    // This should throw because we're missing required headers
+    Set<String> incompleteHeaders = new HashSet<>(Arrays.asList("Host", "Authorization"));
+
+    AlternatorConfig.builder()
+        .withOptimizeHeaders(true)
+        .withHeadersWhitelist(incompleteHeaders)
+        .build();
+  }
+
+  @Test
+  public void testCustomWhitelistWithAllRequiredHeadersSucceeds() {
+    Set<String> requiredHeaders = AlternatorConfig.builder().getRequiredHeaders();
+
+    // Adding all required headers should work
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withOptimizeHeaders(true)
+            .withHeadersWhitelist(requiredHeaders)
+            .build();
+
+    assertEquals(requiredHeaders, config.getHeadersWhitelist());
   }
 }
