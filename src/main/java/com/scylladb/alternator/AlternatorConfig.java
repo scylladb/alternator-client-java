@@ -14,9 +14,7 @@ import java.util.Set;
  * @since 1.0.5
  */
 public class AlternatorConfig {
-  /**
-   * Default minimum request body size (in bytes) that triggers compression.
-   */
+  /** Default minimum request body size (in bytes) that triggers compression. */
   public static final int DEFAULT_MIN_COMPRESSION_SIZE_BYTES = 1024;
 
   /**
@@ -37,7 +35,8 @@ public class AlternatorConfig {
   public static final Set<String> BASE_REQUIRED_HEADERS =
       Collections.unmodifiableSet(
           new HashSet<>(
-              Arrays.asList("Host", "X-Amz-Target", "Content-Type", "Content-Length", "Accept-Encoding")));
+              Arrays.asList(
+                  "Host", "X-Amz-Target", "Content-Type", "Content-Length", "Accept-Encoding")));
 
   /**
    * HTTP headers required when compression is enabled.
@@ -75,13 +74,13 @@ public class AlternatorConfig {
   /**
    * Package-private constructor. Use {@link AlternatorConfig#builder()} to create instances.
    *
-   * @param datacenter              the datacenter name
-   * @param rack                    the rack name
-   * @param compressionAlgorithm    the compression algorithm to use
+   * @param datacenter the datacenter name
+   * @param rack the rack name
+   * @param compressionAlgorithm the compression algorithm to use
    * @param minCompressionSizeBytes minimum request size in bytes to trigger compression
-   * @param optimizeHeaders         whether to enable HTTP header optimization
-   * @param headersWhitelist        the set of headers to preserve when optimization is enabled
-   * @param authenticationEnabled   whether authentication is enabled
+   * @param optimizeHeaders whether to enable HTTP header optimization
+   * @param headersWhitelist the set of headers to preserve when optimization is enabled
+   * @param authenticationEnabled whether authentication is enabled
    */
   protected AlternatorConfig(
       String datacenter,
@@ -187,8 +186,8 @@ public class AlternatorConfig {
    * Checks if authentication is enabled.
    *
    * <p>When authentication is disabled, the client will use anonymous credentials and exclude
-   * authentication headers ({@code Authorization}, {@code X-Amz-Date}, {@code X-Amz-Content-Sha256})
-   * from requests when header optimization is enabled.
+   * authentication headers ({@code Authorization}, {@code X-Amz-Date}, {@code
+   * X-Amz-Content-Sha256}) from requests when header optimization is enabled.
    *
    * <p>This is useful when connecting to Alternator clusters that have authentication disabled.
    *
@@ -238,11 +237,8 @@ public class AlternatorConfig {
     private boolean headersWhitelistWasSet = false;
     private boolean authenticationEnabled = true;
 
-    /**
-     * Package-private constructor. Use {@link AlternatorConfig#builder()} to create instances.
-     */
-    Builder() {
-    }
+    /** Package-private constructor. Use {@link AlternatorConfig#builder()} to create instances. */
+    Builder() {}
 
     /**
      * Sets whether authentication is enabled. Package-private - authentication is auto-detected
@@ -332,8 +328,7 @@ public class AlternatorConfig {
      * @since 1.0.5
      */
     public Builder withCompressionAlgorithm(RequestCompressionAlgorithm algorithm) {
-      this.compressionAlgorithm =
-          algorithm != null ? algorithm : RequestCompressionAlgorithm.NONE;
+      this.compressionAlgorithm = algorithm != null ? algorithm : RequestCompressionAlgorithm.NONE;
       return this;
     }
 
@@ -396,11 +391,11 @@ public class AlternatorConfig {
      * All other headers will be removed. Header names are matched case-insensitively per RFC 7230.
      *
      * <p>The provided whitelist must include all headers required for the current configuration.
-     * Use {@link #getRequiredHeaders()} to see which headers are required. If required headers
-     * are missing, an {@link IllegalArgumentException} will be thrown at build time.
+     * Use {@link #getRequiredHeaders()} to see which headers are required. If required headers are
+     * missing, an {@link IllegalArgumentException} will be thrown at build time.
      *
-     * <p>Default: Computed automatically based on compression and authentication settings.
-     * See {@link AlternatorConfig#getRequiredHeaders()}.
+     * <p>Default: Computed automatically based on compression and authentication settings. See
+     * {@link AlternatorConfig#getRequiredHeaders()}.
      *
      * <p>Example:
      *
@@ -466,7 +461,9 @@ public class AlternatorConfig {
 
         if (!missing.isEmpty()) {
           throw new IllegalArgumentException(
-              "Custom headers whitelist is missing required headers: " + missing + ". "
+              "Custom headers whitelist is missing required headers: "
+                  + missing
+                  + ". "
                   + "Use getRequiredHeaders() to see all required headers for the current configuration.");
         }
       }

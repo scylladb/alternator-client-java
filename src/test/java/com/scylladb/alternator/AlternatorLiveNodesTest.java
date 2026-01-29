@@ -25,10 +25,11 @@ public class AlternatorLiveNodesTest {
 
   @Test
   public void testConstructorWithMultipleNodes() throws URISyntaxException {
-    List<URI> nodes = Arrays.asList(
-        new URI("http://node1.example.com:8000"),
-        new URI("http://node2.example.com:8000"),
-        new URI("http://node3.example.com:8000"));
+    List<URI> nodes =
+        Arrays.asList(
+            new URI("http://node1.example.com:8000"),
+            new URI("http://node2.example.com:8000"),
+            new URI("http://node3.example.com:8000"));
     AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(nodes, "http", 8000, "", "");
     assertNotNull(liveNodes);
   }
@@ -45,10 +46,11 @@ public class AlternatorLiveNodesTest {
 
   @Test
   public void testNextAsURIRoundRobin() throws URISyntaxException {
-    List<URI> nodes = Arrays.asList(
-        new URI("http://node1.example.com:8000"),
-        new URI("http://node2.example.com:8000"),
-        new URI("http://node3.example.com:8000"));
+    List<URI> nodes =
+        Arrays.asList(
+            new URI("http://node1.example.com:8000"),
+            new URI("http://node2.example.com:8000"),
+            new URI("http://node3.example.com:8000"));
     AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(nodes, "http", 8000, "", "");
 
     Set<URI> returnedNodes = new HashSet<>();
@@ -74,9 +76,9 @@ public class AlternatorLiveNodesTest {
 
   @Test
   public void testGetLiveNodes() throws URISyntaxException {
-    List<URI> nodes = Arrays.asList(
-        new URI("http://node1.example.com:8000"),
-        new URI("http://node2.example.com:8000"));
+    List<URI> nodes =
+        Arrays.asList(
+            new URI("http://node1.example.com:8000"), new URI("http://node2.example.com:8000"));
     AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(nodes, "http", 8000, "", "");
 
     List<URI> result = liveNodes.getLiveNodes();
@@ -102,10 +104,11 @@ public class AlternatorLiveNodesTest {
 
   @Test
   public void testNewQueryPlan() throws URISyntaxException {
-    List<URI> nodes = Arrays.asList(
-        new URI("http://node1.example.com:8000"),
-        new URI("http://node2.example.com:8000"),
-        new URI("http://node3.example.com:8000"));
+    List<URI> nodes =
+        Arrays.asList(
+            new URI("http://node1.example.com:8000"),
+            new URI("http://node2.example.com:8000"),
+            new URI("http://node3.example.com:8000"));
     AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(nodes, "http", 8000, "", "");
 
     LazyQueryPlan plan = liveNodes.newQueryPlan();
@@ -123,10 +126,11 @@ public class AlternatorLiveNodesTest {
 
   @Test
   public void testNewQueryPlanWithSeed() throws URISyntaxException {
-    List<URI> nodes = Arrays.asList(
-        new URI("http://node1.example.com:8000"),
-        new URI("http://node2.example.com:8000"),
-        new URI("http://node3.example.com:8000"));
+    List<URI> nodes =
+        Arrays.asList(
+            new URI("http://node1.example.com:8000"),
+            new URI("http://node2.example.com:8000"),
+            new URI("http://node3.example.com:8000"));
     AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(nodes, "http", 8000, "", "");
 
     long seed = 42L;
@@ -148,14 +152,15 @@ public class AlternatorLiveNodesTest {
 
   @Test
   public void testNewQueryPlanWithQuarantinedNodes() throws URISyntaxException {
-    List<URI> nodes = Arrays.asList(
-        new URI("http://node1.example.com:8000"),
-        new URI("http://node2.example.com:8000"));
+    List<URI> nodes =
+        Arrays.asList(
+            new URI("http://node1.example.com:8000"), new URI("http://node2.example.com:8000"));
     AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(nodes, "http", 8000, "", "");
 
-    List<URI> quarantined = Arrays.asList(
-        new URI("http://quarantined1.example.com:8000"),
-        new URI("http://quarantined2.example.com:8000"));
+    List<URI> quarantined =
+        Arrays.asList(
+            new URI("http://quarantined1.example.com:8000"),
+            new URI("http://quarantined2.example.com:8000"));
 
     LazyQueryPlan plan = liveNodes.newQueryPlan(quarantined);
 

@@ -255,7 +255,8 @@ public class LazyQueryPlanTest {
   private List<URI> createUriList(String prefix, int count) throws URISyntaxException {
     List<URI> uris = new ArrayList<>();
     for (int i = 1; i <= count; i++) {
-      uris.add(new URI("http", null, prefix + "-node" + i + ".example.com", 8000, null, null, null));
+      uris.add(
+          new URI("http", null, prefix + "-node" + i + ".example.com", 8000, null, null, null));
     }
     return uris;
   }

@@ -62,8 +62,7 @@ public class AlternatorConfigCompressionTest {
 
   @Test
   public void testNullCompressionAlgorithmDefaultsToNone() {
-    AlternatorConfig config =
-        AlternatorConfig.builder().withCompressionAlgorithm(null).build();
+    AlternatorConfig config = AlternatorConfig.builder().withCompressionAlgorithm(null).build();
 
     assertEquals(RequestCompressionAlgorithm.NONE, config.getCompressionAlgorithm());
     assertFalse(config.getCompressionAlgorithm().isEnabled());

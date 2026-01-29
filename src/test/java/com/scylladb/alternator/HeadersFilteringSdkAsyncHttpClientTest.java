@@ -170,8 +170,7 @@ public class HeadersFilteringSdkAsyncHttpClientTest {
   @Test
   public void testFiltersAllSdkMetadataHeaders() {
     // Use the default required headers whitelist
-    AlternatorConfig config =
-        AlternatorConfig.builder().authenticationEnabled(true).build();
+    AlternatorConfig config = AlternatorConfig.builder().authenticationEnabled(true).build();
     Set<String> whitelist = config.getRequiredHeaders();
 
     MockSdkAsyncHttpClient mockClient = new MockSdkAsyncHttpClient();
@@ -437,10 +436,7 @@ public class HeadersFilteringSdkAsyncHttpClientTest {
 
     MockResponseHandler handler = new MockResponseHandler();
     AsyncExecuteRequest executeRequest =
-        AsyncExecuteRequest.builder()
-            .request(originalRequest)
-            .responseHandler(handler)
-            .build();
+        AsyncExecuteRequest.builder().request(originalRequest).responseHandler(handler).build();
 
     filteringClient.execute(executeRequest);
 

@@ -31,7 +31,7 @@ DOCKER_CACHE_FILE := $(DOCKER_CACHE_DIR)/scylla-image.tar
 CERT_CACHE_DIR := $(MAKEFILE_PATH)/.cert-cache
 CERT_DIR := $(MAKEFILE_PATH)/test/scylla
 
-.PHONY: clean verify fix compile compile-test test test-unit test-integration release-prepare release release-dry-run
+.PHONY: clean verify lint lint-fix compile compile-test test test-unit test-integration release-prepare release release-dry-run
 
 clean:
 	${mvn} clean
@@ -41,10 +41,11 @@ verify:
 	${mvn} javadoc:test-javadoc javadoc:test-aggregate javadoc:test-aggregate-jar javadoc:test-jar javadoc:test-resource-bundle
 	${mvn} javadoc:jar javadoc:aggregate javadoc:aggregate-jar javadoc:resource-bundle
 
-fix:
-	${mvn} com.coveo:fmt-maven-plugin:format
-	echo y | ${mvn} javadoc:fix
-	echo y | ${mvn} javadoc:test-fix
+lint:
+	${mvn} com.spotify.fmt:fmt-maven-plugin:check
+
+lint-fix:
+	${mvn} com.spotify.fmt:fmt-maven-plugin:format
 
 compile:
 	${mvn} compile
