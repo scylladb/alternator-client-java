@@ -86,6 +86,7 @@ public class AlternatorDynamoDbAsyncClient {
     private Region region;
     private boolean disableCertificateChecks = false;
     private boolean httpClientSet = false;
+    private boolean credentialsProviderSet = false;
 
     private AlternatorDynamoDbAsyncClientBuilder() {
       this.delegate = DynamoDbAsyncClient.builder();
@@ -162,12 +163,18 @@ public class AlternatorDynamoDbAsyncClient {
      *       environment-based credentials
      * </ul>
      *
+     * <p>If no credentials provider is set, the client will automatically use anonymous
+     * credentials and exclude authentication headers when header optimization is enabled.
+     *
      * @param credentialsProvider the AWS credentials provider
      * @return this builder instance
      */
     @Override
     public AlternatorDynamoDbAsyncClientBuilder credentialsProvider(
         AwsCredentialsProvider credentialsProvider) {
+      if (credentialsProvider != null) {
+        this.credentialsProviderSet = true;
+      }
       delegate.credentialsProvider(credentialsProvider);
       return this;
     }
@@ -472,6 +479,9 @@ public class AlternatorDynamoDbAsyncClient {
         alternatorConfig = AlternatorConfig.builder().build();
       }
 
+      // Determine if authentication is available (credentials were explicitly provided)
+      boolean hasAuthentication = credentialsProviderSet;
+
       // Apply compression configuration if enabled
       ClientOverrideConfiguration compressionConfig =
           alternatorConfig.applyCompressionConfig(delegate.overrideConfiguration());
@@ -479,15 +489,15 @@ public class AlternatorDynamoDbAsyncClient {
         delegate.overrideConfiguration(compressionConfig);
       }
 
-      // Apply headers optimization if enabled
+      // Apply headers optimization if enabled, using appropriate whitelist based on auth
       ClientOverrideConfiguration headersConfig =
-          alternatorConfig.applyHeadersConfig(delegate.overrideConfiguration());
+          alternatorConfig.applyHeadersConfig(delegate.overrideConfiguration(), hasAuthentication);
       if (headersConfig != null) {
         delegate.overrideConfiguration(headersConfig);
       }
 
-      // Use anonymous credentials if authentication is disabled
-      if (!alternatorConfig.isAuthenticationEnabled()) {
+      // Use anonymous credentials if no credentials were provided
+      if (!hasAuthentication) {
         delegate.credentialsProvider(AnonymousCredentialsProvider.create());
       }
 

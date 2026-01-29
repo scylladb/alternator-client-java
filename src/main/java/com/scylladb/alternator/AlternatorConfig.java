@@ -260,6 +260,24 @@ public class AlternatorConfig {
    */
   public ClientOverrideConfiguration applyHeadersConfig(
       ClientOverrideConfiguration existingConfig) {
+    return applyHeadersConfig(existingConfig, authenticationEnabled);
+  }
+
+  /**
+   * Applies header optimization configuration to a ClientOverrideConfiguration builder if header
+   * optimization is enabled in this config.
+   *
+   * <p>This overload allows explicitly specifying whether authentication is available, which
+   * determines whether authentication headers should be included in the whitelist.
+   *
+   * @param existingConfig the existing ClientOverrideConfiguration, or null if none exists
+   * @param hasAuthentication true if credentials are available, false to exclude auth headers
+   * @return a ClientOverrideConfiguration with header filtering applied, or the existing config if
+   *     optimization is disabled
+   * @since 1.0.6
+   */
+  public ClientOverrideConfiguration applyHeadersConfig(
+      ClientOverrideConfiguration existingConfig, boolean hasAuthentication) {
     if (!optimizeHeaders) {
       return existingConfig;
     }
@@ -271,8 +289,23 @@ public class AlternatorConfig {
       overrideBuilder = ClientOverrideConfiguration.builder();
     }
 
+    // Determine which whitelist to use:
+    // - If custom whitelist was provided, use it
+    // - Otherwise, use default based on authentication availability
+    Set<String> effectiveWhitelist;
+    if (headersWhitelist != null
+        && !headersWhitelist.equals(DEFAULT_HEADERS_WHITELIST)
+        && !headersWhitelist.equals(DEFAULT_HEADERS_WHITELIST_NO_AUTH)) {
+      // Custom whitelist was provided, use it as-is
+      effectiveWhitelist = headersWhitelist;
+    } else if (hasAuthentication) {
+      effectiveWhitelist = DEFAULT_HEADERS_WHITELIST;
+    } else {
+      effectiveWhitelist = DEFAULT_HEADERS_WHITELIST_NO_AUTH;
+    }
+
     // Add headers filter interceptor
-    overrideBuilder.addExecutionInterceptor(new HeadersFilterInterceptor(headersWhitelist));
+    overrideBuilder.addExecutionInterceptor(new HeadersFilterInterceptor(effectiveWhitelist));
 
     return overrideBuilder.build();
   }
