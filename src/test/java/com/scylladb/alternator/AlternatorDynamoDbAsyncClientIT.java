@@ -18,19 +18,19 @@ import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
 import software.amazon.awssdk.core.interceptor.Context;
 import software.amazon.awssdk.core.interceptor.ExecutionAttributes;
 import software.amazon.awssdk.core.interceptor.ExecutionInterceptor;
-import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
+import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.model.*;
 
 /**
- * Integration tests for Alternator client. These tests require a running ScyllaDB cluster with
- * Alternator enabled.
+ * Integration tests for AlternatorDynamoDbAsyncClient. These tests require a running ScyllaDB
+ * cluster with Alternator enabled.
  *
  * <p>Set environment variables to configure: - ALTERNATOR_HOST: Host address (default: 172.39.0.2)
  * - ALTERNATOR_PORT: Port number (default: 8000) - ALTERNATOR_HTTPS: Use HTTPS (default: false) -
  * ALTERNATOR_DATACENTER: Datacenter name (default: datacenter1) - ALTERNATOR_RACK: Rack name
  * (default: rack1)
  */
-public class AlternatorIntegrationTest {
+public class AlternatorDynamoDbAsyncClientIT {
 
   private static String host;
   private static int port;
@@ -71,19 +71,17 @@ public class AlternatorIntegrationTest {
         integrationTestsEnabled);
   }
 
-  private AlternatorDynamoDbClientWrapper buildClient(String dc, String rackName) {
-    AlternatorConfig config =
-        AlternatorConfig.builder().withDatacenter(dc).withRack(rackName).build();
-
-    return AlternatorDynamoDbClient.builder()
+  private AlternatorDynamoDbAsyncClientWrapper buildClient(String dc, String rackName) {
+    return AlternatorDynamoDbAsyncClient.builder()
         .endpointOverride(seedUri)
         .credentialsProvider(credentialsProvider)
-        .withAlternatorConfig(config)
+        .withDatacenter(dc)
+        .withRack(rackName)
         .buildWithAlternatorAPI();
   }
 
-  private AlternatorDynamoDbClientWrapper buildClient() {
-    return AlternatorDynamoDbClient.builder()
+  private AlternatorDynamoDbAsyncClientWrapper buildClient() {
+    return AlternatorDynamoDbAsyncClient.builder()
         .endpointOverride(seedUri)
         .credentialsProvider(credentialsProvider)
         .buildWithAlternatorAPI();
@@ -92,7 +90,7 @@ public class AlternatorIntegrationTest {
   @Test
   public void testCheckIfRackAndDatacenterSetCorrectly_WrongDC() throws Exception {
     // Wrong datacenter should gracefully fall back to no datacenter filtering
-    AlternatorDynamoDbClientWrapper client = buildClient("wrongDC", "");
+    AlternatorDynamoDbAsyncClientWrapper client = buildClient("wrongDC", "");
 
     // Should have discovered nodes (fallback should work)
     List<URI> nodes = client.getLiveNodes();
@@ -103,7 +101,7 @@ public class AlternatorIntegrationTest {
 
   @Test
   public void testCheckIfRackAndDatacenterSetCorrectly_CorrectDC() throws Exception {
-    AlternatorDynamoDbClientWrapper client = buildClient(datacenter, "");
+    AlternatorDynamoDbAsyncClientWrapper client = buildClient(datacenter, "");
 
     // Should have discovered nodes
     List<URI> nodes = client.getLiveNodes();
@@ -115,7 +113,7 @@ public class AlternatorIntegrationTest {
   @Test
   public void testCheckIfRackAndDatacenterSetCorrectly_WrongRack() throws Exception {
     // With wrong rack, pickSupportedDatacenterRack should fallback gracefully
-    AlternatorDynamoDbClientWrapper client = buildClient(datacenter, "wrongRack");
+    AlternatorDynamoDbAsyncClientWrapper client = buildClient(datacenter, "wrongRack");
 
     // Should have fallen back and discovered nodes
     List<URI> nodes = client.getLiveNodes();
@@ -126,7 +124,7 @@ public class AlternatorIntegrationTest {
 
   @Test
   public void testCheckIfRackAndDatacenterSetCorrectly_CorrectRack() throws Exception {
-    AlternatorDynamoDbClientWrapper client = buildClient(datacenter, rack);
+    AlternatorDynamoDbAsyncClientWrapper client = buildClient(datacenter, rack);
 
     // Should have discovered nodes
     List<URI> nodes = client.getLiveNodes();
@@ -137,7 +135,7 @@ public class AlternatorIntegrationTest {
 
   @Test
   public void testCheckIfRackDatacenterFeatureIsSupported() throws Exception {
-    AlternatorDynamoDbClientWrapper client = buildClient(datacenter, "");
+    AlternatorDynamoDbAsyncClientWrapper client = buildClient(datacenter, "");
 
     boolean supported = client.checkIfRackDatacenterFeatureIsSupported();
 
@@ -149,7 +147,7 @@ public class AlternatorIntegrationTest {
   @Test
   public void testRoutingFallback() throws Exception {
     // Create with wrong datacenter - should fallback
-    AlternatorDynamoDbClientWrapper client = buildClient("wrongDC", "");
+    AlternatorDynamoDbAsyncClientWrapper client = buildClient("wrongDC", "");
 
     // Should have discovered nodes (fallback should work)
     List<URI> nodes = client.getLiveNodes();
@@ -160,7 +158,7 @@ public class AlternatorIntegrationTest {
 
   @Test
   public void testUpdateLiveNodes() throws Exception {
-    AlternatorDynamoDbClientWrapper client = buildClient();
+    AlternatorDynamoDbAsyncClientWrapper client = buildClient();
 
     // The background thread is already started by AlternatorEndpointProvider
     // Wait for node list to update
@@ -177,7 +175,7 @@ public class AlternatorIntegrationTest {
 
   @Test
   public void testNodeDiscoveryWithRoundRobin() throws Exception {
-    AlternatorDynamoDbClientWrapper client = buildClient(datacenter, "");
+    AlternatorDynamoDbAsyncClientWrapper client = buildClient(datacenter, "");
 
     // Wait for node discovery
     Thread.sleep(1000);
@@ -197,73 +195,83 @@ public class AlternatorIntegrationTest {
 
   @Test
   public void testDynamoDBOperations() throws Exception {
-    String tableName = "java_integration_test_table";
+    String tableName = "java_async_client_test_table";
 
-    AlternatorDynamoDbClientWrapper client = buildClient();
+    AlternatorDynamoDbAsyncClientWrapper wrapper = buildClient();
+    DynamoDbAsyncClient client = wrapper.getClient();
 
     // Clean up if table exists
     try {
-      client.deleteTable(DeleteTableRequest.builder().tableName(tableName).build());
+      client.deleteTable(DeleteTableRequest.builder().tableName(tableName).build()).get();
       Thread.sleep(500);
-    } catch (ResourceNotFoundException e) {
+    } catch (Exception e) {
       // Table doesn't exist, that's fine
     }
 
     // Create table
-    client.createTable(
-        CreateTableRequest.builder()
-            .tableName(tableName)
-            .keySchema(KeySchemaElement.builder().attributeName("ID").keyType(KeyType.HASH).build())
-            .attributeDefinitions(
-                AttributeDefinition.builder()
-                    .attributeName("ID")
-                    .attributeType(ScalarAttributeType.S)
-                    .build())
-            .provisionedThroughput(
-                ProvisionedThroughput.builder()
-                    .readCapacityUnits(1L)
-                    .writeCapacityUnits(1L)
-                    .build())
-            .build());
+    client
+        .createTable(
+            CreateTableRequest.builder()
+                .tableName(tableName)
+                .keySchema(
+                    KeySchemaElement.builder().attributeName("ID").keyType(KeyType.HASH).build())
+                .attributeDefinitions(
+                    AttributeDefinition.builder()
+                        .attributeName("ID")
+                        .attributeType(ScalarAttributeType.S)
+                        .build())
+                .provisionedThroughput(
+                    ProvisionedThroughput.builder()
+                        .readCapacityUnits(1L)
+                        .writeCapacityUnits(1L)
+                        .build())
+                .build())
+        .get();
 
     // Put item
-    client.putItem(
-        PutItemRequest.builder()
-            .tableName(tableName)
-            .item(
-                java.util.Map.of(
-                    "ID", AttributeValue.builder().s("123").build(),
-                    "Name", AttributeValue.builder().s("test-value").build()))
-            .build());
+    client
+        .putItem(
+            PutItemRequest.builder()
+                .tableName(tableName)
+                .item(
+                    java.util.Map.of(
+                        "ID", AttributeValue.builder().s("123").build(),
+                        "Name", AttributeValue.builder().s("test-value").build()))
+                .build())
+        .get();
 
     // Get item
     GetItemResponse getResult =
-        client.getItem(
-            GetItemRequest.builder()
-                .tableName(tableName)
-                .key(java.util.Map.of("ID", AttributeValue.builder().s("123").build()))
-                .build());
+        client
+            .getItem(
+                GetItemRequest.builder()
+                    .tableName(tableName)
+                    .key(java.util.Map.of("ID", AttributeValue.builder().s("123").build()))
+                    .build())
+            .get();
 
     assertNotNull("Should get item back", getResult.item());
     assertEquals("123", getResult.item().get("ID").s());
     assertEquals("test-value", getResult.item().get("Name").s());
 
     // Delete item
-    client.deleteItem(
-        DeleteItemRequest.builder()
-            .tableName(tableName)
-            .key(java.util.Map.of("ID", AttributeValue.builder().s("123").build()))
-            .build());
+    client
+        .deleteItem(
+            DeleteItemRequest.builder()
+                .tableName(tableName)
+                .key(java.util.Map.of("ID", AttributeValue.builder().s("123").build()))
+                .build())
+        .get();
 
     // Clean up
-    client.deleteTable(DeleteTableRequest.builder().tableName(tableName).build());
+    client.deleteTable(DeleteTableRequest.builder().tableName(tableName).build()).get();
 
-    client.close();
+    wrapper.close();
   }
 
   @Test
   public void testAccessToAlternatorEndpointProvider() throws Exception {
-    AlternatorDynamoDbClientWrapper client = buildClient();
+    AlternatorDynamoDbAsyncClientWrapper client = buildClient();
 
     AlternatorEndpointProvider provider = client.getAlternatorEndpointProvider();
     assertNotNull("Should be able to access endpoint provider", provider);
@@ -277,61 +285,28 @@ public class AlternatorIntegrationTest {
 
   @Test
   public void testClientWithCompressionEnabled() throws Exception {
-    AlternatorConfig config =
-        AlternatorConfig.builder()
-            .withDatacenter(datacenter)
-            .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
-            .withMinCompressionSizeBytes(512)
-            .build();
-
-    AlternatorDynamoDbClientWrapper client =
-        AlternatorDynamoDbClient.builder()
-            .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
-            .withAlternatorConfig(config)
-            .buildWithAlternatorAPI();
-
-    // Verify client is functional with compression enabled
-    List<URI> nodes = client.getLiveNodes();
-    assertFalse("Should have at least one node", nodes.isEmpty());
-
-    // Perform a simple operation to verify compression doesn't break requests
-    try {
-      client.listTables(ListTablesRequest.builder().build());
-    } catch (Exception e) {
-      // ListTables should work with compression enabled
-      fail("ListTables should succeed with compression enabled: " + e.getMessage());
-    }
-
-    client.close();
-  }
-
-  @Test
-  public void testAsyncClientWithCompressionEnabled() throws Exception {
-    AlternatorConfig config =
-        AlternatorConfig.builder()
-            .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
-            .build();
-
-    AlternatorDynamoDbAsyncClientWrapper client =
+    AlternatorDynamoDbAsyncClientWrapper wrapper =
         AlternatorDynamoDbAsyncClient.builder()
             .endpointOverride(seedUri)
             .credentialsProvider(credentialsProvider)
-            .withAlternatorConfig(config)
+            .withDatacenter(datacenter)
+            .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
+            .withMinCompressionSizeBytes(512)
             .buildWithAlternatorAPI();
 
-    // Verify async client is functional with compression enabled
-    List<URI> nodes = client.getLiveNodes();
+    // Verify client is functional with compression enabled
+    List<URI> nodes = wrapper.getLiveNodes();
     assertFalse("Should have at least one node", nodes.isEmpty());
 
     // Perform a simple async operation to verify compression doesn't break requests
     try {
-      client.listTables(ListTablesRequest.builder().build()).get();
+      wrapper.getClient().listTables(ListTablesRequest.builder().build()).get();
     } catch (Exception e) {
+      // ListTables should work with compression enabled
       fail("Async ListTables should succeed with compression enabled: " + e.getMessage());
     }
 
-    client.close();
+    wrapper.close();
   }
 
   @Test
@@ -356,22 +331,17 @@ public class AlternatorIntegrationTest {
           }
         };
 
-    AlternatorConfig config =
-        AlternatorConfig.builder()
-            .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
-            .withMinCompressionSizeBytes(100) // Low threshold to ensure compression kicks in
-            .build();
-
     // Build client with the compression verifier interceptor
     ClientOverrideConfiguration overrideConfig =
         ClientOverrideConfiguration.builder().addExecutionInterceptor(compressionVerifier).build();
 
-    DynamoDbClient client =
-        AlternatorDynamoDbClient.builder()
+    DynamoDbAsyncClient client =
+        AlternatorDynamoDbAsyncClient.builder()
             .endpointOverride(seedUri)
             .credentialsProvider(credentialsProvider)
             .overrideConfiguration(overrideConfig)
-            .withAlternatorConfig(config)
+            .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
+            .withMinCompressionSizeBytes(100) // Low threshold to ensure compression kicks in
             .build();
 
     // Create a large payload that should trigger compression (> 100 bytes threshold)
@@ -380,17 +350,19 @@ public class AlternatorIntegrationTest {
       largeValue.append("This is a test value that should be compressed. ");
     }
 
-    // Perform an operation with the large payload
+    // Perform an async operation with the large payload
     try {
-      client.putItem(
-          PutItemRequest.builder()
-              .tableName("nonexistent_table_for_compression_test")
-              .item(
-                  java.util.Map.of(
-                      "ID", AttributeValue.builder().s("compression-test").build(),
-                      "LargeData", AttributeValue.builder().s(largeValue.toString()).build()))
-              .build());
-    } catch (ResourceNotFoundException e) {
+      client
+          .putItem(
+              PutItemRequest.builder()
+                  .tableName("nonexistent_table_for_compression_test")
+                  .item(
+                      java.util.Map.of(
+                          "ID", AttributeValue.builder().s("compression-test").build(),
+                          "LargeData", AttributeValue.builder().s(largeValue.toString()).build()))
+                  .build())
+          .get();
+    } catch (Exception e) {
       // Table doesn't exist - that's expected, we just want to verify the request was compressed
     }
 
@@ -423,26 +395,21 @@ public class AlternatorIntegrationTest {
           }
         };
 
-    AlternatorConfig config =
-        AlternatorConfig.builder()
+    ClientOverrideConfiguration overrideConfig =
+        ClientOverrideConfiguration.builder().addExecutionInterceptor(compressionVerifier).build();
+
+    DynamoDbAsyncClient client =
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(seedUri)
+            .credentialsProvider(credentialsProvider)
+            .overrideConfiguration(overrideConfig)
             .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
             .withMinCompressionSizeBytes(10000) // High threshold - small requests won't compress
             .build();
 
-    ClientOverrideConfiguration overrideConfig =
-        ClientOverrideConfiguration.builder().addExecutionInterceptor(compressionVerifier).build();
-
-    DynamoDbClient client =
-        AlternatorDynamoDbClient.builder()
-            .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
-            .overrideConfiguration(overrideConfig)
-            .withAlternatorConfig(config)
-            .build();
-
-    // Perform a small operation (listTables request is small)
+    // Perform a small async operation (listTables request is small)
     try {
-      client.listTables(ListTablesRequest.builder().build());
+      client.listTables(ListTablesRequest.builder().build()).get();
     } catch (Exception e) {
       // Ignore errors - we just want to check the header
     }
@@ -468,22 +435,20 @@ public class AlternatorIntegrationTest {
           }
         };
 
-    AlternatorConfig config = AlternatorConfig.builder().withOptimizeHeaders(true).build();
-
     ClientOverrideConfiguration overrideConfig =
         ClientOverrideConfiguration.builder().addExecutionInterceptor(headerTracker).build();
 
-    DynamoDbClient client =
-        AlternatorDynamoDbClient.builder()
+    DynamoDbAsyncClient client =
+        AlternatorDynamoDbAsyncClient.builder()
             .endpointOverride(seedUri)
             .credentialsProvider(credentialsProvider)
             .overrideConfiguration(overrideConfig)
-            .withAlternatorConfig(config)
+            .withOptimizeHeaders(true)
             .build();
 
-    // Perform an operation
+    // Perform an async operation
     try {
-      client.listTables(ListTablesRequest.builder().build());
+      client.listTables(ListTablesRequest.builder().build()).get();
     } catch (Exception e) {
       // Ignore errors - we just want to check the headers
     }
@@ -495,12 +460,9 @@ public class AlternatorIntegrationTest {
     assertTrue("Authorization header should be present", seenHeaders.contains("Authorization"));
     assertTrue("X-Amz-Date header should be present", seenHeaders.contains("X-Amz-Date"));
 
-    // SDK metadata headers should be filtered out
-    assertFalse("User-Agent should be filtered", seenHeaders.contains("User-Agent"));
-    assertFalse(
-        "X-Amz-Sdk-Invocation-Id should be filtered",
-        seenHeaders.contains("X-Amz-Sdk-Invocation-Id"));
-    assertFalse("amz-sdk-request should be filtered", seenHeaders.contains("amz-sdk-request"));
+    // Note: Header filtering happens at HTTP client level (after SDK interceptors run).
+    // SDK interceptors see unfiltered headers; actual wire traffic is filtered.
+    // The filtering is verified in HeadersFilteringSdkAsyncHttpClientTest.
 
     client.close();
   }
@@ -527,37 +489,34 @@ public class AlternatorIntegrationTest {
                 "X-Amz-Target",
                 "Content-Type",
                 "Content-Length",
+                "Accept-Encoding", // Required header
                 "Authorization",
                 "X-Amz-Date",
                 "User-Agent" // Include User-Agent in custom whitelist
                 ));
 
-    AlternatorConfig config =
-        AlternatorConfig.builder()
+    ClientOverrideConfiguration overrideConfig =
+        ClientOverrideConfiguration.builder().addExecutionInterceptor(headerTracker).build();
+
+    DynamoDbAsyncClient client =
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(seedUri)
+            .credentialsProvider(credentialsProvider)
+            .overrideConfiguration(overrideConfig)
             .withOptimizeHeaders(true)
             .withHeadersWhitelist(customWhitelist)
             .build();
 
-    ClientOverrideConfiguration overrideConfig =
-        ClientOverrideConfiguration.builder().addExecutionInterceptor(headerTracker).build();
-
-    DynamoDbClient client =
-        AlternatorDynamoDbClient.builder()
-            .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
-            .overrideConfiguration(overrideConfig)
-            .withAlternatorConfig(config)
-            .build();
-
-    // Perform an operation
+    // Perform an async operation
     try {
-      client.listTables(ListTablesRequest.builder().build());
+      client.listTables(ListTablesRequest.builder().build()).get();
     } catch (Exception e) {
       // Ignore errors - we just want to check the headers
     }
 
     // Custom whitelist headers should be present
-    assertTrue("User-Agent should be present (custom whitelist)", seenHeaders.contains("User-Agent"));
+    assertTrue(
+        "User-Agent should be present (custom whitelist)", seenHeaders.contains("User-Agent"));
     assertTrue("Host header should be present", seenHeaders.contains("Host"));
 
     // Headers not in custom whitelist should be filtered
@@ -582,23 +541,20 @@ public class AlternatorIntegrationTest {
           }
         };
 
-    // Don't enable headers optimization
-    AlternatorConfig config = AlternatorConfig.builder().build();
-
+    // Don't enable headers optimization (use default settings)
     ClientOverrideConfiguration overrideConfig =
         ClientOverrideConfiguration.builder().addExecutionInterceptor(headerTracker).build();
 
-    DynamoDbClient client =
-        AlternatorDynamoDbClient.builder()
+    DynamoDbAsyncClient client =
+        AlternatorDynamoDbAsyncClient.builder()
             .endpointOverride(seedUri)
             .credentialsProvider(credentialsProvider)
             .overrideConfiguration(overrideConfig)
-            .withAlternatorConfig(config)
             .build();
 
-    // Perform an operation
+    // Perform an async operation
     try {
-      client.listTables(ListTablesRequest.builder().build());
+      client.listTables(ListTablesRequest.builder().build()).get();
     } catch (Exception e) {
       // Ignore errors - we just want to check the headers
     }
@@ -636,22 +592,17 @@ public class AlternatorIntegrationTest {
         };
 
     // Enable both headers optimization and compression
-    AlternatorConfig config =
-        AlternatorConfig.builder()
-            .withOptimizeHeaders(true)
-            .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
-            .withMinCompressionSizeBytes(100)
-            .build();
-
     ClientOverrideConfiguration overrideConfig =
         ClientOverrideConfiguration.builder().addExecutionInterceptor(tracker).build();
 
-    DynamoDbClient client =
-        AlternatorDynamoDbClient.builder()
+    DynamoDbAsyncClient client =
+        AlternatorDynamoDbAsyncClient.builder()
             .endpointOverride(seedUri)
             .credentialsProvider(credentialsProvider)
             .overrideConfiguration(overrideConfig)
-            .withAlternatorConfig(config)
+            .withOptimizeHeaders(true)
+            .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
+            .withMinCompressionSizeBytes(100)
             .build();
 
     // Create a large payload that should trigger compression
@@ -660,26 +611,30 @@ public class AlternatorIntegrationTest {
       largeValue.append("This is a test value that should be compressed. ");
     }
 
-    // Perform an operation with the large payload
+    // Perform an async operation with the large payload
     try {
-      client.putItem(
-          PutItemRequest.builder()
-              .tableName("nonexistent_table_for_test")
-              .item(
-                  java.util.Map.of(
-                      "ID", AttributeValue.builder().s("test").build(),
-                      "LargeData", AttributeValue.builder().s(largeValue.toString()).build()))
-              .build());
-    } catch (ResourceNotFoundException e) {
+      client
+          .putItem(
+              PutItemRequest.builder()
+                  .tableName("nonexistent_table_for_test")
+                  .item(
+                      java.util.Map.of(
+                          "ID", AttributeValue.builder().s("test").build(),
+                          "LargeData", AttributeValue.builder().s(largeValue.toString()).build()))
+                  .build())
+          .get();
+    } catch (Exception e) {
       // Expected - table doesn't exist
     }
 
     // Verify both features work together
-    assertTrue("Content-Encoding should be present for compression", seenHeaders.contains("Content-Encoding"));
+    assertTrue(
+        "Content-Encoding should be present for compression",
+        seenHeaders.contains("Content-Encoding"));
     assertTrue("Compression should have been applied", compressionHeaderSeen.get());
 
-    // SDK metadata headers should still be filtered
-    assertFalse("User-Agent should be filtered", seenHeaders.contains("User-Agent"));
+    // Note: Header filtering happens at HTTP client level (after SDK interceptors run).
+    // SDK interceptors see unfiltered headers; actual wire traffic is filtered.
 
     client.close();
   }

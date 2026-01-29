@@ -1,6 +1,5 @@
 package com.scylladb.alternator.test;
 
-import com.scylladb.alternator.AlternatorConfig;
 import com.scylladb.alternator.AlternatorDynamoDbClient;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -70,23 +69,22 @@ public class Demo2 {
                     .put(SdkHttpConfigurationOption.TRUST_ALL_CERTIFICATES, true)
                     .build());
 
-    // Build AlternatorConfig if datacenter or rack is specified
-    AlternatorConfig.Builder configBuilder = AlternatorConfig.builder();
+    // Build client with datacenter/rack settings
+    AlternatorDynamoDbClient.AlternatorDynamoDbClientBuilder builder =
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(url)
+            .credentialsProvider(myCredentials)
+            .httpClient(http)
+            .region(Region.US_EAST_1); // unused, but if missing can result in error
+
     if (datacenter != null && !datacenter.isEmpty()) {
-      configBuilder.withDatacenter(datacenter);
+      builder.withDatacenter(datacenter);
     }
     if (rack != null && !rack.isEmpty()) {
-      configBuilder.withRack(rack);
+      builder.withRack(rack);
     }
-    AlternatorConfig config = configBuilder.build();
 
-    return AlternatorDynamoDbClient.builder()
-        .endpointOverride(url)
-        .credentialsProvider(myCredentials)
-        .httpClient(http)
-        .region(Region.US_EAST_1) // unused, but if missing can result in error
-        .withAlternatorConfig(config)
-        .build();
+    return builder.build();
   }
 
   public static void main(String[] args) {

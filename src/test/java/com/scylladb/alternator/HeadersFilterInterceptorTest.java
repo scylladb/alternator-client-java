@@ -175,8 +175,9 @@ public class HeadersFilterInterceptorTest {
 
   @Test
   public void testDefaultWhitelistPreservesRequiredHeaders() {
-    HeadersFilterInterceptor interceptor =
-        new HeadersFilterInterceptor(AlternatorConfig.DEFAULT_HEADERS_WHITELIST);
+    // Build a config with auth enabled (default) to get the required headers whitelist
+    AlternatorConfig config = AlternatorConfig.builder().withAuthenticationEnabled(true).build();
+    HeadersFilterInterceptor interceptor = new HeadersFilterInterceptor(config.getRequiredHeaders());
 
     SdkHttpRequest originalRequest =
         SdkHttpRequest.builder()
@@ -214,8 +215,9 @@ public class HeadersFilterInterceptorTest {
 
   @Test
   public void testNoAuthWhitelistExcludesAuthHeaders() {
-    HeadersFilterInterceptor interceptor =
-        new HeadersFilterInterceptor(AlternatorConfig.DEFAULT_HEADERS_WHITELIST_NO_AUTH);
+    // Build a config with auth disabled to get the no-auth headers whitelist
+    AlternatorConfig config = AlternatorConfig.builder().withAuthenticationEnabled(false).build();
+    HeadersFilterInterceptor interceptor = new HeadersFilterInterceptor(config.getRequiredHeaders());
 
     SdkHttpRequest originalRequest =
         SdkHttpRequest.builder()
