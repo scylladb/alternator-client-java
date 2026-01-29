@@ -28,8 +28,9 @@ import software.amazon.awssdk.utils.AttributeMap;
  * automatically integrating {@link AlternatorEndpointProvider} for client-side load balancing.
  *
  * <p>The builder implements {@link DynamoDbAsyncClientBuilder}, ensuring compatibility with
- * standard AWS SDK v2 patterns while adding Alternator-specific configuration via {@link
- * AlternatorDynamoDbAsyncClientBuilder#withAlternatorConfig(AlternatorConfig)}.
+ * standard AWS SDK v2 patterns while adding Alternator-specific configuration via methods like
+ * {@link AlternatorDynamoDbAsyncClientBuilder#withDatacenter(String)} and
+ * {@link AlternatorDynamoDbAsyncClientBuilder#withRack(String)}.
  *
  * <p>Example usage:
  *
@@ -238,7 +239,7 @@ public class AlternatorDynamoDbAsyncClient {
         AwsCredentialsProvider credentialsProvider) {
       if (credentialsProvider != null) {
         this.credentialsProviderSet = true;
-        configBuilder.withAuthenticationEnabled(true);
+        configBuilder.authenticationEnabled(true);
       }
       delegate.credentialsProvider(credentialsProvider);
       return this;
@@ -497,7 +498,7 @@ public class AlternatorDynamoDbAsyncClient {
      *   <li>Discover all nodes in the Alternator cluster via the {@code /localnodes} API
      *   <li>Distribute requests across discovered nodes using round-robin load balancing
      *   <li>Periodically refresh the node list (every 5 seconds) to handle topology changes
-     *   <li>Filter nodes by datacenter/rack if configured via {@link #withAlternatorConfig}
+     *   <li>Filter nodes by datacenter/rack if configured via {@link #withDatacenter} and {@link #withRack}
      * </ul>
      *
      * <p>If you need access to Alternator-specific APIs (such as {@code getLiveNodes()} or {@code
@@ -539,6 +540,12 @@ public class AlternatorDynamoDbAsyncClient {
                 + "Call endpointOverride(URI) with the seed Alternator node URI.");
       }
 
+      // Use anonymous credentials if no credentials were provided
+      if (!credentialsProviderSet) {
+        configBuilder.authenticationEnabled(false);
+        delegate.credentialsProvider(AnonymousCredentialsProvider.create());
+      }
+
       // Build the AlternatorConfig from the internal builder
       AlternatorConfig alternatorConfig = configBuilder.build();
 
@@ -551,11 +558,6 @@ public class AlternatorDynamoDbAsyncClient {
         overrideBuilder.addExecutionInterceptor(
             new GzipRequestInterceptor(alternatorConfig.getMinCompressionSizeBytes()));
         delegate.overrideConfiguration(overrideBuilder.build());
-      }
-
-      // Use anonymous credentials if no credentials were provided
-      if (!credentialsProviderSet) {
-        delegate.credentialsProvider(AnonymousCredentialsProvider.create());
       }
 
       // Configure async HTTP client with optional certificate checking and header filtering

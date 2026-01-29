@@ -171,7 +171,7 @@ public class HeadersFilteringSdkHttpClientTest {
   public void testFiltersAllSdkMetadataHeaders() {
     // Use the default required headers whitelist
     AlternatorConfig config =
-        AlternatorConfig.builder().withAuthenticationEnabled(true).build();
+        AlternatorConfig.builder().authenticationEnabled(true).build();
     Set<String> whitelist = config.getRequiredHeaders();
 
     MockSdkHttpClient mockClient = new MockSdkHttpClient();

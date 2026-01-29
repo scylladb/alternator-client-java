@@ -245,6 +245,18 @@ public class AlternatorConfig {
     }
 
     /**
+     * Sets whether authentication is enabled. Package-private - authentication is auto-detected
+     * based on whether credentials are provided to the client builder.
+     *
+     * @param authenticationEnabled true if credentials are provided
+     * @return this builder instance
+     */
+    Builder authenticationEnabled(boolean authenticationEnabled) {
+      this.authenticationEnabled = authenticationEnabled;
+      return this;
+    }
+
+    /**
      * Returns the set of HTTP headers required for the current configuration.
      *
      * <p>This method computes the minimum set of headers needed based on the current builder
@@ -255,8 +267,7 @@ public class AlternatorConfig {
      *
      * <pre>{@code
      * AlternatorConfig.Builder builder = AlternatorConfig.builder()
-     *     .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
-     *     .withAuthenticationEnabled(true);
+     *     .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP);
      *
      * Set<String> required = builder.getRequiredHeaders();
      * // required contains: Host, X-Amz-Target, Content-Type, Content-Length,
@@ -414,46 +425,6 @@ public class AlternatorConfig {
     public Builder withHeadersWhitelist(Collection<String> headers) {
       this.headersWhitelist = headers != null ? new HashSet<>(headers) : null;
       this.headersWhitelistWasSet = true;
-      return this;
-    }
-
-    /**
-     * Enables or disables authentication for the Alternator connection.
-     *
-     * <p>When authentication is disabled:
-     *
-     * <ul>
-     *   <li>The client will use anonymous credentials (no AWS signature)
-     *   <li>Authentication headers ({@code Authorization}, {@code X-Amz-Date}, {@code
-     *       X-Amz-Content-Sha256}) will be excluded from the default headers whitelist when header
-     *       optimization is enabled
-     * </ul>
-     *
-     * <p>This is useful when connecting to Alternator clusters that have authentication disabled.
-     *
-     * <p>Default: true (authentication enabled)
-     *
-     * <p>Example:
-     *
-     * <pre>{@code
-     * AlternatorConfig config = AlternatorConfig.builder()
-     *     .withAuthenticationEnabled(false)
-     *     .withOptimizeHeaders(true)
-     *     .build();
-     *
-     * // No credentials needed - client will use anonymous credentials
-     * DynamoDbClient client = AlternatorDynamoDbClient.builder()
-     *     .endpointOverride(URI.create("http://localhost:8000"))
-     *     .withAlternatorConfig(config)
-     *     .build();
-     * }</pre>
-     *
-     * @param authenticationEnabled true to enable authentication (default), false to disable
-     * @return this builder instance
-     * @since 1.0.6
-     */
-    public Builder withAuthenticationEnabled(boolean authenticationEnabled) {
-      this.authenticationEnabled = authenticationEnabled;
       return this;
     }
 
