@@ -52,7 +52,11 @@
             <version>4.13.2</version>
             <scope>test</scope>
         </dependency>
-        <!-- TODO: test also dynamodb-enhanced for v2: https://aws.amazon.com/blogs/developer/introducing-enhanced-dynamodb-client-in-the-aws-sdk-for-java-v2/ -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>dynamodb-enhanced</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <profiles>
