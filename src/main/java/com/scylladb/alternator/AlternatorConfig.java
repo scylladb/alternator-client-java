@@ -1,13 +1,10 @@
 package com.scylladb.alternator;
 
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Set;
-import software.amazon.awssdk.core.interceptor.ExecutionInterceptor;
 
 /**
  * Configuration class for Alternator load balancing settings. Contains datacenter and rack
@@ -17,7 +14,9 @@ import software.amazon.awssdk.core.interceptor.ExecutionInterceptor;
  * @since 1.0.5
  */
 public class AlternatorConfig {
-  /** Default minimum request body size (in bytes) that triggers compression. */
+  /**
+   * Default minimum request body size (in bytes) that triggers compression.
+   */
   public static final int DEFAULT_MIN_COMPRESSION_SIZE_BYTES = 1024;
 
   /**
@@ -65,24 +64,6 @@ public class AlternatorConfig {
   public static final Set<String> AUTHENTICATION_HEADERS =
       Collections.unmodifiableSet(new HashSet<>(Arrays.asList("Authorization", "X-Amz-Date")));
 
-  /**
-   * Computes the set of required HTTP headers based on the given configuration options.
-   *
-   * <p>This is a package-private helper method used internally to compute required headers.
-   *
-   * @return an unmodifiable set of required header names
-   */
-  protected Set<String> computeRequiredHeaders() {
-    Set<String> required = new HashSet<>(BASE_REQUIRED_HEADERS);
-    if (compressionAlgorithm != null && compressionAlgorithm != RequestCompressionAlgorithm.NONE) {
-      required.addAll(COMPRESSION_HEADERS);
-    }
-    if (authenticationEnabled) {
-      required.addAll(AUTHENTICATION_HEADERS);
-    }
-    return Collections.unmodifiableSet(required);
-  }
-
   private final String datacenter;
   private final String rack;
   private final RequestCompressionAlgorithm compressionAlgorithm;
@@ -94,13 +75,13 @@ public class AlternatorConfig {
   /**
    * Package-private constructor. Use {@link AlternatorConfig#builder()} to create instances.
    *
-   * @param datacenter the datacenter name
-   * @param rack the rack name
-   * @param compressionAlgorithm the compression algorithm to use
+   * @param datacenter              the datacenter name
+   * @param rack                    the rack name
+   * @param compressionAlgorithm    the compression algorithm to use
    * @param minCompressionSizeBytes minimum request size in bytes to trigger compression
-   * @param optimizeHeaders whether to enable HTTP header optimization
-   * @param headersWhitelist the set of headers to preserve when optimization is enabled
-   * @param authenticationEnabled whether authentication is enabled
+   * @param optimizeHeaders         whether to enable HTTP header optimization
+   * @param headersWhitelist        the set of headers to preserve when optimization is enabled
+   * @param authenticationEnabled   whether authentication is enabled
    */
   protected AlternatorConfig(
       String datacenter,
@@ -123,7 +104,7 @@ public class AlternatorConfig {
     if (headersWhitelist != null) {
       this.headersWhitelist = Collections.unmodifiableSet(new HashSet<>(headersWhitelist));
     } else {
-      this.headersWhitelist = computeRequiredHeaders();
+      this.headersWhitelist = getRequiredHeaders();
     }
   }
 
@@ -228,7 +209,14 @@ public class AlternatorConfig {
    * @since 1.0.6
    */
   public Set<String> getRequiredHeaders() {
-    return computeRequiredHeaders();
+    Set<String> required = new HashSet<>(BASE_REQUIRED_HEADERS);
+    if (compressionAlgorithm != null && compressionAlgorithm != RequestCompressionAlgorithm.NONE) {
+      required.addAll(COMPRESSION_HEADERS);
+    }
+    if (authenticationEnabled) {
+      required.addAll(AUTHENTICATION_HEADERS);
+    }
+    return Collections.unmodifiableSet(required);
   }
 
   /**
@@ -238,31 +226,6 @@ public class AlternatorConfig {
    */
   public static Builder builder() {
     return new Builder();
-  }
-
-  /**
-   * Returns a list of SDK-level execution interceptors configured for this AlternatorConfig.
-   *
-   * <p>The returned list may include:
-   *
-   * <ul>
-   *   <li>{@link GzipRequestInterceptor} - if compression is enabled
-   * </ul>
-   *
-   * <p>Note: Header filtering is handled at the HTTP client level (not via SDK interceptors) to
-   * ensure all headers including SDK-internal ones (User-Agent, amz-sdk-request) are filtered.
-   *
-   * @return a list of execution interceptors, may be empty but never null
-   * @since 1.0.6
-   */
-  public List<ExecutionInterceptor> getInterceptors() {
-    List<ExecutionInterceptor> interceptors = new ArrayList<>();
-
-    if (compressionAlgorithm.isEnabled()) {
-      interceptors.add(new GzipRequestInterceptor(minCompressionSizeBytes));
-    }
-
-    return interceptors;
   }
 
   public static class Builder {
@@ -275,8 +238,11 @@ public class AlternatorConfig {
     private boolean headersWhitelistWasSet = false;
     private boolean authenticationEnabled = true;
 
-    /** Package-private constructor. Use {@link AlternatorConfig#builder()} to create instances. */
-    Builder() {}
+    /**
+     * Package-private constructor. Use {@link AlternatorConfig#builder()} to create instances.
+     */
+    Builder() {
+    }
 
     /**
      * Returns the set of HTTP headers required for the current configuration.
