@@ -1,6 +1,7 @@
 package com.scylladb.alternator;
 
 import java.net.URI;
+import java.util.Collection;
 import java.util.function.Consumer;
 
 import software.amazon.awssdk.auth.credentials.AnonymousCredentialsProvider;
@@ -81,7 +82,7 @@ public class AlternatorDynamoDbAsyncClient {
    */
   public static class AlternatorDynamoDbAsyncClientBuilder implements DynamoDbAsyncClientBuilder {
     private final DynamoDbAsyncClientBuilder delegate;
-    private AlternatorConfig alternatorConfig;
+    private final AlternatorConfig.Builder configBuilder;
     private URI seedUri;
     private Region region;
     private boolean disableCertificateChecks = false;
@@ -90,28 +91,89 @@ public class AlternatorDynamoDbAsyncClient {
 
     private AlternatorDynamoDbAsyncClientBuilder() {
       this.delegate = DynamoDbAsyncClient.builder();
+      this.configBuilder = AlternatorConfig.builder();
     }
 
     /**
-     * Sets the Alternator configuration including datacenter and rack settings.
+     * Sets the target datacenter for load balancing.
      *
-     * <p>When datacenter and/or rack are specified, the load balancer will only use nodes from the
-     * specified datacenter/rack combination. This is useful for:
+     * <p>When specified, only nodes from this datacenter will be used for load balancing.
+     * If not set, all nodes will be used.
      *
-     * <ul>
-     *   <li>Reducing cross-datacenter latency by connecting only to local nodes
-     *   <li>Isolating traffic to specific racks for testing or capacity management
-     * </ul>
-     *
-     * <p>If the server doesn't support datacenter/rack filtering, or if the specified
-     * datacenter/rack doesn't exist, the configuration will gracefully fall back to using all
-     * available nodes.
-     *
-     * @param config the Alternator configuration
+     * @param datacenter the datacenter name
      * @return this builder instance
      */
-    public AlternatorDynamoDbAsyncClientBuilder withAlternatorConfig(AlternatorConfig config) {
-      this.alternatorConfig = config;
+    public AlternatorDynamoDbAsyncClientBuilder withDatacenter(String datacenter) {
+      configBuilder.withDatacenter(datacenter);
+      return this;
+    }
+
+    /**
+     * Sets the target rack for load balancing.
+     *
+     * <p>When specified along with a datacenter, only nodes from this rack will be used
+     * for load balancing.
+     *
+     * @param rack the rack name
+     * @return this builder instance
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withRack(String rack) {
+      configBuilder.withRack(rack);
+      return this;
+    }
+
+    /**
+     * Sets the request compression algorithm.
+     *
+     * <p>When a compression algorithm other than {@link RequestCompressionAlgorithm#NONE} is
+     * specified, request bodies exceeding the minimum size threshold will be compressed.
+     *
+     * @param algorithm the compression algorithm to use, or null to disable compression
+     * @return this builder instance
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withCompressionAlgorithm(
+        RequestCompressionAlgorithm algorithm) {
+      configBuilder.withCompressionAlgorithm(algorithm);
+      return this;
+    }
+
+    /**
+     * Sets the minimum request body size (in bytes) that triggers compression.
+     *
+     * <p>Requests smaller than this threshold will not be compressed.
+     *
+     * @param minCompressionSizeBytes minimum request size in bytes, must be non-negative
+     * @return this builder instance
+     * @throws IllegalArgumentException if minCompressionSizeBytes is negative
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withMinCompressionSizeBytes(int minCompressionSizeBytes) {
+      configBuilder.withMinCompressionSizeBytes(minCompressionSizeBytes);
+      return this;
+    }
+
+    /**
+     * Enables or disables HTTP header optimization.
+     *
+     * <p>When enabled, outgoing requests will have their HTTP headers filtered to include
+     * only those in the configured whitelist, reducing network traffic overhead.
+     *
+     * @param optimizeHeaders true to enable header filtering, false to disable
+     * @return this builder instance
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withOptimizeHeaders(boolean optimizeHeaders) {
+      configBuilder.withOptimizeHeaders(optimizeHeaders);
+      return this;
+    }
+
+    /**
+     * Sets a custom whitelist of HTTP headers to preserve when optimization is enabled.
+     *
+     * @param headers collection of header names to preserve (case-insensitive)
+     * @return this builder instance
+     * @throws IllegalArgumentException if headers is null or empty
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withHeadersWhitelist(Collection<String> headers) {
+      configBuilder.withHeadersWhitelist(headers);
       return this;
     }
 
@@ -474,10 +536,8 @@ public class AlternatorDynamoDbAsyncClient {
                 + "Call endpointOverride(URI) with the seed Alternator node URI.");
       }
 
-      // Initialize alternatorConfig with defaults if null
-      if (alternatorConfig == null) {
-        alternatorConfig = AlternatorConfig.builder().build();
-      }
+      // Build the AlternatorConfig from the internal builder
+      AlternatorConfig alternatorConfig = configBuilder.build();
 
       // Apply compression and headers optimization configurations
       ClientOverrideConfiguration config =
