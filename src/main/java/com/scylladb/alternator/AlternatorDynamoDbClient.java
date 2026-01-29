@@ -438,25 +438,17 @@ public class AlternatorDynamoDbClient {
         alternatorConfig = AlternatorConfig.builder().build();
       }
 
-      // Determine if authentication is available (credentials were explicitly provided)
-      boolean hasAuthentication = credentialsProviderSet;
-
-      // Apply compression configuration if enabled
-      ClientOverrideConfiguration compressionConfig =
-          alternatorConfig.applyCompressionConfig(delegate.overrideConfiguration());
-      if (compressionConfig != null) {
-        delegate.overrideConfiguration(compressionConfig);
-      }
-
-      // Apply headers optimization if enabled, using appropriate whitelist based on auth
-      ClientOverrideConfiguration headersConfig =
-          alternatorConfig.applyHeadersConfig(delegate.overrideConfiguration(), hasAuthentication);
-      if (headersConfig != null) {
-        delegate.overrideConfiguration(headersConfig);
+      // Apply compression and headers optimization configurations
+      ClientOverrideConfiguration config =
+          alternatorConfig.applyHeadersConfig(
+              alternatorConfig.applyCompressionConfig(delegate.overrideConfiguration()),
+              credentialsProviderSet);
+      if (config != null) {
+        delegate.overrideConfiguration(config);
       }
 
       // Use anonymous credentials if no credentials were provided
-      if (!hasAuthentication) {
+      if (!credentialsProviderSet) {
         delegate.credentialsProvider(AnonymousCredentialsProvider.create());
       }
 
