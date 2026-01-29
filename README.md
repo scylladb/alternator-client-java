@@ -281,3 +281,113 @@ Request compression may not be beneficial for:
 - Small requests (< 1KB)
 - Already-compressed binary data
 - Low-latency requirements where CPU overhead matters
+
+### Headers Optimization
+
+The library supports optional HTTP headers optimization, which reduces network bandwidth by
+removing headers that Alternator does not use. According to benchmarks, this can reduce
+outgoing traffic by up to 56% depending on workload and encryption.
+
+#### Enabling headers optimization
+
+To enable headers optimization, configure `AlternatorConfig` with `withOptimizeHeaders(true)`:
+
+```java
+import com.scylladb.alternator.AlternatorConfig;
+import com.scylladb.alternator.AlternatorDynamoDbClient;
+
+AlternatorConfig config = AlternatorConfig.builder()
+    .withOptimizeHeaders(true)
+    .build();
+
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://127.0.0.1:8043"))
+    .credentialsProvider(myCredentials)
+    .withAlternatorConfig(config)
+    .build();
+```
+
+#### Default headers whitelist
+
+When headers optimization is enabled, only the following headers are preserved by default:
+- `Host` - Required by HTTP/1.1
+- `X-Amz-Target` - Specifies the DynamoDB operation
+- `Content-Type` - MIME type for DynamoDB API
+- `Content-Length` - Required for request body
+- `Accept-Encoding` - For response compression negotiation
+- `Content-Encoding` - For request compression (when enabled)
+- `Authorization` - AWS SigV4 signature
+- `X-Amz-Date` - Timestamp for AWS signature
+- `X-Amz-Content-Sha256` - Content hash for AWS SigV4
+
+All other headers (such as `User-Agent`, `X-Amz-Sdk-Invocation-Id`, `amz-sdk-request`) are removed.
+
+#### Custom headers whitelist
+
+You can provide your own custom headers whitelist if needed:
+
+```java
+import java.util.Arrays;
+
+AlternatorConfig config = AlternatorConfig.builder()
+    .withOptimizeHeaders(true)
+    .withHeadersWhitelist(Arrays.asList(
+        "Host", "X-Amz-Target", "Content-Type", "Content-Length",
+        "Authorization", "X-Amz-Date", "X-Custom-Header"))
+    .build();
+
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://127.0.0.1:8043"))
+    .credentialsProvider(myCredentials)
+    .withAlternatorConfig(config)
+    .build();
+```
+
+**Important:** When using a custom whitelist, make sure to include all headers required for
+authentication (`Authorization`, `X-Amz-Date`) and operation (`Host`, `X-Amz-Target`,
+`Content-Type`, `Content-Length`).
+
+#### Combining with compression
+
+Headers optimization can be combined with request compression for maximum bandwidth savings:
+
+```java
+AlternatorConfig config = AlternatorConfig.builder()
+    .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
+    .withOptimizeHeaders(true)
+    .build();
+```
+
+#### No authentication mode
+
+When connecting to Alternator clusters with authentication disabled, you can configure the client
+to skip authentication entirely:
+
+```java
+AlternatorConfig config = AlternatorConfig.builder()
+    .withAuthenticationEnabled(false)
+    .withOptimizeHeaders(true)
+    .build();
+
+// No credentials needed - client will use anonymous credentials
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("http://localhost:8000"))
+    .withAlternatorConfig(config)
+    .build();
+```
+
+When `withAuthenticationEnabled(false)` is set:
+- The client uses anonymous credentials (no AWS signature)
+- When header optimization is enabled, authentication headers (`Authorization`, `X-Amz-Date`)
+  are automatically excluded from the whitelist
+
+**Auto-detection:** When using `AlternatorDynamoDbClient` or `AlternatorDynamoDbAsyncClient` builders,
+authentication is automatically detected based on whether `credentialsProvider()` was called. If no
+credentials provider is set, the client automatically uses anonymous credentials:
+
+```java
+// Automatic: no credentials provider = no authentication
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("http://localhost:8000"))
+    .build();
+```

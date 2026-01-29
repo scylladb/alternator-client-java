@@ -2,7 +2,6 @@ package com.scylladb.alternator.test;
 
 import static java.util.concurrent.Executors.newFixedThreadPool;
 
-import com.scylladb.alternator.AlternatorConfig;
 import com.scylladb.alternator.AlternatorDynamoDbAsyncClient;
 import java.net.MalformedURLException;
 import java.net.URI;
@@ -103,22 +102,19 @@ public class Demo3 {
             .advancedOption(SdkAdvancedAsyncClientOption.FUTURE_COMPLETION_EXECUTOR, executor)
             .build();
 
-    // Build AlternatorConfig if datacenter or rack is specified
-    AlternatorConfig.Builder configBuilder = AlternatorConfig.builder();
-    if (datacenter != null && !datacenter.isEmpty()) {
-      configBuilder.withDatacenter(datacenter);
-    }
-    if (rack != null && !rack.isEmpty()) {
-      configBuilder.withRack(rack);
-    }
-    AlternatorConfig config = configBuilder.build();
-
     // Build the async client using AlternatorDynamoDbAsyncClient
     AlternatorDynamoDbAsyncClient.AlternatorDynamoDbAsyncClientBuilder b =
         AlternatorDynamoDbAsyncClient.builder()
             .region(region)
-            .asyncConfiguration(cas)
-            .withAlternatorConfig(config);
+            .asyncConfiguration(cas);
+
+    // Set datacenter and rack if specified
+    if (datacenter != null && !datacenter.isEmpty()) {
+      b.withDatacenter(datacenter);
+    }
+    if (rack != null && !rack.isEmpty()) {
+      b.withRack(rack);
+    }
 
     if (endpoint != null) {
       URI uri = URI.create(endpoint);

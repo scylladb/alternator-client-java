@@ -1,11 +1,15 @@
 package com.scylladb.alternator;
 
+import com.scylladb.alternator.internal.AlternatorLiveNodes;
 import java.net.URI;
+import java.util.Collection;
 import java.util.function.Consumer;
 
+import software.amazon.awssdk.auth.credentials.AnonymousCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
 import software.amazon.awssdk.core.client.config.ClientAsyncConfiguration;
 import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
+import software.amazon.awssdk.core.interceptor.ExecutionInterceptor;
 import software.amazon.awssdk.core.internal.http.loader.DefaultSdkAsyncHttpClientBuilder;
 import software.amazon.awssdk.http.SdkHttpConfigurationOption;
 import software.amazon.awssdk.http.async.SdkAsyncHttpClient;
@@ -24,8 +28,9 @@ import software.amazon.awssdk.utils.AttributeMap;
  * automatically integrating {@link AlternatorEndpointProvider} for client-side load balancing.
  *
  * <p>The builder implements {@link DynamoDbAsyncClientBuilder}, ensuring compatibility with
- * standard AWS SDK v2 patterns while adding Alternator-specific configuration via {@link
- * AlternatorDynamoDbAsyncClientBuilder#withAlternatorConfig(AlternatorConfig)}.
+ * standard AWS SDK v2 patterns while adding Alternator-specific configuration via methods like
+ * {@link AlternatorDynamoDbAsyncClientBuilder#withDatacenter(String)} and
+ * {@link AlternatorDynamoDbAsyncClientBuilder#withRack(String)}.
  *
  * <p>Example usage:
  *
@@ -80,36 +85,98 @@ public class AlternatorDynamoDbAsyncClient {
    */
   public static class AlternatorDynamoDbAsyncClientBuilder implements DynamoDbAsyncClientBuilder {
     private final DynamoDbAsyncClientBuilder delegate;
-    private AlternatorConfig alternatorConfig;
+    private final AlternatorConfig.Builder configBuilder;
     private URI seedUri;
     private Region region;
     private boolean disableCertificateChecks = false;
     private boolean httpClientSet = false;
+    private boolean credentialsProviderSet = false;
 
     private AlternatorDynamoDbAsyncClientBuilder() {
       this.delegate = DynamoDbAsyncClient.builder();
+      this.configBuilder = AlternatorConfig.builder();
     }
 
     /**
-     * Sets the Alternator configuration including datacenter and rack settings.
+     * Sets the target datacenter for load balancing.
      *
-     * <p>When datacenter and/or rack are specified, the load balancer will only use nodes from the
-     * specified datacenter/rack combination. This is useful for:
+     * <p>When specified, only nodes from this datacenter will be used for load balancing.
+     * If not set, all nodes will be used.
      *
-     * <ul>
-     *   <li>Reducing cross-datacenter latency by connecting only to local nodes
-     *   <li>Isolating traffic to specific racks for testing or capacity management
-     * </ul>
-     *
-     * <p>If the server doesn't support datacenter/rack filtering, or if the specified
-     * datacenter/rack doesn't exist, the configuration will gracefully fall back to using all
-     * available nodes.
-     *
-     * @param config the Alternator configuration
+     * @param datacenter the datacenter name
      * @return this builder instance
      */
-    public AlternatorDynamoDbAsyncClientBuilder withAlternatorConfig(AlternatorConfig config) {
-      this.alternatorConfig = config;
+    public AlternatorDynamoDbAsyncClientBuilder withDatacenter(String datacenter) {
+      configBuilder.withDatacenter(datacenter);
+      return this;
+    }
+
+    /**
+     * Sets the target rack for load balancing.
+     *
+     * <p>When specified along with a datacenter, only nodes from this rack will be used
+     * for load balancing.
+     *
+     * @param rack the rack name
+     * @return this builder instance
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withRack(String rack) {
+      configBuilder.withRack(rack);
+      return this;
+    }
+
+    /**
+     * Sets the request compression algorithm.
+     *
+     * <p>When a compression algorithm other than {@link RequestCompressionAlgorithm#NONE} is
+     * specified, request bodies exceeding the minimum size threshold will be compressed.
+     *
+     * @param algorithm the compression algorithm to use, or null to disable compression
+     * @return this builder instance
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withCompressionAlgorithm(
+        RequestCompressionAlgorithm algorithm) {
+      configBuilder.withCompressionAlgorithm(algorithm);
+      return this;
+    }
+
+    /**
+     * Sets the minimum request body size (in bytes) that triggers compression.
+     *
+     * <p>Requests smaller than this threshold will not be compressed.
+     *
+     * @param minCompressionSizeBytes minimum request size in bytes, must be non-negative
+     * @return this builder instance
+     * @throws IllegalArgumentException if minCompressionSizeBytes is negative
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withMinCompressionSizeBytes(int minCompressionSizeBytes) {
+      configBuilder.withMinCompressionSizeBytes(minCompressionSizeBytes);
+      return this;
+    }
+
+    /**
+     * Enables or disables HTTP header optimization.
+     *
+     * <p>When enabled, outgoing requests will have their HTTP headers filtered to include
+     * only those in the configured whitelist, reducing network traffic overhead.
+     *
+     * @param optimizeHeaders true to enable header filtering, false to disable
+     * @return this builder instance
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withOptimizeHeaders(boolean optimizeHeaders) {
+      configBuilder.withOptimizeHeaders(optimizeHeaders);
+      return this;
+    }
+
+    /**
+     * Sets a custom whitelist of HTTP headers to preserve when optimization is enabled.
+     *
+     * @param headers collection of header names to preserve (case-insensitive)
+     * @return this builder instance
+     * @throws IllegalArgumentException if headers is null or empty
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withHeadersWhitelist(Collection<String> headers) {
+      configBuilder.withHeadersWhitelist(headers);
       return this;
     }
 
@@ -161,12 +228,19 @@ public class AlternatorDynamoDbAsyncClient {
      *       environment-based credentials
      * </ul>
      *
+     * <p>If no credentials provider is set, the client will automatically use anonymous
+     * credentials and exclude authentication headers when header optimization is enabled.
+     *
      * @param credentialsProvider the AWS credentials provider
      * @return this builder instance
      */
     @Override
     public AlternatorDynamoDbAsyncClientBuilder credentialsProvider(
         AwsCredentialsProvider credentialsProvider) {
+      if (credentialsProvider != null) {
+        this.credentialsProviderSet = true;
+        configBuilder.authenticationEnabled(true);
+      }
       delegate.credentialsProvider(credentialsProvider);
       return this;
     }
@@ -424,7 +498,7 @@ public class AlternatorDynamoDbAsyncClient {
      *   <li>Discover all nodes in the Alternator cluster via the {@code /localnodes} API
      *   <li>Distribute requests across discovered nodes using round-robin load balancing
      *   <li>Periodically refresh the node list (every 5 seconds) to handle topology changes
-     *   <li>Filter nodes by datacenter/rack if configured via {@link #withAlternatorConfig}
+     *   <li>Filter nodes by datacenter/rack if configured via {@link #withDatacenter} and {@link #withRack}
      * </ul>
      *
      * <p>If you need access to Alternator-specific APIs (such as {@code getLiveNodes()} or {@code
@@ -435,7 +509,7 @@ public class AlternatorDynamoDbAsyncClient {
      */
     @Override
     public DynamoDbAsyncClient build() {
-      return buildWithAlternatorAPI();
+      return buildWithAlternatorAPI().getClient();
     }
 
     /**
@@ -466,38 +540,65 @@ public class AlternatorDynamoDbAsyncClient {
                 + "Call endpointOverride(URI) with the seed Alternator node URI.");
       }
 
-      // Initialize alternatorConfig with defaults if null
-      if (alternatorConfig == null) {
-        alternatorConfig = AlternatorConfig.builder().build();
+      // Use anonymous credentials if no credentials were provided
+      if (!credentialsProviderSet) {
+        configBuilder.authenticationEnabled(false);
+        delegate.credentialsProvider(AnonymousCredentialsProvider.create());
       }
 
-      // Apply compression configuration if enabled
-      ClientOverrideConfiguration compressionConfig =
-          alternatorConfig.applyCompressionConfig(delegate.overrideConfiguration());
-      if (compressionConfig != null) {
-        delegate.overrideConfiguration(compressionConfig);
+      // Build the AlternatorConfig from the internal builder
+      AlternatorConfig alternatorConfig = configBuilder.build();
+
+      // Apply SDK-level interceptors from config (compression only)
+      if (alternatorConfig.getCompressionAlgorithm().isEnabled()) {
+        ClientOverrideConfiguration.Builder overrideBuilder =
+            delegate.overrideConfiguration() != null
+                ? delegate.overrideConfiguration().toBuilder()
+                : ClientOverrideConfiguration.builder();
+        overrideBuilder.addExecutionInterceptor(
+            new GzipRequestInterceptor(alternatorConfig.getMinCompressionSizeBytes()));
+        delegate.overrideConfiguration(overrideBuilder.build());
       }
 
-      // Configure async HTTP client to disable certificate checking if requested and no custom
-      // client was set
-      if (disableCertificateChecks && httpClientSet) {
+      // Configure async HTTP client with optional certificate checking and header filtering
+      if (httpClientSet && (disableCertificateChecks || alternatorConfig.isOptimizeHeaders())) {
         throw new IllegalStateException(
-            "you can't override client and have disableCertificateChecks at the same time");
+            "Cannot use custom HTTP client with disableCertificateChecks or optimizeHeaders. "
+                + "These options require configuring the HTTP client internally.");
       }
-      if (disableCertificateChecks && !httpClientSet) {
-        SdkAsyncHttpClient httpClient =
-            new DefaultSdkAsyncHttpClientBuilder()
-                .buildWithDefaults(
-                    AttributeMap.builder()
-                        .put(SdkHttpConfigurationOption.TRUST_ALL_CERTIFICATES, true)
-                        .build());
-        delegate.httpClient(httpClient);
+      if (!httpClientSet && (disableCertificateChecks || alternatorConfig.isOptimizeHeaders())) {
+        // Build the base async HTTP client
+        SdkAsyncHttpClient baseHttpClient;
+        if (disableCertificateChecks) {
+          baseHttpClient =
+              new DefaultSdkAsyncHttpClientBuilder()
+                  .buildWithDefaults(
+                      AttributeMap.builder()
+                          .put(SdkHttpConfigurationOption.TRUST_ALL_CERTIFICATES, true)
+                          .build());
+        } else {
+          baseHttpClient = new DefaultSdkAsyncHttpClientBuilder().build();
+        }
+
+        // Wrap with header filtering if enabled
+        if (alternatorConfig.isOptimizeHeaders()) {
+          delegate.httpClient(
+              new HeadersFilteringSdkAsyncHttpClient(
+                  baseHttpClient, alternatorConfig.getHeadersWhitelist()));
+        } else {
+          delegate.httpClient(baseHttpClient);
+        }
       }
 
-      // Create AlternatorEndpointProvider with the seed URI and DC/rack settings
-      AlternatorEndpointProvider alternatorEndpointProvider =
-          new AlternatorEndpointProvider(
+      // Create AlternatorLiveNodes and start node discovery
+      AlternatorLiveNodes liveNodes =
+          AlternatorLiveNodes.pickSupportedDatacenterRack(
               seedUri, alternatorConfig.getDatacenter(), alternatorConfig.getRack());
+      liveNodes.start();
+
+      // Create AlternatorEndpointProvider with the live nodes
+      AlternatorEndpointProvider alternatorEndpointProvider =
+          new AlternatorEndpointProvider(liveNodes);
 
       // Set the endpoint provider on the delegate
       delegate.endpointProvider(alternatorEndpointProvider);
@@ -509,7 +610,7 @@ public class AlternatorDynamoDbAsyncClient {
 
       // Build the underlying client and wrap it with Alternator metadata
       DynamoDbAsyncClient client = delegate.build();
-      return AlternatorDynamoDbAsyncClientWrapper.wrap(client, alternatorEndpointProvider);
+      return new AlternatorDynamoDbAsyncClientWrapper(client, liveNodes, alternatorEndpointProvider);
     }
   }
 }
