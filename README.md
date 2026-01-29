@@ -222,6 +222,94 @@ After building with `mvn package`, you can run this demo with the command:
 mvn exec:java -Dexec.mainClass=com.scylladb.alternator.test.Demo3 -Dexec.classpathScope=test
 ```
 
+### Using DynamoDB Enhanced Client
+
+The [DynamoDB Enhanced Client](https://docs.aws.amazon.com/sdk-for-java/latest/developer-guide/dynamodb-enhanced-client.html)
+provides a high-level, object-mapping interface that simplifies working with DynamoDB tables
+by mapping Java classes to table items. Since the enhanced client wraps the standard
+`DynamoDbClient`, load balancing works transparently.
+
+#### Synchronous Enhanced Client
+
+```java
+import com.scylladb.alternator.AlternatorDynamoDbClient;
+import software.amazon.awssdk.enhanced.dynamodb.DynamoDbEnhancedClient;
+import software.amazon.awssdk.enhanced.dynamodb.DynamoDbTable;
+import software.amazon.awssdk.enhanced.dynamodb.TableSchema;
+import software.amazon.awssdk.enhanced.dynamodb.mapper.annotations.DynamoDbBean;
+import software.amazon.awssdk.enhanced.dynamodb.mapper.annotations.DynamoDbPartitionKey;
+
+@DynamoDbBean
+public class Customer {
+    private String id;
+    private String name;
+
+    @DynamoDbPartitionKey
+    public String getId() { return id; }
+    public void setId(String id) { this.id = id; }
+    public String getName() { return name; }
+    public void setName(String name) { this.name = name; }
+}
+
+// 1. Create standard DynamoDbClient with load balancing
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("http://localhost:8043"))
+    .credentialsProvider(myCredentials)
+    .build();
+
+// 2. Wrap with DynamoDbEnhancedClient
+DynamoDbEnhancedClient enhancedClient = DynamoDbEnhancedClient.builder()
+    .dynamoDbClient(client)
+    .build();
+
+// 3. Use the enhanced client normally
+DynamoDbTable<Customer> customerTable = enhancedClient.table(
+    "customers",
+    TableSchema.fromBean(Customer.class)
+);
+customerTable.putItem(new Customer("123", "John Doe"));
+```
+
+You can see `src/test/java/com/scylladb/alternator/test/Demo4.java` for a
+complete example. After building with `mvn package`, you can run this demo with:
+```
+mvn exec:java -Dexec.mainClass=com.scylladb.alternator.test.Demo4 -Dexec.classpathScope=test
+```
+
+#### Asynchronous Enhanced Client
+
+```java
+import com.scylladb.alternator.AlternatorDynamoDbAsyncClient;
+import software.amazon.awssdk.enhanced.dynamodb.DynamoDbEnhancedAsyncClient;
+import software.amazon.awssdk.enhanced.dynamodb.DynamoDbAsyncTable;
+
+// 1. Create async DynamoDbAsyncClient with load balancing
+DynamoDbAsyncClient asyncClient = AlternatorDynamoDbAsyncClient.builder()
+    .endpointOverride(URI.create("http://localhost:8043"))
+    .credentialsProvider(myCredentials)
+    .build();
+
+// 2. Wrap with DynamoDbEnhancedAsyncClient
+DynamoDbEnhancedAsyncClient enhancedAsyncClient = DynamoDbEnhancedAsyncClient.builder()
+    .dynamoDbClient(asyncClient)
+    .build();
+
+// 3. Use the enhanced async client with CompletableFuture
+DynamoDbAsyncTable<Customer> customerTable = enhancedAsyncClient.table(
+    "customers",
+    TableSchema.fromBean(Customer.class)
+);
+customerTable.putItem(new Customer("123", "John Doe"))
+    .thenAccept(v -> System.out.println("Item saved"))
+    .join();
+```
+
+You can see `src/test/java/com/scylladb/alternator/test/Demo5.java` for a
+complete example. After building with `mvn package`, you can run this demo with:
+```
+mvn exec:java -Dexec.mainClass=com.scylladb.alternator.test.Demo5 -Dexec.classpathScope=test
+```
+
 ### Request Compression
 
 The library supports optional GZIP compression for HTTP request bodies, which can
