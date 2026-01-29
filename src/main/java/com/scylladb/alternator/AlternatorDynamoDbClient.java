@@ -3,6 +3,7 @@ package com.scylladb.alternator;
 import java.net.URI;
 import java.util.function.Consumer;
 
+import software.amazon.awssdk.auth.credentials.AnonymousCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
 import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
 import software.amazon.awssdk.http.SdkHttpClient;
@@ -442,6 +443,11 @@ public class AlternatorDynamoDbClient {
           alternatorConfig.applyHeadersConfig(delegate.overrideConfiguration());
       if (headersConfig != null) {
         delegate.overrideConfiguration(headersConfig);
+      }
+
+      // Use anonymous credentials if authentication is disabled
+      if (!alternatorConfig.isAuthenticationEnabled()) {
+        delegate.credentialsProvider(AnonymousCredentialsProvider.create());
       }
 
       // Configure HTTP client to disable certificate checking if requested and no custom client was

@@ -48,8 +48,25 @@ public class AlternatorConfig {
                   "Accept-Encoding",
                   "Content-Encoding",
                   "Authorization",
-                  "X-Amz-Date",
-                  "X-Amz-Content-Sha256")));
+                  "X-Amz-Date")));
+
+  /**
+   * Default set of HTTP headers to preserve when header optimization is enabled and authentication
+   * is disabled.
+   *
+   * <p>This whitelist excludes authentication headers ({@code Authorization}, {@code X-Amz-Date},
+   * {@code X-Amz-Content-Sha256}) for use with Alternator clusters that have authentication
+   * disabled.
+   *
+   * @since 1.0.6
+   * @see #DEFAULT_HEADERS_WHITELIST
+   */
+  public static final Set<String> DEFAULT_HEADERS_WHITELIST_NO_AUTH =
+      Collections.unmodifiableSet(
+          new HashSet<>(
+              Arrays.asList(
+                  "Host", "X-Amz-Target", "Content-Type", "Content-Length",
+                  "Accept-Encoding", "Content-Encoding")));
 
   private final String datacenter;
   private final String rack;
@@ -57,6 +74,7 @@ public class AlternatorConfig {
   private final int minCompressionSizeBytes;
   private final boolean optimizeHeaders;
   private final Set<String> headersWhitelist;
+  private final boolean authenticationEnabled;
 
   /**
    * Package-private constructor. Use {@link AlternatorConfig#builder()} to create instances.
@@ -67,6 +85,7 @@ public class AlternatorConfig {
    * @param minCompressionSizeBytes minimum request size in bytes to trigger compression
    * @param optimizeHeaders whether to enable HTTP header optimization
    * @param headersWhitelist the set of headers to preserve when optimization is enabled
+   * @param authenticationEnabled whether authentication is enabled
    */
   protected AlternatorConfig(
       String datacenter,
@@ -74,7 +93,8 @@ public class AlternatorConfig {
       RequestCompressionAlgorithm compressionAlgorithm,
       int minCompressionSizeBytes,
       boolean optimizeHeaders,
-      Set<String> headersWhitelist) {
+      Set<String> headersWhitelist,
+      boolean authenticationEnabled) {
     this.datacenter = datacenter != null ? datacenter : "";
     this.rack = rack != null ? rack : "";
     this.compressionAlgorithm =
@@ -82,10 +102,11 @@ public class AlternatorConfig {
     this.minCompressionSizeBytes =
         minCompressionSizeBytes >= 0 ? minCompressionSizeBytes : DEFAULT_MIN_COMPRESSION_SIZE_BYTES;
     this.optimizeHeaders = optimizeHeaders;
+    this.authenticationEnabled = authenticationEnabled;
     this.headersWhitelist =
         headersWhitelist != null
             ? Collections.unmodifiableSet(new HashSet<>(headersWhitelist))
-            : DEFAULT_HEADERS_WHITELIST;
+            : (authenticationEnabled ? DEFAULT_HEADERS_WHITELIST : DEFAULT_HEADERS_WHITELIST_NO_AUTH);
   }
 
   /**
@@ -161,6 +182,22 @@ public class AlternatorConfig {
    */
   public Set<String> getHeadersWhitelist() {
     return headersWhitelist;
+  }
+
+  /**
+   * Checks if authentication is enabled.
+   *
+   * <p>When authentication is disabled, the client will use anonymous credentials and exclude
+   * authentication headers ({@code Authorization}, {@code X-Amz-Date}, {@code X-Amz-Content-Sha256})
+   * from requests when header optimization is enabled.
+   *
+   * <p>This is useful when connecting to Alternator clusters that have authentication disabled.
+   *
+   * @return true if authentication is enabled (default), false if disabled
+   * @since 1.0.6
+   */
+  public boolean isAuthenticationEnabled() {
+    return authenticationEnabled;
   }
 
   /**
@@ -246,7 +283,8 @@ public class AlternatorConfig {
     private RequestCompressionAlgorithm compressionAlgorithm = RequestCompressionAlgorithm.NONE;
     private int minCompressionSizeBytes = DEFAULT_MIN_COMPRESSION_SIZE_BYTES;
     private boolean optimizeHeaders = false;
-    private Set<String> headersWhitelist = DEFAULT_HEADERS_WHITELIST;
+    private Set<String> headersWhitelist = null; // null means use default based on authenticationEnabled
+    private boolean authenticationEnabled = true;
 
     /** Package-private constructor. Use {@link AlternatorConfig#builder()} to create instances. */
     Builder() {}
@@ -363,7 +401,8 @@ public class AlternatorConfig {
      * <p>Only headers in this list will be sent with requests when header optimization is enabled.
      * All other headers will be removed. Header names are matched case-insensitively per RFC 7230.
      *
-     * <p>Default: {@link AlternatorConfig#DEFAULT_HEADERS_WHITELIST}
+     * <p>Default: {@link AlternatorConfig#DEFAULT_HEADERS_WHITELIST} when authentication is enabled,
+     * or {@link AlternatorConfig#DEFAULT_HEADERS_WHITELIST_NO_AUTH} when authentication is disabled.
      *
      * <p>Example:
      *
@@ -392,6 +431,46 @@ public class AlternatorConfig {
     }
 
     /**
+     * Enables or disables authentication for the Alternator connection.
+     *
+     * <p>When authentication is disabled:
+     *
+     * <ul>
+     *   <li>The client will use anonymous credentials (no AWS signature)
+     *   <li>Authentication headers ({@code Authorization}, {@code X-Amz-Date}, {@code
+     *       X-Amz-Content-Sha256}) will be excluded from the default headers whitelist when header
+     *       optimization is enabled
+     * </ul>
+     *
+     * <p>This is useful when connecting to Alternator clusters that have authentication disabled.
+     *
+     * <p>Default: true (authentication enabled)
+     *
+     * <p>Example:
+     *
+     * <pre>{@code
+     * AlternatorConfig config = AlternatorConfig.builder()
+     *     .withAuthenticationEnabled(false)
+     *     .withOptimizeHeaders(true)
+     *     .build();
+     *
+     * // No credentials needed - client will use anonymous credentials
+     * DynamoDbClient client = AlternatorDynamoDbClient.builder()
+     *     .endpointOverride(URI.create("http://localhost:8000"))
+     *     .withAlternatorConfig(config)
+     *     .build();
+     * }</pre>
+     *
+     * @param authenticationEnabled true to enable authentication (default), false to disable
+     * @return this builder instance
+     * @since 1.0.6
+     */
+    public Builder withAuthenticationEnabled(boolean authenticationEnabled) {
+      this.authenticationEnabled = authenticationEnabled;
+      return this;
+    }
+
+    /**
      * Builds and returns an {@link AlternatorConfig} instance with the configured settings.
      *
      * @return a new {@link AlternatorConfig} instance
@@ -403,7 +482,8 @@ public class AlternatorConfig {
           compressionAlgorithm,
           minCompressionSizeBytes,
           optimizeHeaders,
-          headersWhitelist);
+          headersWhitelist,
+          authenticationEnabled);
     }
   }
 }

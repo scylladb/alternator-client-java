@@ -129,8 +129,7 @@ public class AlternatorConfigHeadersTest {
     assertTrue(defaultHeaders.contains("Content-Encoding"));
     assertTrue(defaultHeaders.contains("Authorization"));
     assertTrue(defaultHeaders.contains("X-Amz-Date"));
-    assertTrue(defaultHeaders.contains("X-Amz-Content-Sha256"));
-    assertEquals(9, defaultHeaders.size());
+    assertEquals(8, defaultHeaders.size());
   }
 
   @Test
@@ -141,5 +140,70 @@ public class AlternatorConfigHeadersTest {
     } catch (UnsupportedOperationException e) {
       // Expected
     }
+  }
+
+  @Test
+  public void testAuthenticationEnabledByDefault() {
+    AlternatorConfig config = AlternatorConfig.builder().build();
+
+    assertTrue(config.isAuthenticationEnabled());
+  }
+
+  @Test
+  public void testAuthenticationDisabled() {
+    AlternatorConfig config =
+        AlternatorConfig.builder().withAuthenticationEnabled(false).build();
+
+    assertFalse(config.isAuthenticationEnabled());
+  }
+
+  @Test
+  public void testAuthenticationDisabledUsesNoAuthWhitelist() {
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withAuthenticationEnabled(false)
+            .withOptimizeHeaders(true)
+            .build();
+
+    Set<String> whitelist = config.getHeadersWhitelist();
+
+    // Should use the no-auth whitelist by default
+    assertTrue(whitelist.contains("Host"));
+    assertTrue(whitelist.contains("X-Amz-Target"));
+    assertTrue(whitelist.contains("Content-Type"));
+    assertTrue(whitelist.contains("Content-Length"));
+    assertFalse(whitelist.contains("Authorization"));
+    assertFalse(whitelist.contains("X-Amz-Date"));
+    assertEquals(AlternatorConfig.DEFAULT_HEADERS_WHITELIST_NO_AUTH, whitelist);
+  }
+
+  @Test
+  public void testAuthenticationDisabledWithCustomWhitelist() {
+    Set<String> customHeaders = new HashSet<>(Arrays.asList("Host", "X-Custom"));
+
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withAuthenticationEnabled(false)
+            .withOptimizeHeaders(true)
+            .withHeadersWhitelist(customHeaders)
+            .build();
+
+    // Custom whitelist should override the default no-auth whitelist
+    assertEquals(customHeaders, config.getHeadersWhitelist());
+  }
+
+  @Test
+  public void testDefaultHeadersWhitelistNoAuthContents() {
+    Set<String> noAuthHeaders = AlternatorConfig.DEFAULT_HEADERS_WHITELIST_NO_AUTH;
+
+    assertTrue(noAuthHeaders.contains("Host"));
+    assertTrue(noAuthHeaders.contains("X-Amz-Target"));
+    assertTrue(noAuthHeaders.contains("Content-Type"));
+    assertTrue(noAuthHeaders.contains("Content-Length"));
+    assertTrue(noAuthHeaders.contains("Accept-Encoding"));
+    assertTrue(noAuthHeaders.contains("Content-Encoding"));
+    assertFalse(noAuthHeaders.contains("Authorization"));
+    assertFalse(noAuthHeaders.contains("X-Amz-Date"));
+    assertEquals(6, noAuthHeaders.size());
   }
 }

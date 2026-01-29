@@ -188,7 +188,6 @@ public class HeadersFilterInterceptorTest {
             .appendHeader("Content-Length", "123")
             .appendHeader("Authorization", "AWS4-HMAC-SHA256...")
             .appendHeader("X-Amz-Date", "20240101T000000Z")
-            .appendHeader("X-Amz-Content-Sha256", "abcdef1234")
             .appendHeader("User-Agent", "aws-sdk-java/2.x") // Should be filtered
             .appendHeader("X-Amz-Sdk-Invocation-Id", "some-id") // Should be filtered
             .appendHeader("amz-sdk-request", "attempt=1") // Should be filtered
@@ -206,12 +205,44 @@ public class HeadersFilterInterceptorTest {
     assertTrue(filteredRequest.headers().containsKey("Content-Length"));
     assertTrue(filteredRequest.headers().containsKey("Authorization"));
     assertTrue(filteredRequest.headers().containsKey("X-Amz-Date"));
-    assertTrue(filteredRequest.headers().containsKey("X-Amz-Content-Sha256"));
 
     // SDK metadata headers should be filtered out
     assertFalse(filteredRequest.headers().containsKey("User-Agent"));
     assertFalse(filteredRequest.headers().containsKey("X-Amz-Sdk-Invocation-Id"));
     assertFalse(filteredRequest.headers().containsKey("amz-sdk-request"));
+  }
+
+  @Test
+  public void testNoAuthWhitelistExcludesAuthHeaders() {
+    HeadersFilterInterceptor interceptor =
+        new HeadersFilterInterceptor(AlternatorConfig.DEFAULT_HEADERS_WHITELIST_NO_AUTH);
+
+    SdkHttpRequest originalRequest =
+        SdkHttpRequest.builder()
+            .method(SdkHttpMethod.POST)
+            .uri(URI.create("https://localhost:8043"))
+            .appendHeader("Host", "localhost:8043")
+            .appendHeader("X-Amz-Target", "DynamoDB_20120810.GetItem")
+            .appendHeader("Content-Type", "application/x-amz-json-1.0")
+            .appendHeader("Content-Length", "123")
+            .appendHeader("Authorization", "AWS4-HMAC-SHA256...") // Should be filtered
+            .appendHeader("X-Amz-Date", "20240101T000000Z") // Should be filtered
+            .build();
+
+    Context.ModifyHttpRequest context = new TestModifyHttpRequestContext(originalRequest);
+
+    SdkHttpRequest filteredRequest =
+        interceptor.modifyHttpRequest(context, new ExecutionAttributes());
+
+    // Non-auth headers should be preserved
+    assertTrue(filteredRequest.headers().containsKey("Host"));
+    assertTrue(filteredRequest.headers().containsKey("X-Amz-Target"));
+    assertTrue(filteredRequest.headers().containsKey("Content-Type"));
+    assertTrue(filteredRequest.headers().containsKey("Content-Length"));
+
+    // Auth headers should be filtered out
+    assertFalse(filteredRequest.headers().containsKey("Authorization"));
+    assertFalse(filteredRequest.headers().containsKey("X-Amz-Date"));
   }
 
   @Test

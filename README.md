@@ -357,3 +357,26 @@ AlternatorConfig config = AlternatorConfig.builder()
     .withOptimizeHeaders(true)
     .build();
 ```
+
+#### No authentication mode
+
+When connecting to Alternator clusters with authentication disabled, you can configure the client
+to skip authentication entirely:
+
+```java
+AlternatorConfig config = AlternatorConfig.builder()
+    .withAuthenticationEnabled(false)
+    .withOptimizeHeaders(true)
+    .build();
+
+// No credentials needed - client will use anonymous credentials
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("http://localhost:8000"))
+    .withAlternatorConfig(config)
+    .build();
+```
+
+When `withAuthenticationEnabled(false)` is set:
+- The client uses anonymous credentials (no AWS signature)
+- When header optimization is enabled, authentication headers (`Authorization`, `X-Amz-Date`)
+  are automatically excluded from the whitelist
