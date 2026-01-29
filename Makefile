@@ -31,7 +31,7 @@ DOCKER_CACHE_FILE := $(DOCKER_CACHE_DIR)/scylla-image.tar
 CERT_CACHE_DIR := $(MAKEFILE_PATH)/.cert-cache
 CERT_DIR := $(MAKEFILE_PATH)/test/scylla
 
-.PHONY: clean verify lint lint-fix compile compile-test test test-unit test-integration release-prepare release release-dry-run
+.PHONY: clean verify lint lint-fix compile compile-test compile-demo test test-unit test-integration test-demo release-prepare release release-dry-run
 
 clean:
 	${mvn} clean
@@ -53,6 +53,9 @@ compile:
 compile-test:
 	${mvn} test-compile
 
+compile-demo:
+	${mvn} test-compile
+
 test-unit:
 	${mvn} test
 
@@ -62,8 +65,14 @@ test-integration: scylla-start
 	sleep 30
 	INTEGRATION_TESTS=true ALTERNATOR_HOST=172.39.0.2 ALTERNATOR_PORT=9998 ALTERNATOR_HTTPS=false \
 		${mvn} test -Dtest=AlternatorDynamoDbClientIT,AlternatorDynamoDbAsyncClientIT || (make scylla-stop && exit 1)
-	${mvn} exec:java -Dexec.mainClass=com.scylladb.alternator.test.Demo2 -Dexec.classpathScope=test -Dexec.args="--endpoint http://172.39.0.2:9998" || (make scylla-stop && exit 1)
-	${mvn} exec:java -Dexec.mainClass=com.scylladb.alternator.test.Demo3 -Dexec.classpathScope=test -Dexec.args="--endpoint http://172.39.0.2:9998" || (make scylla-stop && exit 1)
+	make scylla-stop
+
+.PHONY: test-demo
+test-demo: scylla-start
+	@echo "Waiting for Scylla cluster to be ready..."
+	sleep 30
+	${mvn} exec:java -Dexec.mainClass=com.scylladb.alternator.demo.Demo2 -Dexec.classpathScope=test -Dexec.args="--endpoint http://172.39.0.2:9998" || (make scylla-stop && exit 1)
+	${mvn} exec:java -Dexec.mainClass=com.scylladb.alternator.demo.Demo3 -Dexec.classpathScope=test -Dexec.args="--endpoint http://172.39.0.2:9998" || (make scylla-stop && exit 1)
 	make scylla-stop
 
 .PHONY: release-prepare

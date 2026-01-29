@@ -1,4 +1,4 @@
-package com.scylladb.alternator.test;
+package com.scylladb.alternator.demo;
 
 import com.scylladb.alternator.internal.LazyQueryPlan;
 import java.net.URI;

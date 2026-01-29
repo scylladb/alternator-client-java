@@ -1,4 +1,4 @@
-package com.scylladb.alternator.test;
+package com.scylladb.alternator.demo;
 
 import static java.util.concurrent.Executors.newFixedThreadPool;
 
