@@ -28,24 +28,11 @@ public class AlternatorEndpointProvider implements DynamoDbEndpointProvider {
   /**
    * Constructor for AlternatorEndpointProvider.
    *
-   * @param seedURI a {@link java.net.URI} object
+   * @param liveNodes the {@link AlternatorLiveNodes} instance to use for endpoint resolution
    */
-  public AlternatorEndpointProvider(URI seedURI) {
-    this(seedURI, "", "");
-  }
-
-  /**
-   * Constructor for AlternatorEndpointProvider.
-   *
-   * @param seedURI a {@link java.net.URI} object
-   * @param datacenter a {@link java.lang.String} object
-   * @param rack a {@link java.lang.String} object
-   * @since 1.0.1
-   */
-  public AlternatorEndpointProvider(URI seedURI, String datacenter, String rack) {
-    futureCache = new ConcurrentHashMap<>();
-    liveNodes = AlternatorLiveNodes.pickSupportedDatacenterRack(seedURI, datacenter, rack);
-    liveNodes.start();
+  public AlternatorEndpointProvider(AlternatorLiveNodes liveNodes) {
+    this.futureCache = new ConcurrentHashMap<>();
+    this.liveNodes = liveNodes;
   }
 
   /** {@inheritDoc} */
