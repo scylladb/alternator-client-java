@@ -1,5 +1,10 @@
 package com.scylladb.alternator.internal;
 
+import com.scylladb.alternator.AlternatorConfig;
+import com.scylladb.alternator.routing.ClusterScope;
+import com.scylladb.alternator.routing.DatacenterScope;
+import com.scylladb.alternator.routing.RackScope;
+import com.scylladb.alternator.routing.RoutingScope;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
@@ -46,8 +51,7 @@ public class AlternatorLiveNodes extends Thread {
   private final AtomicReference<List<URI>> liveNodes;
   private final List<URI> initialNodes;
   private final AtomicInteger nextLiveNodeIndex;
-  private final String rack;
-  private final String datacenter;
+  private final AlternatorConfig config;
   private final AtomicBoolean running = new AtomicBoolean(false);
   private final HttpClient httpClient;
 
@@ -82,38 +86,191 @@ public class AlternatorLiveNodes extends Thread {
    * @param liveNode a {@link java.net.URI} object
    * @param datacenter a {@link java.lang.String} object
    * @param rack a {@link java.lang.String} object
+   * @deprecated Use {@link #AlternatorLiveNodes(AlternatorConfig)} instead.
    */
+  @Deprecated
   public AlternatorLiveNodes(URI liveNode, String datacenter, String rack) {
     this(
-        Collections.singletonList(liveNode),
-        liveNode.getScheme(),
-        liveNode.getPort(),
-        datacenter,
-        rack);
+        AlternatorConfig.builder()
+            .withSeedNode(liveNode)
+            .withRoutingScope(deriveRoutingScope(datacenter, rack))
+            .build());
+  }
+
+  /**
+   * Constructor for AlternatorLiveNodes with RoutingScope.
+   *
+   * @param liveNode a {@link java.net.URI} object
+   * @param routingScope the routing scope for node targeting
+   * @since 1.0.5
+   * @deprecated Use {@link #AlternatorLiveNodes(AlternatorConfig)} instead.
+   */
+  @Deprecated
+  public AlternatorLiveNodes(URI liveNode, RoutingScope routingScope) {
+    this(AlternatorConfig.builder().withSeedNode(liveNode).withRoutingScope(routingScope).build());
+  }
+
+  /**
+   * Constructor for AlternatorLiveNodes with a seed URI and AlternatorConfig.
+   *
+   * @param seedUri the seed URI for the initial node
+   * @param config the Alternator configuration containing routing scope and other settings
+   * @since 1.0.5
+   * @deprecated Use {@link #AlternatorLiveNodes(AlternatorConfig)} with config containing seed
+   *     node.
+   */
+  @Deprecated
+  public AlternatorLiveNodes(URI seedUri, AlternatorConfig config) {
+    this(
+        config.getSeedHosts().isEmpty()
+            ? AlternatorConfig.builder()
+                .withSeedNode(seedUri)
+                .withRoutingScope(config.getRoutingScope())
+                .withCompressionAlgorithm(config.getCompressionAlgorithm())
+                .withMinCompressionSizeBytes(config.getMinCompressionSizeBytes())
+                .withOptimizeHeaders(config.isOptimizeHeaders())
+                .withHeadersWhitelist(config.getHeadersWhitelist())
+                .build()
+            : config);
   }
 
   /**
    * Constructor for AlternatorLiveNodes.
    *
-   * @param liveNodes a {@link java.util.List} object
-   * @param scheme a {@link java.lang.String} object
-   * @param port a int
+   * @param liveNodes a {@link java.util.List} object of URIs
+   * @param scheme a {@link java.lang.String} object (ignored, extracted from URIs)
+   * @param port a int (ignored, extracted from URIs)
    * @param datacenter a {@link java.lang.String} object
    * @param rack a {@link java.lang.String} object
    * @since 1.0.1
+   * @deprecated Use {@link #AlternatorLiveNodes(AlternatorConfig)} instead.
    */
+  @Deprecated
   public AlternatorLiveNodes(
       List<URI> liveNodes, String scheme, int port, String datacenter, String rack) {
-    if (liveNodes == null || liveNodes.isEmpty()) {
-      throw new RuntimeException("liveNodes cannot be null or empty");
+    this(buildConfigFromUris(liveNodes, datacenter, rack, null));
+  }
+
+  /**
+   * Constructor for AlternatorLiveNodes with RoutingScope.
+   *
+   * @param liveNodes a {@link java.util.List} object of URIs
+   * @param scheme a {@link java.lang.String} object (ignored, extracted from URIs)
+   * @param port a int (ignored, extracted from URIs)
+   * @param routingScope the routing scope for node targeting
+   * @since 1.0.5
+   * @deprecated Use {@link #AlternatorLiveNodes(AlternatorConfig)} instead.
+   */
+  @Deprecated
+  public AlternatorLiveNodes(
+      List<URI> liveNodes, String scheme, int port, RoutingScope routingScope) {
+    this(buildConfigFromUris(liveNodes, null, null, routingScope));
+  }
+
+  /**
+   * Constructor for AlternatorLiveNodes with AlternatorConfig containing seed nodes, scheme, port,
+   * and routing settings.
+   *
+   * @param liveNodes a {@link java.util.List} object of URIs
+   * @param scheme a {@link java.lang.String} object (ignored, extracted from URIs)
+   * @param port a int (ignored, extracted from URIs)
+   * @param config the Alternator configuration containing routing scope and other settings
+   * @since 1.0.5
+   * @deprecated Use {@link #AlternatorLiveNodes(AlternatorConfig)} with config containing seed
+   *     nodes.
+   */
+  @Deprecated
+  public AlternatorLiveNodes(
+      List<URI> liveNodes, String scheme, int port, AlternatorConfig config) {
+    this(
+        config.getSeedHosts().isEmpty()
+            ? buildConfigFromUris(liveNodes, null, null, config.getRoutingScope())
+            : config);
+  }
+
+  /**
+   * Helper method to build AlternatorConfig from a list of URIs.
+   *
+   * @param uris the list of URIs
+   * @param datacenter optional datacenter
+   * @param rack optional rack
+   * @param routingScope optional routing scope
+   * @return the built config
+   */
+  private static AlternatorConfig buildConfigFromUris(
+      List<URI> uris, String datacenter, String rack, RoutingScope routingScope) {
+    if (uris == null || uris.isEmpty()) {
+      throw new RuntimeException("uris cannot be null or empty");
     }
-    this.alternatorScheme = scheme;
-    this.initialNodes = liveNodes;
+    URI first = uris.get(0);
+    List<String> hosts = new ArrayList<>();
+    for (URI uri : uris) {
+      hosts.add(uri.getHost());
+    }
+    RoutingScope effectiveScope =
+        routingScope != null ? routingScope : deriveRoutingScope(datacenter, rack);
+    return AlternatorConfig.builder()
+        .withSeedHosts(hosts)
+        .withScheme(first.getScheme())
+        .withPort(first.getPort())
+        .withRoutingScope(effectiveScope)
+        .build();
+  }
+
+  /**
+   * Derives a RoutingScope from legacy datacenter/rack parameters.
+   *
+   * @param datacenter the datacenter name (may be null or empty)
+   * @param rack the rack name (may be null or empty)
+   * @return the derived routing scope
+   */
+  private static RoutingScope deriveRoutingScope(String datacenter, String rack) {
+    String dc = datacenter != null ? datacenter : "";
+    String r = rack != null ? rack : "";
+    if (dc.isEmpty()) {
+      return ClusterScope.create();
+    }
+    if (r.isEmpty()) {
+      return DatacenterScope.of(dc, ClusterScope.create());
+    }
+    return RackScope.of(dc, r, DatacenterScope.of(dc, ClusterScope.create()));
+  }
+
+  /**
+   * Constructor for AlternatorLiveNodes with AlternatorConfig.
+   *
+   * <p>The config must contain seed hosts (via {@link AlternatorConfig.Builder#withSeedHost},
+   * {@link AlternatorConfig.Builder#withSeedHosts}, or {@link
+   * AlternatorConfig.Builder#withSeedNode}). The scheme and port must also be configured.
+   *
+   * @param config the Alternator configuration containing seed hosts, scheme, port, routing scope,
+   *     and other settings
+   * @throws RuntimeException if config is null or contains no seed hosts
+   * @since 1.0.5
+   */
+  public AlternatorLiveNodes(AlternatorConfig config) {
+    if (config == null) {
+      throw new RuntimeException("config cannot be null");
+    }
+    List<String> seedHosts = config.getSeedHosts();
+    if (seedHosts == null || seedHosts.isEmpty()) {
+      throw new RuntimeException("config must contain at least one seed host");
+    }
+    this.alternatorScheme = config.getScheme();
+    this.alternatorPort = config.getPort();
+    // Build URIs from hosts, scheme, and port
+    List<URI> seedUris = new ArrayList<>();
+    for (String host : seedHosts) {
+      try {
+        seedUris.add(new URI(alternatorScheme, null, host, alternatorPort, null, null, null));
+      } catch (URISyntaxException e) {
+        throw new RuntimeException("Invalid host: " + host, e);
+      }
+    }
+    this.initialNodes = seedUris;
     this.liveNodes = new AtomicReference<>();
-    this.alternatorPort = port;
     this.nextLiveNodeIndex = new AtomicInteger(0);
-    this.rack = rack;
-    this.datacenter = datacenter;
+    this.config = config;
     try {
       this.validate();
     } catch (ValidationError e) {
@@ -121,6 +278,29 @@ public class AlternatorLiveNodes extends Thread {
     }
     this.liveNodes.set(initialNodes);
     this.httpClient = prepareHttpClient();
+  }
+
+  /**
+   * Derives a RoutingScope from legacy datacenter/rack configuration.
+   *
+   * @param datacenter the datacenter name
+   * @param rack the rack name
+   * @return the derived routing scope, or ClusterScope if neither is set
+   */
+  private static RoutingScope deriveRoutingScopeFromLegacy(String datacenter, String rack) {
+    String dc = datacenter != null ? datacenter : "";
+    String r = rack != null ? rack : "";
+    if (dc.isEmpty() && r.isEmpty()) {
+      return ClusterScope.create();
+    }
+    if (dc.isEmpty()) {
+      // Rack without datacenter is not valid, treat as cluster-wide
+      return ClusterScope.create();
+    }
+    if (r.isEmpty()) {
+      return DatacenterScope.of(dc, ClusterScope.create());
+    }
+    return RackScope.of(dc, r, DatacenterScope.of(dc, ClusterScope.create()));
   }
 
   /** {@inheritDoc} */
@@ -248,11 +428,30 @@ public class AlternatorLiveNodes extends Thread {
   }
 
   private void updateLiveNodes() throws IOException {
-    List<URI> newHosts = getNodes(nextAsLocalNodesURI());
-    if (!newHosts.isEmpty()) {
-      liveNodes.set(newHosts);
-      logger.log(Level.FINE, "Updated hosts to " + liveNodes);
+    RoutingScope scope = this.config.getRoutingScope();
+    while (scope != null) {
+      String query = scope.getLocalNodesQuery();
+      URI uri = nextAsURI("/localnodes", query.isEmpty() ? null : query);
+      List<URI> nodes = getNodes(uri);
+      if (!nodes.isEmpty()) {
+        liveNodes.set(nodes);
+        logger.log(
+            Level.FINE, "Updated hosts to " + liveNodes + " using " + scope.getDescription());
+        return;
+      }
+      RoutingScope fallback = scope.getFallback();
+      if (fallback != null) {
+        logger.log(
+            Level.WARNING,
+            "No nodes found for "
+                + scope.getDescription()
+                + ", falling back to "
+                + fallback.getDescription());
+      }
+      scope = fallback;
     }
+    // No nodes found in any scope - keep the current list
+    logger.log(Level.WARNING, "No nodes found in any routing scope, keeping existing node list");
   }
 
   private List<URI> getNodes(URI uri) throws IOException {
@@ -288,24 +487,6 @@ public class AlternatorLiveNodes extends Thread {
       }
     }
     return newHosts;
-  }
-
-  private URI nextAsLocalNodesURI() {
-    if (this.rack.isEmpty() && this.datacenter.isEmpty()) {
-      return nextAsURI("/localnodes", null);
-    }
-    String query = "";
-    if (!this.rack.isEmpty()) {
-      query = "rack=" + this.rack;
-    }
-    if (!this.datacenter.isEmpty()) {
-      if (query.isEmpty()) {
-        query = "dc=" + this.datacenter;
-      } else {
-        query += "&dc=" + this.datacenter;
-      }
-    }
-    return nextAsURI("/localnodes", query);
   }
 
   private static HttpClient prepareHttpClient() {
@@ -365,8 +546,8 @@ public class AlternatorLiveNodes extends Thread {
   }
 
   /**
-   * Validates the server's node list for a specified datacenter and rack. This method checks
-   * whether the server returns a non-empty node list for the provided datacenter and rack.
+   * Validates the server's node list for the configured routing scope. This method checks whether
+   * the server returns a non-empty node list for the configured routing scope.
    *
    * <p>If the server returns a non-empty node list, no exception is thrown.
    *
@@ -375,14 +556,20 @@ public class AlternatorLiveNodes extends Thread {
    * @since 1.0.1
    */
   public void checkIfRackAndDatacenterSetCorrectly() throws FailedToCheck, ValidationError {
-    if (this.rack.isEmpty() && this.datacenter.isEmpty()) {
+    RoutingScope scope = this.config.getRoutingScope();
+    String query = scope.getLocalNodesQuery();
+    if (query.isEmpty()) {
+      // ClusterScope - no filtering needed
       return;
     }
     try {
-      List<URI> nodes = getNodes(nextAsLocalNodesURI());
+      URI uri = nextAsURI("/localnodes", query);
+      List<URI> nodes = getNodes(uri);
       if (nodes.isEmpty()) {
         throw new ValidationError(
-            "node returned empty list, datacenter or rack are set incorrectly");
+            "node returned empty list for "
+                + scope.getDescription()
+                + ", routing scope may be set incorrectly");
       }
     } catch (IOException e) {
       throw new FailedToCheck("failed to read list of nodes from the node", e);
@@ -431,63 +618,13 @@ public class AlternatorLiveNodes extends Thread {
   }
 
   /**
-   * Creates an AlternatorLiveNodes instance with datacenter/rack configuration that is supported by
-   * the server. This method validates the configuration and falls back gracefully if the server
-   * doesn't support datacenter/rack filtering or if the specified datacenter/rack doesn't exist.
+   * Returns the routing scope configured for this instance.
    *
-   * @param seedURI a {@link java.net.URI} object
-   * @param datacenter a {@link java.lang.String} object
-   * @param rack a {@link java.lang.String} object
-   * @return a {@link AlternatorLiveNodes} object
-   * @since 1.0.3
+   * @return the routing scope (never null)
+   * @since 1.0.5
    */
-  public static AlternatorLiveNodes pickSupportedDatacenterRack(
-      URI seedURI, String datacenter, String rack) {
-    AlternatorLiveNodes liveNodesInstance = new AlternatorLiveNodes(seedURI, datacenter, rack);
-    try {
-      liveNodesInstance.validate();
-    } catch (Exception e) {
-      throw new RuntimeException(e);
-    }
-
-    if (datacenter.isEmpty() && rack.isEmpty()) {
-      return liveNodesInstance;
-    }
-
-    try {
-      if (!liveNodesInstance.checkIfRackDatacenterFeatureIsSupported()) {
-        logger.log(
-            Level.SEVERE,
-            String.format(
-                "server %s does not support rack or datacenter filtering, fallback to no dc and no rack",
-                seedURI));
-        return new AlternatorLiveNodes(seedURI, "", "");
-      }
-    } catch (AlternatorLiveNodes.FailedToCheck e) {
-      throw new RuntimeException(e);
-    }
-
-    try {
-      liveNodesInstance.checkIfRackAndDatacenterSetCorrectly();
-      return liveNodesInstance;
-    } catch (AlternatorLiveNodes.FailedToCheck e) {
-      throw new RuntimeException(e);
-    } catch (AlternatorLiveNodes.ValidationError e) {
-      if (!rack.isEmpty()) {
-        logger.log(
-            Level.WARNING,
-            String.format(
-                "server %s does not know rack `%s` at datacenter `%s`, fallback to no rack",
-                seedURI, rack, datacenter));
-        return pickSupportedDatacenterRack(seedURI, datacenter, "");
-      }
-      logger.log(
-          Level.WARNING,
-          String.format(
-              "server %s does not know datacenter `%s`, fallback to no datacenter",
-              seedURI, datacenter));
-      return new AlternatorLiveNodes(seedURI, "", "");
-    }
+  public RoutingScope getRoutingScope() {
+    return config.getRoutingScope();
   }
 
   /**

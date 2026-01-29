@@ -3,6 +3,10 @@ package com.scylladb.alternator.demo;
 import static java.util.concurrent.Executors.newFixedThreadPool;
 
 import com.scylladb.alternator.AlternatorDynamoDbAsyncClient;
+import com.scylladb.alternator.routing.ClusterScope;
+import com.scylladb.alternator.routing.DatacenterScope;
+import com.scylladb.alternator.routing.RackScope;
+import com.scylladb.alternator.routing.RoutingScope;
 import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URL;
@@ -104,15 +108,10 @@ public class Demo3 {
 
     // Build the async client using AlternatorDynamoDbAsyncClient
     AlternatorDynamoDbAsyncClient.AlternatorDynamoDbAsyncClientBuilder b =
-        AlternatorDynamoDbAsyncClient.builder().region(region).asyncConfiguration(cas);
-
-    // Set datacenter and rack if specified
-    if (datacenter != null && !datacenter.isEmpty()) {
-      b.withDatacenter(datacenter);
-    }
-    if (rack != null && !rack.isEmpty()) {
-      b.withRack(rack);
-    }
+        AlternatorDynamoDbAsyncClient.builder()
+            .region(region)
+            .asyncConfiguration(cas)
+            .withRoutingScope(deriveRoutingScope(datacenter, rack));
 
     if (endpoint != null) {
       URI uri = URI.create(endpoint);
@@ -156,5 +155,15 @@ public class Demo3 {
 
     System.out.println("Done");
     System.exit(0);
+  }
+
+  static RoutingScope deriveRoutingScope(String datacenter, String rack) {
+    if (datacenter == null || datacenter.isEmpty()) {
+      return ClusterScope.create();
+    }
+    if (rack == null || rack.isEmpty()) {
+      return DatacenterScope.of(datacenter, ClusterScope.create());
+    }
+    return RackScope.of(datacenter, rack, DatacenterScope.of(datacenter, ClusterScope.create()));
   }
 }

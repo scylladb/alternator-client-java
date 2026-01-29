@@ -100,24 +100,7 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
 ```
 
 The `AlternatorDynamoDbClient` automatically integrates the `AlternatorEndpointProvider`
-to provide load balancing across all Alternator nodes. You can also configure datacenter and
-rack filtering:
-
-```java
-    import com.scylladb.alternator.AlternatorConfig;
-import com.scylladb.alternator.AlternatorDynamoDbClient;
-
-AlternatorConfig config = AlternatorConfig.builder()
-    .withDatacenter("dc1")
-    .withRack("rack1")
-    .build();
-
-DynamoDbClient client = AlternatorDynamoDbClient.builder()
-    .endpointOverride(URI.create("https://127.0.0.1:8043"))
-    .credentialsProvider(myCredentials)
-    .withAlternatorConfig(config)
-    .build();
-```
+to provide load balancing across all Alternator nodes.
 
 #### Option 2: Using `AlternatorEndpointProvider` directly (Outdated)
 
@@ -175,24 +158,6 @@ static AwsCredentialsProvider myCredentials =
 DynamoDbAsyncClient client = AlternatorDynamoDbAsyncClient.builder()
     .endpointOverride(URI.create("https://127.0.0.1:8043"))
     .credentialsProvider(myCredentials)
-    .build();
-```
-
-You can also configure datacenter and rack filtering:
-
-```java
-    import com.scylladb.alternator.AlternatorConfig;
-import com.scylladb.alternator.AlternatorDynamoDbAsyncClient;
-
-AlternatorConfig config = AlternatorConfig.builder()
-    .withDatacenter("dc1")
-    .withRack("rack1")
-    .build();
-
-DynamoDbAsyncClient client = AlternatorDynamoDbAsyncClient.builder()
-    .endpointOverride(URI.create("https://127.0.0.1:8043"))
-    .credentialsProvider(myCredentials)
-    .withAlternatorConfig(config)
     .build();
 ```
 
@@ -478,4 +443,78 @@ credentials provider is set, the client automatically uses anonymous credentials
 DynamoDbClient client = AlternatorDynamoDbClient.builder()
     .endpointOverride(URI.create("http://localhost:8000"))
     .build();
+```
+
+### Routing Scope (Datacenter/Rack Targeting)
+
+The library supports targeting specific datacenters and racks with hierarchical fallback chains.
+This allows you to prefer local nodes while gracefully falling back to other nodes when needed.
+
+#### Basic Usage
+
+```java
+import com.scylladb.alternator.AlternatorDynamoDbClient;
+import com.scylladb.alternator.routing.ClusterScope;
+import com.scylladb.alternator.routing.DatacenterScope;
+import com.scylladb.alternator.routing.RackScope;
+
+// Target a specific rack with fallback to datacenter, then cluster
+RoutingScope scope = RackScope.of("dc1", "rack1",
+    DatacenterScope.of("dc1",
+        ClusterScope.create()));
+
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://127.0.0.1:8043"))
+    .credentialsProvider(myCredentials)
+    .withRoutingScope(scope)
+    .build();
+```
+
+#### Scope Types
+
+- **ClusterScope** - Use all nodes in the cluster (no filtering)
+- **DatacenterScope** - Use only nodes in a specific datacenter
+- **RackScope** - Use only nodes in a specific rack within a datacenter
+
+#### Fallback Chains
+
+Each scope can have a fallback scope. When no nodes are available in the current scope,
+the client automatically falls back to the next scope in the chain:
+
+```java
+// Rack -> Datacenter -> Cluster fallback chain
+RoutingScope scope = RackScope.of("dc1", "rack1",
+    DatacenterScope.of("dc1",
+        ClusterScope.create()));
+
+// Rack -> Another Rack -> Datacenter -> Cluster
+RoutingScope scope = RackScope.of("dc1", "rack1",
+    RackScope.of("dc1", "rack2",
+        DatacenterScope.of("dc1",
+            ClusterScope.create())));
+
+// Datacenter -> Cluster fallback
+RoutingScope scope = DatacenterScope.of("dc1", ClusterScope.create());
+
+// Strict targeting (no fallback) - fails if no nodes available
+RoutingScope scope = DatacenterScope.of("dc1", null);
+```
+
+#### Using with AlternatorConfig
+
+You can also configure routing scope via `AlternatorConfig`:
+
+```java
+import com.scylladb.alternator.AlternatorConfig;
+
+AlternatorConfig config = AlternatorConfig.builder()
+    .withSeedHosts(Arrays.asList("192.168.1.100", "192.168.1.101"))
+    .withScheme("https")
+    .withPort(8043)
+    .withRoutingScope(DatacenterScope.of("dc1", ClusterScope.create()))
+    .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
+    .withOptimizeHeaders(true)
+    .build();
+
+AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config);
 ```

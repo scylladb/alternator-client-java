@@ -1,6 +1,10 @@
 package com.scylladb.alternator.demo;
 
 import com.scylladb.alternator.AlternatorDynamoDbClient;
+import com.scylladb.alternator.routing.ClusterScope;
+import com.scylladb.alternator.routing.DatacenterScope;
+import com.scylladb.alternator.routing.RackScope;
+import com.scylladb.alternator.routing.RoutingScope;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.security.cert.X509Certificate;
@@ -69,22 +73,26 @@ public class Demo2 {
                     .put(SdkHttpConfigurationOption.TRUST_ALL_CERTIFICATES, true)
                     .build());
 
-    // Build client with datacenter/rack settings
-    AlternatorDynamoDbClient.AlternatorDynamoDbClientBuilder builder =
-        AlternatorDynamoDbClient.builder()
-            .endpointOverride(url)
-            .credentialsProvider(myCredentials)
-            .httpClient(http)
-            .region(Region.US_EAST_1); // unused, but if missing can result in error
+    // Build client with routing scope
+    RoutingScope scope = deriveRoutingScope(datacenter, rack);
 
-    if (datacenter != null && !datacenter.isEmpty()) {
-      builder.withDatacenter(datacenter);
-    }
-    if (rack != null && !rack.isEmpty()) {
-      builder.withRack(rack);
-    }
+    return AlternatorDynamoDbClient.builder()
+        .endpointOverride(url)
+        .credentialsProvider(myCredentials)
+        .httpClient(http)
+        .region(Region.US_EAST_1) // unused, but if missing can result in error
+        .withRoutingScope(scope)
+        .build();
+  }
 
-    return builder.build();
+  static RoutingScope deriveRoutingScope(String datacenter, String rack) {
+    if (datacenter == null || datacenter.isEmpty()) {
+      return ClusterScope.create();
+    }
+    if (rack == null || rack.isEmpty()) {
+      return DatacenterScope.of(datacenter, ClusterScope.create());
+    }
+    return RackScope.of(datacenter, rack, DatacenterScope.of(datacenter, ClusterScope.create()));
   }
 
   public static void main(String[] args) {

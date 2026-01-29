@@ -2,6 +2,9 @@ package com.scylladb.alternator;
 
 import static org.junit.Assert.*;
 
+import com.scylladb.alternator.routing.ClusterScope;
+import com.scylladb.alternator.routing.DatacenterScope;
+import com.scylladb.alternator.routing.RackScope;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
@@ -77,16 +80,16 @@ public class AlternatorConfigHeadersTest {
   }
 
   @Test
-  public void testHeadersOptimizationWithDatacenterAndRack() {
+  public void testHeadersOptimizationWithRoutingScope() {
     AlternatorConfig config =
         AlternatorConfig.builder()
-            .withDatacenter("us-east")
-            .withRack("rack1")
+            .withRoutingScope(
+                RackScope.of(
+                    "us-east", "rack1", DatacenterScope.of("us-east", ClusterScope.create())))
             .withOptimizeHeaders(true)
             .build();
 
-    assertEquals("us-east", config.getDatacenter());
-    assertEquals("rack1", config.getRack());
+    assertEquals("Rack", config.getRoutingScope().getName());
     assertTrue(config.isOptimizeHeaders());
     // Without compression, Content-Encoding is not required
     assertEquals(config.getRequiredHeaders(), config.getHeadersWhitelist());
@@ -108,13 +111,15 @@ public class AlternatorConfigHeadersTest {
   }
 
   @Test
-  public void testBackwardCompatibilityWithoutHeadersOptimization() {
+  public void testDefaultWithoutHeadersOptimization() {
     // Existing code without headers settings should still work
     AlternatorConfig config =
-        AlternatorConfig.builder().withDatacenter("dc1").withRack("rack1").build();
+        AlternatorConfig.builder()
+            .withRoutingScope(
+                RackScope.of("dc1", "rack1", DatacenterScope.of("dc1", ClusterScope.create())))
+            .build();
 
-    assertEquals("dc1", config.getDatacenter());
-    assertEquals("rack1", config.getRack());
+    assertEquals("Rack", config.getRoutingScope().getName());
     // Headers optimization defaults to disabled
     assertFalse(config.isOptimizeHeaders());
     // Default whitelist is based on current config (no compression, with auth)
