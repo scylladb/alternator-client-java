@@ -1,5 +1,10 @@
 package com.scylladb.alternator;
 
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
 import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
 
 /**
@@ -13,10 +18,45 @@ public class AlternatorConfig {
   /** Default minimum request body size (in bytes) that triggers compression. */
   public static final int DEFAULT_MIN_COMPRESSION_SIZE_BYTES = 1024;
 
+  /**
+   * Default set of HTTP headers to preserve when header optimization is enabled.
+   *
+   * <p>These headers are required for proper operation with Alternator:
+   *
+   * <ul>
+   *   <li>{@code Host} - Required by HTTP/1.1
+   *   <li>{@code X-Amz-Target} - Specifies the DynamoDB operation
+   *   <li>{@code Content-Type} - MIME type for DynamoDB API (application/x-amz-json-1.0)
+   *   <li>{@code Content-Length} - Required for request body
+   *   <li>{@code Accept-Encoding} - For response compression negotiation
+   *   <li>{@code Content-Encoding} - For request compression (when enabled)
+   *   <li>{@code Authorization} - AWS SigV4 signature
+   *   <li>{@code X-Amz-Date} - Timestamp for AWS signature
+   *   <li>{@code X-Amz-Content-Sha256} - Content hash for AWS SigV4
+   * </ul>
+   *
+   * @since 1.0.6
+   */
+  public static final Set<String> DEFAULT_HEADERS_WHITELIST =
+      Collections.unmodifiableSet(
+          new HashSet<>(
+              Arrays.asList(
+                  "Host",
+                  "X-Amz-Target",
+                  "Content-Type",
+                  "Content-Length",
+                  "Accept-Encoding",
+                  "Content-Encoding",
+                  "Authorization",
+                  "X-Amz-Date",
+                  "X-Amz-Content-Sha256")));
+
   private final String datacenter;
   private final String rack;
   private final RequestCompressionAlgorithm compressionAlgorithm;
   private final int minCompressionSizeBytes;
+  private final boolean optimizeHeaders;
+  private final Set<String> headersWhitelist;
 
   /**
    * Package-private constructor. Use {@link AlternatorConfig#builder()} to create instances.
@@ -25,18 +65,27 @@ public class AlternatorConfig {
    * @param rack the rack name
    * @param compressionAlgorithm the compression algorithm to use
    * @param minCompressionSizeBytes minimum request size in bytes to trigger compression
+   * @param optimizeHeaders whether to enable HTTP header optimization
+   * @param headersWhitelist the set of headers to preserve when optimization is enabled
    */
   protected AlternatorConfig(
       String datacenter,
       String rack,
       RequestCompressionAlgorithm compressionAlgorithm,
-      int minCompressionSizeBytes) {
+      int minCompressionSizeBytes,
+      boolean optimizeHeaders,
+      Set<String> headersWhitelist) {
     this.datacenter = datacenter != null ? datacenter : "";
     this.rack = rack != null ? rack : "";
     this.compressionAlgorithm =
         compressionAlgorithm != null ? compressionAlgorithm : RequestCompressionAlgorithm.NONE;
     this.minCompressionSizeBytes =
         minCompressionSizeBytes >= 0 ? minCompressionSizeBytes : DEFAULT_MIN_COMPRESSION_SIZE_BYTES;
+    this.optimizeHeaders = optimizeHeaders;
+    this.headersWhitelist =
+        headersWhitelist != null
+            ? Collections.unmodifiableSet(new HashSet<>(headersWhitelist))
+            : DEFAULT_HEADERS_WHITELIST;
   }
 
   /**
@@ -87,6 +136,34 @@ public class AlternatorConfig {
   }
 
   /**
+   * Checks if HTTP header optimization is enabled.
+   *
+   * <p>When enabled, outgoing requests will have their HTTP headers filtered to include only those
+   * in the whitelist, reducing network traffic overhead. Alternator does not use all headers that
+   * DynamoDB normally uses, so this optimization can reduce outgoing traffic by up to 56%.
+   *
+   * @return true if header optimization is enabled, false otherwise
+   * @since 1.0.6
+   */
+  public boolean isOptimizeHeaders() {
+    return optimizeHeaders;
+  }
+
+  /**
+   * Gets the set of HTTP headers to preserve when optimization is enabled.
+   *
+   * <p>Only headers in this whitelist will be sent with requests when header optimization is
+   * enabled. All other headers will be removed. Header names are matched case-insensitively per RFC
+   * 7230.
+   *
+   * @return unmodifiable set of allowed header names
+   * @since 1.0.6
+   */
+  public Set<String> getHeadersWhitelist() {
+    return headersWhitelist;
+  }
+
+  /**
    * Creates a new builder for AlternatorConfig.
    *
    * @return a new {@link Builder}
@@ -129,11 +206,47 @@ public class AlternatorConfig {
     return overrideBuilder.build();
   }
 
+  /**
+   * Applies header optimization configuration to a ClientOverrideConfiguration builder if header
+   * optimization is enabled in this config.
+   *
+   * <p>This is a helper method used internally by {@link AlternatorDynamoDbClient} and {@link
+   * AlternatorDynamoDbAsyncClient} builders to apply header filtering to the AWS SDK client.
+   *
+   * <p>When header optimization is enabled, this adds a {@link HeadersFilterInterceptor} that
+   * removes headers not in the configured whitelist.
+   *
+   * @param existingConfig the existing ClientOverrideConfiguration, or null if none exists
+   * @return a ClientOverrideConfiguration with header filtering applied, or the existing config if
+   *     optimization is disabled
+   * @since 1.0.6
+   */
+  public ClientOverrideConfiguration applyHeadersConfig(
+      ClientOverrideConfiguration existingConfig) {
+    if (!optimizeHeaders) {
+      return existingConfig;
+    }
+
+    ClientOverrideConfiguration.Builder overrideBuilder;
+    if (existingConfig != null) {
+      overrideBuilder = existingConfig.toBuilder();
+    } else {
+      overrideBuilder = ClientOverrideConfiguration.builder();
+    }
+
+    // Add headers filter interceptor
+    overrideBuilder.addExecutionInterceptor(new HeadersFilterInterceptor(headersWhitelist));
+
+    return overrideBuilder.build();
+  }
+
   public static class Builder {
     private String datacenter = "";
     private String rack = "";
     private RequestCompressionAlgorithm compressionAlgorithm = RequestCompressionAlgorithm.NONE;
     private int minCompressionSizeBytes = DEFAULT_MIN_COMPRESSION_SIZE_BYTES;
+    private boolean optimizeHeaders = false;
+    private Set<String> headersWhitelist = DEFAULT_HEADERS_WHITELIST;
 
     /** Package-private constructor. Use {@link AlternatorConfig#builder()} to create instances. */
     Builder() {}
@@ -219,13 +332,78 @@ public class AlternatorConfig {
     }
 
     /**
+     * Enables or disables HTTP header optimization.
+     *
+     * <p>When enabled, outgoing requests will have their HTTP headers filtered to include only
+     * those in the configured whitelist (see {@link #withHeadersWhitelist(Collection)}). This
+     * reduces network traffic by removing headers that Alternator does not use.
+     *
+     * <p>Default: false (disabled)
+     *
+     * <p>Example:
+     *
+     * <pre>{@code
+     * AlternatorConfig config = AlternatorConfig.builder()
+     *     .withOptimizeHeaders(true)
+     *     .build();
+     * }</pre>
+     *
+     * @param optimizeHeaders true to enable header filtering, false to disable
+     * @return this builder instance
+     * @since 1.0.6
+     */
+    public Builder withOptimizeHeaders(boolean optimizeHeaders) {
+      this.optimizeHeaders = optimizeHeaders;
+      return this;
+    }
+
+    /**
+     * Sets a custom whitelist of HTTP headers to preserve when optimization is enabled.
+     *
+     * <p>Only headers in this list will be sent with requests when header optimization is enabled.
+     * All other headers will be removed. Header names are matched case-insensitively per RFC 7230.
+     *
+     * <p>Default: {@link AlternatorConfig#DEFAULT_HEADERS_WHITELIST}
+     *
+     * <p>Example:
+     *
+     * <pre>{@code
+     * AlternatorConfig config = AlternatorConfig.builder()
+     *     .withOptimizeHeaders(true)
+     *     .withHeadersWhitelist(Arrays.asList(
+     *         "Host", "Authorization", "X-Amz-Date", "X-Amz-Target",
+     *         "Content-Length", "Content-Encoding", "X-Custom-Header"))
+     *     .build();
+     * }</pre>
+     *
+     * @param headers collection of header names to preserve (case-insensitive)
+     * @return this builder instance
+     * @throws IllegalArgumentException if headers is null or empty
+     * @since 1.0.6
+     */
+    public Builder withHeadersWhitelist(Collection<String> headers) {
+      if (headers == null || headers.isEmpty()) {
+        throw new IllegalArgumentException(
+            "headersWhitelist cannot be null or empty. "
+                + "To disable optimization, use withOptimizeHeaders(false)");
+      }
+      this.headersWhitelist = new HashSet<>(headers);
+      return this;
+    }
+
+    /**
      * Builds and returns an {@link AlternatorConfig} instance with the configured settings.
      *
      * @return a new {@link AlternatorConfig} instance
      */
     public AlternatorConfig build() {
       return new AlternatorConfig(
-          datacenter, rack, compressionAlgorithm, minCompressionSizeBytes);
+          datacenter,
+          rack,
+          compressionAlgorithm,
+          minCompressionSizeBytes,
+          optimizeHeaders,
+          headersWhitelist);
     }
   }
 }

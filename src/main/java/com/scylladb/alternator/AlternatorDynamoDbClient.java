@@ -437,6 +437,13 @@ public class AlternatorDynamoDbClient {
         delegate.overrideConfiguration(compressionConfig);
       }
 
+      // Apply headers optimization if enabled
+      ClientOverrideConfiguration headersConfig =
+          alternatorConfig.applyHeadersConfig(delegate.overrideConfiguration());
+      if (headersConfig != null) {
+        delegate.overrideConfiguration(headersConfig);
+      }
+
       // Configure HTTP client to disable certificate checking if requested and no custom client was
       // set
       if (disableCertificateChecks && httpClientSet) {
