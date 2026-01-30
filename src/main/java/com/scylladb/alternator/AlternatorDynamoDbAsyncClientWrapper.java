@@ -37,6 +37,7 @@ public class AlternatorDynamoDbAsyncClientWrapper implements AutoCloseable {
   private final DynamoDbAsyncClient client;
   private final AlternatorLiveNodes liveNodes;
   private final AlternatorEndpointProvider endpointProvider;
+  private final AlternatorConfig config;
 
   /**
    * Creates a new wrapper with the given client, live nodes, and endpoint provider.
@@ -49,9 +50,26 @@ public class AlternatorDynamoDbAsyncClientWrapper implements AutoCloseable {
       DynamoDbAsyncClient client,
       AlternatorLiveNodes liveNodes,
       AlternatorEndpointProvider endpointProvider) {
+    this(client, liveNodes, endpointProvider, null);
+  }
+
+  /**
+   * Creates a new wrapper with the given client, live nodes, endpoint provider, and config.
+   *
+   * @param client the underlying DynamoDbAsyncClient
+   * @param liveNodes the AlternatorLiveNodes instance managing node discovery
+   * @param endpointProvider the AlternatorEndpointProvider used for this client
+   * @param config the AlternatorConfig used for this client
+   */
+  public AlternatorDynamoDbAsyncClientWrapper(
+      DynamoDbAsyncClient client,
+      AlternatorLiveNodes liveNodes,
+      AlternatorEndpointProvider endpointProvider,
+      AlternatorConfig config) {
     this.client = client;
     this.liveNodes = liveNodes;
     this.endpointProvider = endpointProvider;
+    this.config = config;
   }
 
   /**
@@ -110,6 +128,18 @@ public class AlternatorDynamoDbAsyncClientWrapper implements AutoCloseable {
    */
   public AlternatorEndpointProvider getAlternatorEndpointProvider() {
     return endpointProvider;
+  }
+
+  /**
+   * Returns the AlternatorConfig used to create this client.
+   *
+   * <p>The config contains all settings including TLS session cache configuration, compression
+   * settings, header optimization, and routing scope.
+   *
+   * @return the {@link AlternatorConfig} instance, or null if not available
+   */
+  public AlternatorConfig getAlternatorConfig() {
+    return config;
   }
 
   /** Closes the underlying DynamoDbAsyncClient. */

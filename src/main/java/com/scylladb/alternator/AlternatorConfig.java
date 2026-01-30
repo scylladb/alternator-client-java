@@ -103,6 +103,7 @@ public class AlternatorConfig {
   private final boolean optimizeHeaders;
   private final Set<String> headersWhitelist;
   private final boolean authenticationEnabled;
+  private final TlsSessionCacheConfig tlsSessionCacheConfig;
 
   /**
    * Package-private constructor. Use {@link AlternatorConfig#builder()} to create instances.
@@ -116,6 +117,7 @@ public class AlternatorConfig {
    * @param optimizeHeaders whether to enable HTTP header optimization
    * @param headersWhitelist the set of headers to preserve when optimization is enabled
    * @param authenticationEnabled whether authentication is enabled
+   * @param tlsSessionCacheConfig the TLS session cache configuration for quick TLS renegotiation
    */
   protected AlternatorConfig(
       List<String> seedHosts,
@@ -126,7 +128,8 @@ public class AlternatorConfig {
       int minCompressionSizeBytes,
       boolean optimizeHeaders,
       Set<String> headersWhitelist,
-      boolean authenticationEnabled) {
+      boolean authenticationEnabled,
+      TlsSessionCacheConfig tlsSessionCacheConfig) {
     this.seedHosts =
         seedHosts != null
             ? Collections.unmodifiableList(new ArrayList<>(seedHosts))
@@ -147,6 +150,10 @@ public class AlternatorConfig {
     } else {
       this.headersWhitelist = getRequiredHeaders();
     }
+
+    // Use default TLS session cache config if not provided
+    this.tlsSessionCacheConfig =
+        tlsSessionCacheConfig != null ? tlsSessionCacheConfig : TlsSessionCacheConfig.getDefault();
   }
 
   /**
@@ -271,6 +278,19 @@ public class AlternatorConfig {
   }
 
   /**
+   * Gets the TLS session cache configuration.
+   *
+   * <p>TLS session caching enables quick TLS renegotiation when reconnecting to Alternator nodes by
+   * using session tickets (RFC 5077). This reduces handshake latency for subsequent connections.
+   *
+   * @return the TLS session cache configuration, never null
+   * @since 1.0.5
+   */
+  public TlsSessionCacheConfig getTlsSessionCacheConfig() {
+    return tlsSessionCacheConfig;
+  }
+
+  /**
    * Returns the set of HTTP headers required for this configuration.
    *
    * <p>This method returns the minimum set of headers needed based on the current settings
@@ -310,6 +330,7 @@ public class AlternatorConfig {
     private Set<String> headersWhitelist = null; // null means use default based on config
     private boolean headersWhitelistWasSet = false;
     private boolean authenticationEnabled = true;
+    private TlsSessionCacheConfig tlsSessionCacheConfig = null; // null means use default
 
     /** Package-private constructor. Use {@link AlternatorConfig#builder()} to create instances. */
     Builder() {}
@@ -579,6 +600,43 @@ public class AlternatorConfig {
     }
 
     /**
+     * Sets the TLS session cache configuration for quick TLS renegotiation.
+     *
+     * <p>TLS session tickets (RFC 5077) allow clients to resume TLS sessions without performing a
+     * full handshake. This significantly reduces latency when reconnecting to Alternator nodes.
+     *
+     * <p>Default: {@link TlsSessionCacheConfig#getDefault()} (enabled with 1024 sessions, 24h
+     * timeout)
+     *
+     * <p>Example:
+     *
+     * <pre>{@code
+     * // Custom TLS session cache configuration
+     * AlternatorConfig config = AlternatorConfig.builder()
+     *     .withSeedNode(URI.create("https://localhost:8043"))
+     *     .withTlsSessionCacheConfig(TlsSessionCacheConfig.builder()
+     *         .withSessionCacheSize(200)
+     *         .withSessionTimeoutSeconds(3600)
+     *         .build())
+     *     .build();
+     *
+     * // Disable TLS session caching
+     * AlternatorConfig config = AlternatorConfig.builder()
+     *     .withSeedNode(URI.create("https://localhost:8043"))
+     *     .withTlsSessionCacheConfig(TlsSessionCacheConfig.disabled())
+     *     .build();
+     * }</pre>
+     *
+     * @param tlsSessionCacheConfig the TLS session cache configuration, or null to use default
+     * @return this builder instance
+     * @since 1.0.5
+     */
+    public Builder withTlsSessionCacheConfig(TlsSessionCacheConfig tlsSessionCacheConfig) {
+      this.tlsSessionCacheConfig = tlsSessionCacheConfig;
+      return this;
+    }
+
+    /**
      * Builds and returns an {@link AlternatorConfig} instance with the configured settings.
      *
      * @return a new {@link AlternatorConfig} instance
@@ -636,7 +694,8 @@ public class AlternatorConfig {
           minCompressionSizeBytes,
           optimizeHeaders,
           headersWhitelist,
-          authenticationEnabled);
+          authenticationEnabled,
+          tlsSessionCacheConfig);
     }
   }
 }

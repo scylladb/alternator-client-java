@@ -178,6 +178,87 @@ public class AlternatorDynamoDbClient {
     }
 
     /**
+     * Sets the TLS session cache configuration for quick TLS renegotiation.
+     *
+     * <p>TLS session tickets (RFC 5077) allow clients to resume TLS sessions without performing a
+     * full handshake. This significantly reduces latency when reconnecting to Alternator nodes.
+     *
+     * <p>Default: {@link TlsSessionCacheConfig#getDefault()} (enabled with 1024 sessions, 24h
+     * timeout)
+     *
+     * <p>Example:
+     *
+     * <pre>{@code
+     * // Custom TLS session cache configuration
+     * DynamoDbClient client = AlternatorDynamoDbClient.builder()
+     *     .endpointOverride(URI.create("https://localhost:8043"))
+     *     .credentialsProvider(credentialsProvider)
+     *     .withTlsSessionCacheConfig(TlsSessionCacheConfig.builder()
+     *         .withSessionCacheSize(200)
+     *         .withSessionTimeoutSeconds(3600)
+     *         .build())
+     *     .build();
+     *
+     * // Disable TLS session caching
+     * DynamoDbClient client = AlternatorDynamoDbClient.builder()
+     *     .endpointOverride(URI.create("https://localhost:8043"))
+     *     .credentialsProvider(credentialsProvider)
+     *     .withTlsSessionCacheConfig(TlsSessionCacheConfig.disabled())
+     *     .build();
+     * }</pre>
+     *
+     * @param tlsSessionCacheConfig the TLS session cache configuration, or null to use default
+     * @return this builder instance
+     * @since 1.0.5
+     */
+    public AlternatorDynamoDbClientBuilder withTlsSessionCacheConfig(
+        TlsSessionCacheConfig tlsSessionCacheConfig) {
+      configBuilder.withTlsSessionCacheConfig(tlsSessionCacheConfig);
+      return this;
+    }
+
+    /**
+     * Sets the complete Alternator configuration.
+     *
+     * <p>This method allows setting all Alternator-specific configuration options at once using a
+     * pre-built {@link AlternatorConfig} instance. Any settings specified via individual builder
+     * methods (like {@link #withRoutingScope}, {@link #withCompressionAlgorithm}, etc.) will be
+     * overwritten by the config.
+     *
+     * <p>Example:
+     *
+     * <pre>{@code
+     * AlternatorConfig config = AlternatorConfig.builder()
+     *     .withSeedNode(URI.create("https://localhost:8043"))
+     *     .withRoutingScope(DatacenterScope.of("dc1", ClusterScope.create()))
+     *     .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
+     *     .withTlsSessionCacheConfig(TlsSessionCacheConfig.getDefault())
+     *     .build();
+     *
+     * DynamoDbClient client = AlternatorDynamoDbClient.builder()
+     *     .endpointOverride(URI.create("https://localhost:8043"))
+     *     .credentialsProvider(credentialsProvider)
+     *     .withAlternatorConfig(config)
+     *     .build();
+     * }</pre>
+     *
+     * @param config the Alternator configuration
+     * @return this builder instance
+     * @since 1.0.5
+     */
+    public AlternatorDynamoDbClientBuilder withAlternatorConfig(AlternatorConfig config) {
+      if (config != null) {
+        configBuilder.withRoutingScope(config.getRoutingScope());
+        configBuilder.withCompressionAlgorithm(config.getCompressionAlgorithm());
+        configBuilder.withMinCompressionSizeBytes(config.getMinCompressionSizeBytes());
+        configBuilder.withOptimizeHeaders(config.isOptimizeHeaders());
+        configBuilder.withHeadersWhitelist(config.getHeadersWhitelist());
+        configBuilder.withTlsSessionCacheConfig(config.getTlsSessionCacheConfig());
+      }
+      return this;
+    }
+
+    /**
      * Disables SSL certificate validation for testing purposes.
      *
      * <p><strong>WARNING:</strong> This should only be used for testing with self-signed
@@ -580,7 +661,8 @@ public class AlternatorDynamoDbClient {
 
       // Build the underlying client and wrap it with Alternator metadata
       DynamoDbClient client = delegate.build();
-      return new AlternatorDynamoDbClientWrapper(client, liveNodes, alternatorEndpointProvider);
+      return new AlternatorDynamoDbClientWrapper(
+          client, liveNodes, alternatorEndpointProvider, alternatorConfig);
     }
   }
 }
