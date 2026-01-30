@@ -1,14 +1,45 @@
 package com.scylladb.alternator;
 
+import com.scylladb.alternator.routing.ClusterScope;
+import com.scylladb.alternator.routing.RoutingScope;
+import java.net.URI;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 /**
- * Configuration class for Alternator load balancing settings. Contains datacenter and rack
- * configuration for filtering nodes.
+ * Configuration class for Alternator load balancing settings.
+ *
+ * <p>This class holds all configuration needed for connecting to an Alternator cluster:
+ *
+ * <ul>
+ *   <li>Seed hosts, scheme, and port for cluster discovery
+ *   <li>Routing scope for node targeting with fallback support
+ *   <li>Request compression settings
+ *   <li>HTTP header optimization settings
+ * </ul>
+ *
+ * <p>Example usage:
+ *
+ * <pre>{@code
+ * // Using a seed URI (convenience)
+ * AlternatorConfig config = AlternatorConfig.builder()
+ *     .withSeedNode(URI.create("https://localhost:8043"))
+ *     .withRoutingScope(DatacenterScope.of("dc1", ClusterScope.create()))
+ *     .build();
+ *
+ * // Using explicit host, scheme, and port
+ * AlternatorConfig config = AlternatorConfig.builder()
+ *     .withSeedHosts(Arrays.asList("192.168.1.100", "192.168.1.101"))
+ *     .withScheme("https")
+ *     .withPort(8043)
+ *     .withRoutingScope(DatacenterScope.of("dc1", ClusterScope.create()))
+ *     .build();
+ * }</pre>
  *
  * @author dmitry.kropachev
  * @since 1.0.5
@@ -63,8 +94,10 @@ public class AlternatorConfig {
   public static final Set<String> AUTHENTICATION_HEADERS =
       Collections.unmodifiableSet(new HashSet<>(Arrays.asList("Authorization", "X-Amz-Date")));
 
-  private final String datacenter;
-  private final String rack;
+  private final List<String> seedHosts;
+  private final String scheme;
+  private final int port;
+  private final RoutingScope routingScope;
   private final RequestCompressionAlgorithm compressionAlgorithm;
   private final int minCompressionSizeBytes;
   private final boolean optimizeHeaders;
@@ -74,8 +107,10 @@ public class AlternatorConfig {
   /**
    * Package-private constructor. Use {@link AlternatorConfig#builder()} to create instances.
    *
-   * @param datacenter the datacenter name
-   * @param rack the rack name
+   * @param seedHosts the list of seed host addresses (IP or hostname) for cluster discovery
+   * @param scheme the URI scheme (http or https)
+   * @param port the port number
+   * @param routingScope the routing scope for node targeting
    * @param compressionAlgorithm the compression algorithm to use
    * @param minCompressionSizeBytes minimum request size in bytes to trigger compression
    * @param optimizeHeaders whether to enable HTTP header optimization
@@ -83,15 +118,22 @@ public class AlternatorConfig {
    * @param authenticationEnabled whether authentication is enabled
    */
   protected AlternatorConfig(
-      String datacenter,
-      String rack,
+      List<String> seedHosts,
+      String scheme,
+      int port,
+      RoutingScope routingScope,
       RequestCompressionAlgorithm compressionAlgorithm,
       int minCompressionSizeBytes,
       boolean optimizeHeaders,
       Set<String> headersWhitelist,
       boolean authenticationEnabled) {
-    this.datacenter = datacenter != null ? datacenter : "";
-    this.rack = rack != null ? rack : "";
+    this.seedHosts =
+        seedHosts != null
+            ? Collections.unmodifiableList(new ArrayList<>(seedHosts))
+            : Collections.<String>emptyList();
+    this.scheme = scheme != null ? scheme : "";
+    this.port = port;
+    this.routingScope = routingScope;
     this.compressionAlgorithm =
         compressionAlgorithm != null ? compressionAlgorithm : RequestCompressionAlgorithm.NONE;
     this.minCompressionSizeBytes =
@@ -108,21 +150,51 @@ public class AlternatorConfig {
   }
 
   /**
-   * Gets the configured datacenter.
+   * Gets the list of seed host addresses for cluster discovery.
    *
-   * @return the datacenter name, or empty string if not set
+   * <p>The seed hosts are the initial endpoints (IP addresses or hostnames) used to discover the
+   * full cluster topology via the {@code /localnodes} API. Use {@link #getScheme()} and {@link
+   * #getPort()} to construct full URIs.
+   *
+   * @return an unmodifiable list of seed host addresses, never null but may be empty
+   * @since 1.0.5
    */
-  public String getDatacenter() {
-    return datacenter;
+  public List<String> getSeedHosts() {
+    return seedHosts;
   }
 
   /**
-   * Gets the configured rack.
+   * Gets the URI scheme (http or https).
    *
-   * @return the rack name, or empty string if not set
+   * @return the scheme, or empty string if not set
+   * @since 1.0.5
    */
-  public String getRack() {
-    return rack;
+  public String getScheme() {
+    return scheme;
+  }
+
+  /**
+   * Gets the port number for Alternator connections.
+   *
+   * @return the port number
+   * @since 1.0.5
+   */
+  public int getPort() {
+    return port;
+  }
+
+  /**
+   * Gets the configured routing scope.
+   *
+   * <p>The routing scope defines which nodes should be used for load balancing and how to fall back
+   * when nodes are unavailable. This method always returns a non-null scope (defaults to {@link
+   * ClusterScope} if not configured).
+   *
+   * @return the routing scope, never {@code null}
+   * @since 1.0.5
+   */
+  public RoutingScope getRoutingScope() {
+    return routingScope;
   }
 
   /**
@@ -228,8 +300,10 @@ public class AlternatorConfig {
   }
 
   public static class Builder {
-    private String datacenter = "";
-    private String rack = "";
+    private List<String> seedHosts = new ArrayList<>();
+    private String scheme = "";
+    private int port = -1;
+    private RoutingScope routingScope = null;
     private RequestCompressionAlgorithm compressionAlgorithm = RequestCompressionAlgorithm.NONE;
     private int minCompressionSizeBytes = DEFAULT_MIN_COMPRESSION_SIZE_BYTES;
     private boolean optimizeHeaders = false;
@@ -249,6 +323,83 @@ public class AlternatorConfig {
      */
     Builder authenticationEnabled(boolean authenticationEnabled) {
       this.authenticationEnabled = authenticationEnabled;
+      return this;
+    }
+
+    /**
+     * Sets a single seed node URI for cluster discovery.
+     *
+     * <p>This is a convenience method that extracts the host, scheme, and port from a URI. The URI
+     * will be used to discover all other nodes in the cluster via the {@code /localnodes} API.
+     *
+     * @param seedUri the seed URI for Alternator cluster discovery
+     * @return this builder instance
+     * @since 1.0.5
+     */
+    public Builder withSeedNode(URI seedUri) {
+      if (seedUri != null) {
+        this.seedHosts = Collections.singletonList(seedUri.getHost());
+        this.scheme = seedUri.getScheme();
+        this.port = seedUri.getPort();
+      }
+      return this;
+    }
+
+    /**
+     * Sets the URI scheme for Alternator connections.
+     *
+     * @param scheme the URI scheme ("http" or "https")
+     * @return this builder instance
+     * @since 1.0.5
+     */
+    public Builder withScheme(String scheme) {
+      this.scheme = scheme != null ? scheme : "";
+      return this;
+    }
+
+    /**
+     * Sets the port number for Alternator connections.
+     *
+     * @param port the port number
+     * @return this builder instance
+     * @since 1.0.5
+     */
+    public Builder withPort(int port) {
+      this.port = port;
+      return this;
+    }
+
+    /**
+     * Sets seed host addresses for cluster discovery.
+     *
+     * <p>The seed hosts are IP addresses or hostnames of Alternator nodes. You must also set the
+     * scheme and port using {@link #withScheme(String)} and {@link #withPort(int)}.
+     *
+     * @param hosts the collection of seed host addresses (IP or hostname)
+     * @return this builder instance
+     * @since 1.0.5
+     */
+    public Builder withSeedHosts(Collection<String> hosts) {
+      if (hosts != null) {
+        this.seedHosts = new ArrayList<>(hosts);
+      }
+      return this;
+    }
+
+    /**
+     * Sets a single seed host address for cluster discovery.
+     *
+     * <p>The seed host is an IP address or hostname of an Alternator node. You must also set the
+     * scheme and port using {@link #withScheme(String)} and {@link #withPort(int)}.
+     *
+     * @param host the seed host address (IP or hostname)
+     * @return this builder instance
+     * @since 1.0.5
+     */
+    public Builder withSeedHost(String host) {
+      if (host != null) {
+        this.seedHosts = Collections.singletonList(host);
+      }
       return this;
     }
 
@@ -285,26 +436,30 @@ public class AlternatorConfig {
     }
 
     /**
-     * Sets the target datacenter. When specified, only nodes from this datacenter will be used for
-     * load balancing. If not set, all nodes will be used.
+     * Sets the routing scope for node targeting with fallback support.
      *
-     * @param datacenter the datacenter name
-     * @return this builder instance
-     */
-    public Builder withDatacenter(String datacenter) {
-      this.datacenter = datacenter != null ? datacenter : "";
-      return this;
-    }
-
-    /**
-     * Sets the target rack. When specified along with a datacenter, only nodes from this rack will
-     * be used for load balancing.
+     * <p>The routing scope defines which nodes should be used for load balancing and provides
+     * hierarchical fallback capabilities. Common usage patterns:
      *
-     * @param rack the rack name
+     * <pre>{@code
+     * // Target rack with fallback to datacenter and cluster
+     * builder.withRoutingScope(RackScope.of("dc1", "rack1",
+     *     DatacenterScope.of("dc1",
+     *         ClusterScope.create())));
+     *
+     * // Target datacenter with fallback to cluster
+     * builder.withRoutingScope(DatacenterScope.of("dc1", ClusterScope.create()));
+     *
+     * // Strict datacenter targeting (no fallback)
+     * builder.withRoutingScope(DatacenterScope.of("dc1", null));
+     * }</pre>
+     *
+     * @param routingScope the routing scope, or {@code null} to use all nodes (ClusterScope)
      * @return this builder instance
+     * @since 1.0.5
      */
-    public Builder withRack(String rack) {
-      this.rack = rack != null ? rack : "";
+    public Builder withRoutingScope(RoutingScope routingScope) {
+      this.routingScope = routingScope;
       return this;
     }
 
@@ -468,9 +623,15 @@ public class AlternatorConfig {
         }
       }
 
+      // Determine the effective routing scope (default to ClusterScope if not set)
+      RoutingScope effectiveRoutingScope =
+          routingScope != null ? routingScope : ClusterScope.create();
+
       return new AlternatorConfig(
-          datacenter,
-          rack,
+          seedHosts,
+          scheme,
+          port,
+          effectiveRoutingScope,
           compressionAlgorithm,
           minCompressionSizeBytes,
           optimizeHeaders,

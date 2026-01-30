@@ -1,6 +1,7 @@
 package com.scylladb.alternator;
 
 import com.scylladb.alternator.internal.AlternatorLiveNodes;
+import com.scylladb.alternator.routing.RoutingScope;
 import java.net.URI;
 import java.util.Collection;
 import java.util.function.Consumer;
@@ -25,9 +26,8 @@ import software.amazon.awssdk.utils.AttributeMap;
  * integrating {@link AlternatorEndpointProvider} for client-side load balancing.
  *
  * <p>The builder implements {@link DynamoDbClientBuilder}, ensuring compatibility with standard AWS
- * SDK v2 patterns while adding Alternator-specific configuration via methods like {@link
- * AlternatorDynamoDbClientBuilder#withDatacenter(String)} and {@link
- * AlternatorDynamoDbClientBuilder#withRack(String)}.
+ * SDK v2 patterns while adding Alternator-specific configuration via {@link
+ * AlternatorDynamoDbClientBuilder#withRoutingScope}.
  *
  * <p>Example usage:
  *
@@ -94,30 +94,30 @@ public class AlternatorDynamoDbClient {
     }
 
     /**
-     * Sets the target datacenter for load balancing.
+     * Sets the routing scope for node targeting with fallback support.
      *
-     * <p>When specified, only nodes from this datacenter will be used for load balancing. If not
-     * set, all nodes will be used.
+     * <p>The routing scope defines which nodes should be used for load balancing and provides
+     * hierarchical fallback capabilities. Common usage patterns:
      *
-     * @param datacenter the datacenter name
+     * <pre>{@code
+     * // Target rack with fallback to datacenter and cluster
+     * builder.withRoutingScope(RackScope.of("dc1", "rack1",
+     *     DatacenterScope.of("dc1",
+     *         ClusterScope.create())));
+     *
+     * // Target datacenter with fallback to cluster
+     * builder.withRoutingScope(DatacenterScope.of("dc1", ClusterScope.create()));
+     *
+     * // Strict datacenter targeting (no fallback)
+     * builder.withRoutingScope(DatacenterScope.of("dc1", null));
+     * }</pre>
+     *
+     * @param routingScope the routing scope, or {@code null} to use all nodes
      * @return this builder instance
+     * @since 1.0.5
      */
-    public AlternatorDynamoDbClientBuilder withDatacenter(String datacenter) {
-      configBuilder.withDatacenter(datacenter);
-      return this;
-    }
-
-    /**
-     * Sets the target rack for load balancing.
-     *
-     * <p>When specified along with a datacenter, only nodes from this rack will be used for load
-     * balancing.
-     *
-     * @param rack the rack name
-     * @return this builder instance
-     */
-    public AlternatorDynamoDbClientBuilder withRack(String rack) {
-      configBuilder.withRack(rack);
+    public AlternatorDynamoDbClientBuilder withRoutingScope(RoutingScope routingScope) {
+      configBuilder.withRoutingScope(routingScope);
       return this;
     }
 
@@ -455,7 +455,7 @@ public class AlternatorDynamoDbClient {
      * <ol>
      *   <li>Validates that {@link #endpointOverride(URI)} was called (required)
      *   <li>Initializes {@link AlternatorConfig} with default values if not configured
-     *   <li>Creates an {@link AlternatorEndpointProvider} with the seed URI and DC/rack settings
+     *   <li>Creates an {@link AlternatorEndpointProvider} with the seed URI and routing scope
      *   <li>Sets a default region ("fake-aws-region") if none was specified
      *   <li>Builds the underlying {@link DynamoDbClient} with all configurations applied
      * </ol>
@@ -466,8 +466,7 @@ public class AlternatorDynamoDbClient {
      *   <li>Discover all nodes in the Alternator cluster via the {@code /localnodes} API
      *   <li>Distribute requests across discovered nodes using round-robin load balancing
      *   <li>Periodically refresh the node list (every 5 seconds) to handle topology changes
-     *   <li>Filter nodes by datacenter/rack if configured via {@link #withDatacenter} and {@link
-     *       #withRack}
+     *   <li>Filter nodes by routing scope if configured via {@link #withRoutingScope}
      * </ul>
      *
      * <p>If you need access to Alternator-specific APIs (such as {@code getLiveNodes()} or {@code
@@ -515,6 +514,9 @@ public class AlternatorDynamoDbClient {
         delegate.credentialsProvider(AnonymousCredentialsProvider.create());
       }
 
+      // Set the seed node on the config
+      configBuilder.withSeedNode(seedUri);
+
       // Build the AlternatorConfig from the internal builder
       AlternatorConfig alternatorConfig = configBuilder.build();
 
@@ -560,9 +562,8 @@ public class AlternatorDynamoDbClient {
       }
 
       // Create AlternatorLiveNodes and start node discovery
-      AlternatorLiveNodes liveNodes =
-          AlternatorLiveNodes.pickSupportedDatacenterRack(
-              seedUri, alternatorConfig.getDatacenter(), alternatorConfig.getRack());
+      // Fallback is handled automatically at runtime based on the routing scope's fallback chain
+      AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(alternatorConfig);
       liveNodes.start();
 
       // Create AlternatorEndpointProvider with the live nodes

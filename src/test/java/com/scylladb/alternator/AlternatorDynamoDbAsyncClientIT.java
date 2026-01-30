@@ -3,6 +3,10 @@ package com.scylladb.alternator;
 import static org.junit.Assert.*;
 import static org.junit.Assume.*;
 
+import com.scylladb.alternator.routing.ClusterScope;
+import com.scylladb.alternator.routing.DatacenterScope;
+import com.scylladb.alternator.routing.RackScope;
+import com.scylladb.alternator.routing.RoutingScope;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.HashSet;
@@ -72,12 +76,22 @@ public class AlternatorDynamoDbAsyncClientIT {
   }
 
   private AlternatorDynamoDbAsyncClientWrapper buildClient(String dc, String rackName) {
+    RoutingScope scope = deriveRoutingScope(dc, rackName);
     return AlternatorDynamoDbAsyncClient.builder()
         .endpointOverride(seedUri)
         .credentialsProvider(credentialsProvider)
-        .withDatacenter(dc)
-        .withRack(rackName)
+        .withRoutingScope(scope)
         .buildWithAlternatorAPI();
+  }
+
+  private static RoutingScope deriveRoutingScope(String dc, String rackName) {
+    if (dc == null || dc.isEmpty()) {
+      return ClusterScope.create();
+    }
+    if (rackName == null || rackName.isEmpty()) {
+      return DatacenterScope.of(dc, ClusterScope.create());
+    }
+    return RackScope.of(dc, rackName, DatacenterScope.of(dc, ClusterScope.create()));
   }
 
   private AlternatorDynamoDbAsyncClientWrapper buildClient() {
@@ -289,7 +303,7 @@ public class AlternatorDynamoDbAsyncClientIT {
         AlternatorDynamoDbAsyncClient.builder()
             .endpointOverride(seedUri)
             .credentialsProvider(credentialsProvider)
-            .withDatacenter(datacenter)
+            .withRoutingScope(DatacenterScope.of(datacenter, ClusterScope.create()))
             .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
             .withMinCompressionSizeBytes(512)
             .buildWithAlternatorAPI();

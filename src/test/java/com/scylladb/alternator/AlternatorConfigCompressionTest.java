@@ -2,6 +2,9 @@ package com.scylladb.alternator;
 
 import static org.junit.Assert.*;
 
+import com.scylladb.alternator.routing.ClusterScope;
+import com.scylladb.alternator.routing.DatacenterScope;
+import com.scylladb.alternator.routing.RackScope;
 import org.junit.Test;
 
 /**
@@ -69,29 +72,31 @@ public class AlternatorConfigCompressionTest {
   }
 
   @Test
-  public void testCompressionWithDatacenterAndRack() {
+  public void testCompressionWithRoutingScope() {
     AlternatorConfig config =
         AlternatorConfig.builder()
-            .withDatacenter("us-east")
-            .withRack("rack1")
+            .withRoutingScope(
+                RackScope.of(
+                    "us-east", "rack1", DatacenterScope.of("us-east", ClusterScope.create())))
             .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
             .withMinCompressionSizeBytes(512)
             .build();
 
-    assertEquals("us-east", config.getDatacenter());
-    assertEquals("rack1", config.getRack());
+    assertEquals("Rack", config.getRoutingScope().getName());
     assertEquals(RequestCompressionAlgorithm.GZIP, config.getCompressionAlgorithm());
     assertEquals(512, config.getMinCompressionSizeBytes());
   }
 
   @Test
-  public void testBackwardCompatibilityWithoutCompression() {
+  public void testDefaultWithoutCompression() {
     // Existing code without compression settings should still work
     AlternatorConfig config =
-        AlternatorConfig.builder().withDatacenter("dc1").withRack("rack1").build();
+        AlternatorConfig.builder()
+            .withRoutingScope(
+                RackScope.of("dc1", "rack1", DatacenterScope.of("dc1", ClusterScope.create())))
+            .build();
 
-    assertEquals("dc1", config.getDatacenter());
-    assertEquals("rack1", config.getRack());
+    assertEquals("Rack", config.getRoutingScope().getName());
     // Compression defaults to disabled
     assertEquals(RequestCompressionAlgorithm.NONE, config.getCompressionAlgorithm());
     assertEquals(
