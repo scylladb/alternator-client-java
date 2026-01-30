@@ -19,7 +19,7 @@ Rather, our intention is to provide a tiny library which tacks on to any
 version of the AWS SDK that the application is already using, and makes
 it do the right thing for Alternator.
 
-This library supports AWS SDK for Java Version 2 (requires 2.20 or above).
+This library supports AWS SDK for Java Version 2 (requires 2.20 or above) and requires Java 11 or later.
 
 ## Add `load-balancing` to your project
 
@@ -518,3 +518,100 @@ AlternatorConfig config = AlternatorConfig.builder()
 
 AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config);
 ```
+
+### TLS Session Tickets
+
+The library supports TLS session tickets (RFC 5077) for quick TLS renegotiation when using HTTPS
+connections. TLS session tickets allow clients to resume TLS sessions without performing a full
+handshake, significantly reducing latency when reconnecting to Alternator nodes.
+
+This is particularly beneficial in load-balanced scenarios where connections may be distributed
+across different nodes, as it reduces the overhead of establishing new TLS connections.
+
+#### Default behavior
+
+TLS session caching is **enabled by default** with the following settings:
+- Session cache size: 1024 sessions
+- Session timeout: 24 hours (86400 seconds)
+
+No configuration is needed to benefit from this feature when using HTTPS connections.
+
+#### Custom configuration
+
+You can customize TLS session cache settings via `TlsSessionCacheConfig`:
+
+```java
+import com.scylladb.alternator.AlternatorDynamoDbClient;
+import com.scylladb.alternator.TlsSessionCacheConfig;
+
+// Custom TLS session cache configuration
+TlsSessionCacheConfig tlsConfig = TlsSessionCacheConfig.builder()
+    .withEnabled(true)
+    .withSessionCacheSize(200)       // Cache up to 200 sessions
+    .withSessionTimeoutSeconds(3600) // 1 hour timeout
+    .build();
+
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://localhost:8043"))
+    .credentialsProvider(credentialsProvider)
+    .withTlsSessionCacheConfig(tlsConfig)
+    .build();
+```
+
+#### Disabling TLS session caching
+
+If you need to disable TLS session caching:
+
+```java
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://localhost:8043"))
+    .credentialsProvider(credentialsProvider)
+    .withTlsSessionCacheConfig(TlsSessionCacheConfig.disabled())
+    .build();
+```
+
+#### Using with AlternatorConfig
+
+TLS session cache can also be configured via `AlternatorConfig`:
+
+```java
+AlternatorConfig config = AlternatorConfig.builder()
+    .withSeedNode(URI.create("https://localhost:8043"))
+    .withTlsSessionCacheConfig(TlsSessionCacheConfig.builder()
+        .withSessionCacheSize(150)
+        .withSessionTimeoutSeconds(7200)
+        .build())
+    .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
+    .withOptimizeHeaders(true)
+    .build();
+
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://localhost:8043"))
+    .credentialsProvider(credentialsProvider)
+    .withAlternatorConfig(config)
+    .build();
+```
+
+#### Server-side configuration (ScyllaDB)
+
+TLS session tickets require server-side support. In ScyllaDB, session tickets are **disabled by default**.
+To enable them, add the following to your `scylla.yaml`:
+
+```yaml
+alternator_encryption_options:
+    certificate: /path/to/scylla.crt
+    keyfile: /path/to/scylla.key
+    enable_session_tickets: true   # Enable TLS 1.3 session tickets
+```
+
+**Note:** TLS 1.3 is required for session tickets. Both the client (Java 11+) and server must support TLS 1.3.
+
+#### When to tune TLS session cache
+
+The default configuration works well for most use cases. Consider adjusting settings if:
+
+- **High connection churn**: Increase `sessionCacheSize` if you have many short-lived connections
+- **Security requirements**: Decrease `sessionTimeoutSeconds` for stricter session expiration
+- **Memory constraints**: Decrease `sessionCacheSize` on memory-limited systems
+- **Long-running connections**: Default settings are optimal; session resumption primarily
+  benefits reconnection scenarios

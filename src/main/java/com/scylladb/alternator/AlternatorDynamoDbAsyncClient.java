@@ -180,6 +180,47 @@ public class AlternatorDynamoDbAsyncClient {
     }
 
     /**
+     * Sets the TLS session cache configuration for quick TLS renegotiation.
+     *
+     * <p>TLS session tickets (RFC 5077) allow clients to resume TLS sessions without performing a
+     * full handshake. This significantly reduces latency when reconnecting to Alternator nodes.
+     *
+     * <p>Default: {@link TlsSessionCacheConfig#getDefault()} (enabled with 1024 sessions, 24h
+     * timeout)
+     *
+     * @param tlsSessionCacheConfig the TLS session cache configuration, or null to use default
+     * @return this builder instance
+     * @since 1.0.5
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withTlsSessionCacheConfig(
+        TlsSessionCacheConfig tlsSessionCacheConfig) {
+      configBuilder.withTlsSessionCacheConfig(tlsSessionCacheConfig);
+      return this;
+    }
+
+    /**
+     * Sets the complete Alternator configuration.
+     *
+     * <p>This method allows setting all Alternator-specific configuration options at once using a
+     * pre-built {@link AlternatorConfig} instance.
+     *
+     * @param config the Alternator configuration
+     * @return this builder instance
+     * @since 1.0.5
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withAlternatorConfig(AlternatorConfig config) {
+      if (config != null) {
+        configBuilder.withRoutingScope(config.getRoutingScope());
+        configBuilder.withCompressionAlgorithm(config.getCompressionAlgorithm());
+        configBuilder.withMinCompressionSizeBytes(config.getMinCompressionSizeBytes());
+        configBuilder.withOptimizeHeaders(config.isOptimizeHeaders());
+        configBuilder.withHeadersWhitelist(config.getHeadersWhitelist());
+        configBuilder.withTlsSessionCacheConfig(config.getTlsSessionCacheConfig());
+      }
+      return this;
+    }
+
+    /**
      * Disables SSL certificate validation for testing purposes.
      *
      * <p><strong>WARNING:</strong> This should only be used for testing with self-signed
@@ -613,7 +654,7 @@ public class AlternatorDynamoDbAsyncClient {
       // Build the underlying client and wrap it with Alternator metadata
       DynamoDbAsyncClient client = delegate.build();
       return new AlternatorDynamoDbAsyncClientWrapper(
-          client, liveNodes, alternatorEndpointProvider);
+          client, liveNodes, alternatorEndpointProvider, alternatorConfig);
     }
   }
 }

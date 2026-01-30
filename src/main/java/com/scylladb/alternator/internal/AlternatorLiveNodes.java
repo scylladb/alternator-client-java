@@ -1,6 +1,7 @@
 package com.scylladb.alternator.internal;
 
 import com.scylladb.alternator.AlternatorConfig;
+import com.scylladb.alternator.TlsSessionCacheConfig;
 import com.scylladb.alternator.routing.ClusterScope;
 import com.scylladb.alternator.routing.DatacenterScope;
 import com.scylladb.alternator.routing.RackScope;
@@ -12,9 +13,6 @@ import java.net.MalformedURLException;
 import java.net.ProtocolException;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.security.KeyManagementException;
-import java.security.NoSuchAlgorithmException;
-import java.security.cert.X509Certificate;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -22,8 +20,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import javax.net.ssl.SSLContext;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.X509TrustManager;
 import org.apache.http.HttpEntity;
 import org.apache.http.HttpResponse;
 import org.apache.http.client.HttpClient;
@@ -277,7 +273,7 @@ public class AlternatorLiveNodes extends Thread {
       throw new RuntimeException(e);
     }
     this.liveNodes.set(initialNodes);
-    this.httpClient = prepareHttpClient();
+    this.httpClient = prepareHttpClient(config.getTlsSessionCacheConfig());
   }
 
   /**
@@ -489,32 +485,22 @@ public class AlternatorLiveNodes extends Thread {
     return newHosts;
   }
 
-  private static HttpClient prepareHttpClient() {
+  /**
+   * Creates an HTTP client configured with TLS session caching support.
+   *
+   * @param tlsConfig the TLS session cache configuration
+   * @return a configured HTTP client
+   */
+  private static HttpClient prepareHttpClient(TlsSessionCacheConfig tlsConfig) {
     RegistryBuilder<ConnectionSocketFactory> socketFactoryRegistryBuilder =
         RegistryBuilder.<ConnectionSocketFactory>create()
             .register("http", PlainConnectionSocketFactory.getSocketFactory())
             .register("https", SSLConnectionSocketFactory.getSocketFactory());
 
-    TrustManager[] trustAllCertificates =
-        new TrustManager[] {
-          new X509TrustManager() {
-            public void checkClientTrusted(X509Certificate[] chain, String authType) {}
-
-            public void checkServerTrusted(X509Certificate[] chain, String authType) {}
-
-            public X509Certificate[] getAcceptedIssuers() {
-              return new X509Certificate[0];
-            }
-          }
-        };
-    try {
-      SSLContext sslContext = SSLContext.getInstance("SSL");
-      sslContext.init(null, trustAllCertificates, new java.security.SecureRandom());
-      socketFactoryRegistryBuilder.register(
-          "https", new SSLConnectionSocketFactory(sslContext, NoopHostnameVerifier.INSTANCE));
-    } catch (NoSuchAlgorithmException | KeyManagementException e) {
-      throw new RuntimeException(e);
-    }
+    // Use TlsContextFactory to create SSLContext with session ticket support
+    SSLContext sslContext = TlsContextFactory.createSslContext(tlsConfig);
+    socketFactoryRegistryBuilder.register(
+        "https", new SSLConnectionSocketFactory(sslContext, NoopHostnameVerifier.INSTANCE));
 
     PoolingHttpClientConnectionManager httpConnectionManager =
         new PoolingHttpClientConnectionManager(socketFactoryRegistryBuilder.build());
