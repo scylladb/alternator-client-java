@@ -142,7 +142,14 @@ public class AlternatorDynamoDbAsyncClientWrapper implements AutoCloseable {
     return config;
   }
 
-  /** Closes the underlying DynamoDbAsyncClient. */
+  /**
+   * Closes the underlying DynamoDbAsyncClient.
+   *
+   * <p>Note: Unlike {@link AlternatorDynamoDbClientWrapper#close()}, this method does not need to
+   * shut down a PartitionKeyResolver because key route affinity is not supported for async clients.
+   * The async client builder rejects key affinity configuration at build time since it relies on
+   * ThreadLocal context passing which doesn't work with async/reactive patterns.
+   */
   @Override
   public void close() {
     client.close();

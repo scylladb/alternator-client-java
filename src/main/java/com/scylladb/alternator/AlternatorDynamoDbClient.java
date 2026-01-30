@@ -1,6 +1,9 @@
 package com.scylladb.alternator;
 
 import com.scylladb.alternator.internal.AlternatorLiveNodes;
+import com.scylladb.alternator.keyrouting.KeyRouteAffinity;
+import com.scylladb.alternator.keyrouting.KeyRouteAffinityConfig;
+import com.scylladb.alternator.keyrouting.KeyRouteAffinityInterceptor;
 import com.scylladb.alternator.routing.RoutingScope;
 import java.net.URI;
 import java.util.Collection;
@@ -218,6 +221,39 @@ public class AlternatorDynamoDbClient {
     }
 
     /**
+     * Sets the key route affinity configuration.
+     *
+     * <p>Key route affinity ensures that all requests for the same partition key are routed to the
+     * same Alternator node, which improves performance for Lightweight Transactions (LWT) that use
+     * Paxos consensus.
+     *
+     * @param keyRouteAffinityConfig the key route affinity configuration
+     * @return this builder instance
+     * @since 1.0.6
+     */
+    public AlternatorDynamoDbClientBuilder withKeyRouteAffinity(
+        KeyRouteAffinityConfig keyRouteAffinityConfig) {
+      configBuilder.withKeyRouteAffinity(keyRouteAffinityConfig);
+      return this;
+    }
+
+    /**
+     * Sets the key route affinity type with no pre-configured PK info.
+     *
+     * <p>This is a convenience method for configuring key route affinity without providing
+     * pre-configured partition key information. Partition key names will be auto-discovered via
+     * DescribeTable API on first access to each table.
+     *
+     * @param type the key route affinity type
+     * @return this builder instance
+     * @since 1.0.7
+     */
+    public AlternatorDynamoDbClientBuilder withKeyRouteAffinity(KeyRouteAffinity type) {
+      configBuilder.withKeyRouteAffinity(type);
+      return this;
+    }
+
+    /**
      * Sets the complete Alternator configuration.
      *
      * <p>This method allows setting all Alternator-specific configuration options at once using a
@@ -254,6 +290,7 @@ public class AlternatorDynamoDbClient {
         configBuilder.withOptimizeHeaders(config.isOptimizeHeaders());
         configBuilder.withHeadersWhitelist(config.getHeadersWhitelist());
         configBuilder.withTlsSessionCacheConfig(config.getTlsSessionCacheConfig());
+        configBuilder.withKeyRouteAffinity(config.getKeyRouteAffinityConfig());
       }
       return this;
     }
@@ -651,6 +688,21 @@ public class AlternatorDynamoDbClient {
       AlternatorEndpointProvider alternatorEndpointProvider =
           new AlternatorEndpointProvider(liveNodes);
 
+      // Add key route affinity interceptor if configured
+      KeyRouteAffinityInterceptor keyAffinityInterceptor = null;
+      KeyRouteAffinityConfig keyAffinityConfig = alternatorConfig.getKeyRouteAffinityConfig();
+      if (keyAffinityConfig != null
+          && keyAffinityConfig.getType() != null
+          && keyAffinityConfig.getType() != KeyRouteAffinity.NONE) {
+        ClientOverrideConfiguration.Builder overrideBuilder =
+            delegate.overrideConfiguration() != null
+                ? delegate.overrideConfiguration().toBuilder()
+                : ClientOverrideConfiguration.builder();
+        keyAffinityInterceptor = new KeyRouteAffinityInterceptor(keyAffinityConfig, liveNodes);
+        overrideBuilder.addExecutionInterceptor(keyAffinityInterceptor);
+        delegate.overrideConfiguration(overrideBuilder.build());
+      }
+
       // Set the endpoint provider on the delegate
       delegate.endpointProvider(alternatorEndpointProvider);
 
@@ -662,7 +714,7 @@ public class AlternatorDynamoDbClient {
       // Build the underlying client and wrap it with Alternator metadata
       DynamoDbClient client = delegate.build();
       return new AlternatorDynamoDbClientWrapper(
-          client, liveNodes, alternatorEndpointProvider, alternatorConfig);
+          client, liveNodes, alternatorEndpointProvider, alternatorConfig, keyAffinityInterceptor);
     }
   }
 }

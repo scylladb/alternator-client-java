@@ -1,6 +1,7 @@
 package com.scylladb.alternator;
 
 import com.scylladb.alternator.internal.AlternatorLiveNodes;
+import com.scylladb.alternator.keyrouting.KeyRouteAffinityInterceptor;
 import java.net.URI;
 import java.util.List;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
@@ -38,6 +39,7 @@ public class AlternatorDynamoDbClientWrapper implements AutoCloseable {
   private final AlternatorLiveNodes liveNodes;
   private final AlternatorEndpointProvider endpointProvider;
   private final AlternatorConfig config;
+  private final KeyRouteAffinityInterceptor keyRouteAffinityInterceptor;
 
   /**
    * Creates a new wrapper with the given client, live nodes, and endpoint provider.
@@ -50,7 +52,7 @@ public class AlternatorDynamoDbClientWrapper implements AutoCloseable {
       DynamoDbClient client,
       AlternatorLiveNodes liveNodes,
       AlternatorEndpointProvider endpointProvider) {
-    this(client, liveNodes, endpointProvider, null);
+    this(client, liveNodes, endpointProvider, null, null);
   }
 
   /**
@@ -66,10 +68,35 @@ public class AlternatorDynamoDbClientWrapper implements AutoCloseable {
       AlternatorLiveNodes liveNodes,
       AlternatorEndpointProvider endpointProvider,
       AlternatorConfig config) {
+    this(client, liveNodes, endpointProvider, config, null);
+  }
+
+  /**
+   * Creates a new wrapper with the given client, live nodes, endpoint provider, config, and
+   * interceptor.
+   *
+   * @param client the underlying DynamoDbClient
+   * @param liveNodes the AlternatorLiveNodes instance managing node discovery
+   * @param endpointProvider the AlternatorEndpointProvider used for this client
+   * @param config the AlternatorConfig used for this client
+   * @param keyRouteAffinityInterceptor the KeyRouteAffinityInterceptor (may be null)
+   */
+  public AlternatorDynamoDbClientWrapper(
+      DynamoDbClient client,
+      AlternatorLiveNodes liveNodes,
+      AlternatorEndpointProvider endpointProvider,
+      AlternatorConfig config,
+      KeyRouteAffinityInterceptor keyRouteAffinityInterceptor) {
     this.client = client;
     this.liveNodes = liveNodes;
     this.endpointProvider = endpointProvider;
     this.config = config;
+    this.keyRouteAffinityInterceptor = keyRouteAffinityInterceptor;
+
+    // Enable auto-discovery by providing the built client to the interceptor
+    if (keyRouteAffinityInterceptor != null) {
+      keyRouteAffinityInterceptor.setClientForDiscovery(client);
+    }
   }
 
   /**
@@ -142,9 +169,17 @@ public class AlternatorDynamoDbClientWrapper implements AutoCloseable {
     return config;
   }
 
-  /** Closes the underlying DynamoDbClient. */
+  /**
+   * Closes the underlying DynamoDbClient and releases associated resources.
+   *
+   * <p>This includes shutting down the partition key resolver's discovery executor if key route
+   * affinity is enabled.
+   */
   @Override
   public void close() {
+    if (keyRouteAffinityInterceptor != null) {
+      keyRouteAffinityInterceptor.getPartitionKeyResolver().shutdown();
+    }
     client.close();
   }
 }
