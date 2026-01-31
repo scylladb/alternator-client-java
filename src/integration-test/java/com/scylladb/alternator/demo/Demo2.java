@@ -63,23 +63,16 @@ public class Demo2 {
   // client-side load balancing.
   static DynamoDbClient getAlternatorClient(
       URI url, AwsCredentialsProvider myCredentials, String datacenter, String rack) {
-    // To support HTTPS connections to a test server *without* checking
-    // SSL certificates we need the httpClient() hack. It's of course not
-    // needed in a production installation.
-    SdkHttpClient http =
-        ApacheHttpClient.builder()
-            .buildWithDefaults(
-                AttributeMap.builder()
-                    .put(SdkHttpConfigurationOption.TRUST_ALL_CERTIFICATES, true)
-                    .build());
-
     // Build client with routing scope
+    // Note: AlternatorDynamoDbClient.builder() handles TLS internally.
+    // By default it trusts all certificates (for backwards compatibility).
+    // For production, use .withTlsConfig(TlsConfig.systemDefault()) or
+    // .withTlsConfig(TlsConfig.builder().withCaCertPath(...).build())
     RoutingScope scope = deriveRoutingScope(datacenter, rack);
 
     return AlternatorDynamoDbClient.builder()
         .endpointOverride(url)
         .credentialsProvider(myCredentials)
-        .httpClient(http)
         .region(Region.US_EAST_1) // unused, but if missing can result in error
         .withRoutingScope(scope)
         .build();
