@@ -193,10 +193,55 @@ public class AlternatorDynamoDbAsyncClient {
      * @param tlsSessionCacheConfig the TLS session cache configuration, or null to use default
      * @return this builder instance
      * @since 1.0.5
+     * @deprecated Use {@link #withTlsConfig(TlsConfig)} instead
      */
+    @Deprecated
     public AlternatorDynamoDbAsyncClientBuilder withTlsSessionCacheConfig(
         TlsSessionCacheConfig tlsSessionCacheConfig) {
       configBuilder.withTlsSessionCacheConfig(tlsSessionCacheConfig);
+      return this;
+    }
+
+    /**
+     * Sets the TLS configuration for secure connections.
+     *
+     * <p>The TLS configuration controls certificate validation, custom CA certificates, hostname
+     * verification, and session caching settings.
+     *
+     * <p>Example:
+     *
+     * <pre>{@code
+     * // Use system CA certificates (recommended for production)
+     * DynamoDbAsyncClient client = AlternatorDynamoDbAsyncClient.builder()
+     *     .endpointOverride(URI.create("https://localhost:8043"))
+     *     .credentialsProvider(credentialsProvider)
+     *     .withTlsConfig(TlsConfig.systemDefault())
+     *     .build();
+     *
+     * // Use custom CA certificate
+     * DynamoDbAsyncClient client = AlternatorDynamoDbAsyncClient.builder()
+     *     .endpointOverride(URI.create("https://localhost:8043"))
+     *     .credentialsProvider(credentialsProvider)
+     *     .withTlsConfig(TlsConfig.builder()
+     *         .withCaCertPath(Paths.get("/path/to/ca.pem"))
+     *         .withTrustSystemCaCerts(false)
+     *         .build())
+     *     .build();
+     *
+     * // Trust all certificates (development/testing only)
+     * DynamoDbAsyncClient client = AlternatorDynamoDbAsyncClient.builder()
+     *     .endpointOverride(URI.create("https://localhost:8043"))
+     *     .credentialsProvider(credentialsProvider)
+     *     .withTlsConfig(TlsConfig.trustAll())
+     *     .build();
+     * }</pre>
+     *
+     * @param tlsConfig the TLS configuration, or null to use default (trust-all)
+     * @return this builder instance
+     * @since 1.0.9
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withTlsConfig(TlsConfig tlsConfig) {
+      configBuilder.withTlsConfig(tlsConfig);
       return this;
     }
 
@@ -250,7 +295,7 @@ public class AlternatorDynamoDbAsyncClient {
         configBuilder.withMinCompressionSizeBytes(config.getMinCompressionSizeBytes());
         configBuilder.withOptimizeHeaders(config.isOptimizeHeaders());
         configBuilder.withHeadersWhitelist(config.getHeadersWhitelist());
-        configBuilder.withTlsSessionCacheConfig(config.getTlsSessionCacheConfig());
+        configBuilder.withTlsConfig(config.getTlsConfig());
         configBuilder.withKeyRouteAffinity(config.getKeyRouteAffinityConfig());
       }
       return this;
@@ -626,6 +671,11 @@ public class AlternatorDynamoDbAsyncClient {
       // Set the seed node on the config
       configBuilder.withSeedNode(seedUri);
 
+      // If disableCertificateChecks was called, set trust-all TLS config
+      if (disableCertificateChecks) {
+        configBuilder.withTlsConfig(TlsConfig.trustAll());
+      }
+
       // Build the AlternatorConfig from the internal builder
       AlternatorConfig alternatorConfig = configBuilder.build();
 
@@ -640,16 +690,20 @@ public class AlternatorDynamoDbAsyncClient {
         delegate.overrideConfiguration(overrideBuilder.build());
       }
 
+      // Determine if we need custom SSL configuration for the SDK HTTP client
+      TlsConfig tlsConfig = alternatorConfig.getTlsConfig();
+      boolean needsTrustAll = tlsConfig.isTrustAllCertificates();
+
       // Configure async HTTP client with optional certificate checking and header filtering
-      if (httpClientSet && (disableCertificateChecks || alternatorConfig.isOptimizeHeaders())) {
+      if (httpClientSet && (needsTrustAll || alternatorConfig.isOptimizeHeaders())) {
         throw new IllegalStateException(
-            "Cannot use custom HTTP client with disableCertificateChecks or optimizeHeaders. "
+            "Cannot use custom HTTP client with trustAllCertificates or optimizeHeaders. "
                 + "These options require configuring the HTTP client internally.");
       }
-      if (!httpClientSet && (disableCertificateChecks || alternatorConfig.isOptimizeHeaders())) {
+      if (!httpClientSet && (needsTrustAll || alternatorConfig.isOptimizeHeaders())) {
         // Build the base async HTTP client
         SdkAsyncHttpClient baseHttpClient;
-        if (disableCertificateChecks) {
+        if (needsTrustAll) {
           baseHttpClient =
               new DefaultSdkAsyncHttpClientBuilder()
                   .buildWithDefaults(
