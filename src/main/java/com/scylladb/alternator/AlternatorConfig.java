@@ -50,6 +50,12 @@ public class AlternatorConfig {
   /** Default minimum request body size (in bytes) that triggers compression. */
   public static final int DEFAULT_MIN_COMPRESSION_SIZE_BYTES = 1024;
 
+  /** Default refresh interval (in milliseconds) when there are active requests. */
+  public static final long DEFAULT_ACTIVE_REFRESH_INTERVAL_MS = 1000;
+
+  /** Default refresh interval (in milliseconds) when the client is idle. */
+  public static final long DEFAULT_IDLE_REFRESH_INTERVAL_MS = 60000;
+
   /**
    * Base HTTP headers required for proper operation with Alternator.
    *
@@ -107,6 +113,8 @@ public class AlternatorConfig {
   private final boolean authenticationEnabled;
   private final TlsSessionCacheConfig tlsSessionCacheConfig;
   private final KeyRouteAffinityConfig keyRouteAffinityConfig;
+  private final long activeRefreshIntervalMs;
+  private final long idleRefreshIntervalMs;
 
   /**
    * Package-private constructor. Use {@link AlternatorConfig#builder()} to create instances.
@@ -122,6 +130,8 @@ public class AlternatorConfig {
    * @param authenticationEnabled whether authentication is enabled
    * @param tlsSessionCacheConfig the TLS session cache configuration for quick TLS renegotiation
    * @param keyRouteAffinityConfig the key route affinity configuration
+   * @param activeRefreshIntervalMs refresh interval when there are active requests
+   * @param idleRefreshIntervalMs refresh interval when the client is idle
    */
   protected AlternatorConfig(
       List<String> seedHosts,
@@ -134,7 +144,9 @@ public class AlternatorConfig {
       Set<String> headersWhitelist,
       boolean authenticationEnabled,
       TlsSessionCacheConfig tlsSessionCacheConfig,
-      KeyRouteAffinityConfig keyRouteAffinityConfig) {
+      KeyRouteAffinityConfig keyRouteAffinityConfig,
+      long activeRefreshIntervalMs,
+      long idleRefreshIntervalMs) {
     this.seedHosts =
         seedHosts != null
             ? Collections.unmodifiableList(new ArrayList<>(seedHosts))
@@ -160,6 +172,10 @@ public class AlternatorConfig {
     this.tlsSessionCacheConfig =
         tlsSessionCacheConfig != null ? tlsSessionCacheConfig : TlsSessionCacheConfig.getDefault();
     this.keyRouteAffinityConfig = keyRouteAffinityConfig;
+    this.activeRefreshIntervalMs =
+        activeRefreshIntervalMs > 0 ? activeRefreshIntervalMs : DEFAULT_ACTIVE_REFRESH_INTERVAL_MS;
+    this.idleRefreshIntervalMs =
+        idleRefreshIntervalMs > 0 ? idleRefreshIntervalMs : DEFAULT_IDLE_REFRESH_INTERVAL_MS;
   }
 
   /**
@@ -311,6 +327,37 @@ public class AlternatorConfig {
   }
 
   /**
+   * Gets the refresh interval (in milliseconds) for updating the node list when there are active
+   * requests.
+   *
+   * <p>When requests are being made to the cluster, the node list is refreshed at this interval to
+   * quickly detect topology changes.
+   *
+   * <p>Default: {@link #DEFAULT_ACTIVE_REFRESH_INTERVAL_MS} (1000ms / 1 second)
+   *
+   * @return the active refresh interval in milliseconds
+   * @since 1.0.8
+   */
+  public long getActiveRefreshIntervalMs() {
+    return activeRefreshIntervalMs;
+  }
+
+  /**
+   * Gets the refresh interval (in milliseconds) for updating the node list when the client is idle.
+   *
+   * <p>When no requests have been made recently, the node list is refreshed at this longer interval
+   * to reduce unnecessary network traffic while still keeping the node list reasonably up-to-date.
+   *
+   * <p>Default: {@link #DEFAULT_IDLE_REFRESH_INTERVAL_MS} (60000ms / 1 minute)
+   *
+   * @return the idle refresh interval in milliseconds
+   * @since 1.0.8
+   */
+  public long getIdleRefreshIntervalMs() {
+    return idleRefreshIntervalMs;
+  }
+
+  /**
    * Returns the set of HTTP headers required for this configuration.
    *
    * <p>This method returns the minimum set of headers needed based on the current settings
@@ -352,6 +399,8 @@ public class AlternatorConfig {
     private boolean authenticationEnabled = true;
     private TlsSessionCacheConfig tlsSessionCacheConfig = null; // null means use default
     private KeyRouteAffinityConfig keyRouteAffinityConfig = null;
+    private long activeRefreshIntervalMs = DEFAULT_ACTIVE_REFRESH_INTERVAL_MS;
+    private long idleRefreshIntervalMs = DEFAULT_IDLE_REFRESH_INTERVAL_MS;
 
     /** Package-private constructor. Use {@link AlternatorConfig#builder()} to create instances. */
     Builder() {}
@@ -702,6 +751,59 @@ public class AlternatorConfig {
     }
 
     /**
+     * Sets the refresh interval for updating the node list when there are active requests.
+     *
+     * <p>When requests are being made to the cluster, the node list is refreshed at this interval
+     * to quickly detect topology changes.
+     *
+     * <p>Default: {@link AlternatorConfig#DEFAULT_ACTIVE_REFRESH_INTERVAL_MS} (1000ms / 1 second)
+     *
+     * <p>Example:
+     *
+     * <pre>{@code
+     * AlternatorConfig config = AlternatorConfig.builder()
+     *     .withSeedNode(URI.create("https://localhost:8043"))
+     *     .withActiveRefreshIntervalMs(500)  // Refresh every 500ms when active
+     *     .build();
+     * }</pre>
+     *
+     * @param intervalMs the refresh interval in milliseconds, must be positive
+     * @return this builder instance
+     * @since 1.0.8
+     */
+    public Builder withActiveRefreshIntervalMs(long intervalMs) {
+      this.activeRefreshIntervalMs = intervalMs;
+      return this;
+    }
+
+    /**
+     * Sets the refresh interval for updating the node list when the client is idle.
+     *
+     * <p>When no requests have been made recently, the node list is refreshed at this longer
+     * interval to reduce unnecessary network traffic while still keeping the node list reasonably
+     * up-to-date.
+     *
+     * <p>Default: {@link AlternatorConfig#DEFAULT_IDLE_REFRESH_INTERVAL_MS} (60000ms / 1 minute)
+     *
+     * <p>Example:
+     *
+     * <pre>{@code
+     * AlternatorConfig config = AlternatorConfig.builder()
+     *     .withSeedNode(URI.create("https://localhost:8043"))
+     *     .withIdleRefreshIntervalMs(120000)  // Refresh every 2 minutes when idle
+     *     .build();
+     * }</pre>
+     *
+     * @param intervalMs the refresh interval in milliseconds, must be positive
+     * @return this builder instance
+     * @since 1.0.8
+     */
+    public Builder withIdleRefreshIntervalMs(long intervalMs) {
+      this.idleRefreshIntervalMs = intervalMs;
+      return this;
+    }
+
+    /**
      * Builds and returns an {@link AlternatorConfig} instance with the configured settings.
      *
      * @return a new {@link AlternatorConfig} instance
@@ -761,7 +863,9 @@ public class AlternatorConfig {
           headersWhitelist,
           authenticationEnabled,
           tlsSessionCacheConfig,
-          keyRouteAffinityConfig);
+          keyRouteAffinityConfig,
+          activeRefreshIntervalMs,
+          idleRefreshIntervalMs);
     }
   }
 }

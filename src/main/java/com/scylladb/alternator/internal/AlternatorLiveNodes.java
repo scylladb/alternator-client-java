@@ -16,6 +16,7 @@ import java.net.URISyntaxException;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -50,6 +51,7 @@ public class AlternatorLiveNodes extends Thread {
   private final AlternatorConfig config;
   private final AtomicBoolean running = new AtomicBoolean(false);
   private final HttpClient httpClient;
+  private final AtomicLong lastActivityTime = new AtomicLong(0);
 
   private static Logger logger = Logger.getLogger(AlternatorLiveNodes.class.getName());
 
@@ -65,7 +67,7 @@ public class AlternatorLiveNodes extends Thread {
           logger.log(Level.SEVERE, "AlternatorLiveNodes failed to sync nodes list", e);
         }
         try {
-          Thread.sleep(5000);
+          Thread.sleep(getRefreshInterval());
         } catch (InterruptedException e) {
           logger.log(Level.INFO, "AlternatorLiveNodes thread interrupted and stopping");
           return;
@@ -74,6 +76,33 @@ public class AlternatorLiveNodes extends Thread {
     } finally {
       logger.log(Level.INFO, "AlternatorLiveNodes thread stopped");
     }
+  }
+
+  /**
+   * Determines the appropriate refresh interval based on recent activity.
+   *
+   * <p>If there has been activity within the idle refresh interval, use the active refresh
+   * interval. Otherwise, use the idle refresh interval.
+   *
+   * @return the refresh interval in milliseconds
+   */
+  private long getRefreshInterval() {
+    long lastActivity = lastActivityTime.get();
+    long idleThreshold = config.getIdleRefreshIntervalMs();
+    long timeSinceActivity = System.currentTimeMillis() - lastActivity;
+
+    if (timeSinceActivity < idleThreshold) {
+      return config.getActiveRefreshIntervalMs();
+    }
+    return idleThreshold;
+  }
+
+  /**
+   * Marks that there has been recent activity (a request was made). This affects the refresh
+   * interval used by the background thread.
+   */
+  private void markActivity() {
+    lastActivityTime.set(System.currentTimeMillis());
   }
 
   /**
@@ -382,6 +411,7 @@ public class AlternatorLiveNodes extends Thread {
    * @return a {@link java.net.URI} object
    */
   public URI nextAsURI() {
+    markActivity();
     List<URI> nodes = liveNodes.get();
     if (nodes.isEmpty()) {
       throw new IllegalStateException("No live nodes available");
