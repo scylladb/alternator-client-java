@@ -1,7 +1,7 @@
 package com.scylladb.alternator.internal;
 
 import com.scylladb.alternator.AlternatorConfig;
-import com.scylladb.alternator.TlsSessionCacheConfig;
+import com.scylladb.alternator.TlsConfig;
 import com.scylladb.alternator.routing.ClusterScope;
 import com.scylladb.alternator.routing.DatacenterScope;
 import com.scylladb.alternator.routing.RackScope;
@@ -28,6 +28,7 @@ import org.apache.http.client.methods.HttpGet;
 import org.apache.http.config.RegistryBuilder;
 import org.apache.http.conn.socket.ConnectionSocketFactory;
 import org.apache.http.conn.socket.PlainConnectionSocketFactory;
+import org.apache.http.conn.ssl.DefaultHostnameVerifier;
 import org.apache.http.conn.ssl.NoopHostnameVerifier;
 import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
 import org.apache.http.impl.client.HttpClients;
@@ -302,7 +303,7 @@ public class AlternatorLiveNodes extends Thread {
       throw new RuntimeException(e);
     }
     this.liveNodes.set(initialNodes);
-    this.httpClient = prepareHttpClient(config.getTlsSessionCacheConfig());
+    this.httpClient = prepareHttpClient(config.getTlsConfig());
   }
 
   /**
@@ -516,21 +517,28 @@ public class AlternatorLiveNodes extends Thread {
   }
 
   /**
-   * Creates an HTTP client configured with TLS session caching support.
+   * Creates an HTTP client configured with TLS settings from the provided configuration.
    *
-   * @param tlsConfig the TLS session cache configuration
+   * @param tlsConfig the TLS configuration
    * @return a configured HTTP client
    */
-  private static HttpClient prepareHttpClient(TlsSessionCacheConfig tlsConfig) {
+  private static HttpClient prepareHttpClient(TlsConfig tlsConfig) {
     RegistryBuilder<ConnectionSocketFactory> socketFactoryRegistryBuilder =
         RegistryBuilder.<ConnectionSocketFactory>create()
             .register("http", PlainConnectionSocketFactory.getSocketFactory())
             .register("https", SSLConnectionSocketFactory.getSocketFactory());
 
-    // Use TlsContextFactory to create SSLContext with session ticket support
+    // Use TlsContextFactory to create SSLContext with the configured settings
     SSLContext sslContext = TlsContextFactory.createSslContext(tlsConfig);
+
+    // Choose hostname verifier based on config
+    javax.net.ssl.HostnameVerifier hostnameVerifier =
+        (tlsConfig != null && tlsConfig.isVerifyHostname())
+            ? new DefaultHostnameVerifier()
+            : NoopHostnameVerifier.INSTANCE;
+
     socketFactoryRegistryBuilder.register(
-        "https", new SSLConnectionSocketFactory(sslContext, NoopHostnameVerifier.INSTANCE));
+        "https", new SSLConnectionSocketFactory(sslContext, hostnameVerifier));
 
     PoolingHttpClientConnectionManager httpConnectionManager =
         new PoolingHttpClientConnectionManager(socketFactoryRegistryBuilder.build());

@@ -112,6 +112,7 @@ public class AlternatorConfig {
   private final Set<String> headersWhitelist;
   private final boolean authenticationEnabled;
   private final TlsSessionCacheConfig tlsSessionCacheConfig;
+  private final TlsConfig tlsConfig;
   private final KeyRouteAffinityConfig keyRouteAffinityConfig;
   private final long activeRefreshIntervalMs;
   private final long idleRefreshIntervalMs;
@@ -129,6 +130,7 @@ public class AlternatorConfig {
    * @param headersWhitelist the set of headers to preserve when optimization is enabled
    * @param authenticationEnabled whether authentication is enabled
    * @param tlsSessionCacheConfig the TLS session cache configuration for quick TLS renegotiation
+   * @param tlsConfig the TLS configuration including CA certificates and verification settings
    * @param keyRouteAffinityConfig the key route affinity configuration
    * @param activeRefreshIntervalMs refresh interval when there are active requests
    * @param idleRefreshIntervalMs refresh interval when the client is idle
@@ -144,6 +146,7 @@ public class AlternatorConfig {
       Set<String> headersWhitelist,
       boolean authenticationEnabled,
       TlsSessionCacheConfig tlsSessionCacheConfig,
+      TlsConfig tlsConfig,
       KeyRouteAffinityConfig keyRouteAffinityConfig,
       long activeRefreshIntervalMs,
       long idleRefreshIntervalMs) {
@@ -171,6 +174,8 @@ public class AlternatorConfig {
     // Use default TLS session cache config if not provided
     this.tlsSessionCacheConfig =
         tlsSessionCacheConfig != null ? tlsSessionCacheConfig : TlsSessionCacheConfig.getDefault();
+    // Use default TLS config (trust-all) if not provided - for backwards compatibility
+    this.tlsConfig = tlsConfig != null ? tlsConfig : TlsConfig.trustAll();
     this.keyRouteAffinityConfig = keyRouteAffinityConfig;
     this.activeRefreshIntervalMs =
         activeRefreshIntervalMs > 0 ? activeRefreshIntervalMs : DEFAULT_ACTIVE_REFRESH_INTERVAL_MS;
@@ -307,9 +312,24 @@ public class AlternatorConfig {
    *
    * @return the TLS session cache configuration, never null
    * @since 1.0.5
+   * @deprecated Use {@link #getTlsConfig()} and {@link TlsConfig#getSessionCacheConfig()} instead
    */
+  @Deprecated
   public TlsSessionCacheConfig getTlsSessionCacheConfig() {
     return tlsSessionCacheConfig;
+  }
+
+  /**
+   * Gets the TLS configuration.
+   *
+   * <p>The TLS configuration controls certificate validation, custom CA certificates, hostname
+   * verification, and session caching settings.
+   *
+   * @return the TLS configuration, never null
+   * @since 1.0.9
+   */
+  public TlsConfig getTlsConfig() {
+    return tlsConfig;
   }
 
   /**
@@ -398,6 +418,7 @@ public class AlternatorConfig {
     private boolean headersWhitelistWasSet = false;
     private boolean authenticationEnabled = true;
     private TlsSessionCacheConfig tlsSessionCacheConfig = null; // null means use default
+    private TlsConfig tlsConfig = null; // null means use default (trust-all for backwards compat)
     private KeyRouteAffinityConfig keyRouteAffinityConfig = null;
     private long activeRefreshIntervalMs = DEFAULT_ACTIVE_REFRESH_INTERVAL_MS;
     private long idleRefreshIntervalMs = DEFAULT_IDLE_REFRESH_INTERVAL_MS;
@@ -700,9 +721,51 @@ public class AlternatorConfig {
      * @param tlsSessionCacheConfig the TLS session cache configuration, or null to use default
      * @return this builder instance
      * @since 1.0.5
+     * @deprecated Use {@link #withTlsConfig(TlsConfig)} instead
      */
+    @Deprecated
     public Builder withTlsSessionCacheConfig(TlsSessionCacheConfig tlsSessionCacheConfig) {
       this.tlsSessionCacheConfig = tlsSessionCacheConfig;
+      return this;
+    }
+
+    /**
+     * Sets the TLS configuration for secure connections.
+     *
+     * <p>The TLS configuration controls certificate validation, custom CA certificates, hostname
+     * verification, and session caching settings.
+     *
+     * <p>Example:
+     *
+     * <pre>{@code
+     * // Use system CA certificates
+     * AlternatorConfig config = AlternatorConfig.builder()
+     *     .withSeedNode(URI.create("https://localhost:8043"))
+     *     .withTlsConfig(TlsConfig.systemDefault())
+     *     .build();
+     *
+     * // Use custom CA certificate
+     * AlternatorConfig config = AlternatorConfig.builder()
+     *     .withSeedNode(URI.create("https://localhost:8043"))
+     *     .withTlsConfig(TlsConfig.builder()
+     *         .withCaCertPath(Paths.get("/path/to/ca.pem"))
+     *         .withTrustSystemCaCerts(false)
+     *         .build())
+     *     .build();
+     *
+     * // Trust all certificates (development/testing only)
+     * AlternatorConfig config = AlternatorConfig.builder()
+     *     .withSeedNode(URI.create("https://localhost:8043"))
+     *     .withTlsConfig(TlsConfig.trustAll())
+     *     .build();
+     * }</pre>
+     *
+     * @param tlsConfig the TLS configuration, or null to use default (trust-all)
+     * @return this builder instance
+     * @since 1.0.9
+     */
+    public Builder withTlsConfig(TlsConfig tlsConfig) {
+      this.tlsConfig = tlsConfig;
       return this;
     }
 
@@ -852,6 +915,19 @@ public class AlternatorConfig {
       RoutingScope effectiveRoutingScope =
           routingScope != null ? routingScope : ClusterScope.create();
 
+      // Determine the effective TLS config:
+      // 1. If tlsConfig is explicitly set, use it
+      // 2. If tlsSessionCacheConfig is set, create a trust-all config with that session config
+      // 3. Otherwise, use default trust-all config
+      TlsConfig effectiveTlsConfig = tlsConfig;
+      if (effectiveTlsConfig == null && tlsSessionCacheConfig != null) {
+        effectiveTlsConfig =
+            TlsConfig.builder()
+                .withTrustAllCertificates(true)
+                .withSessionCacheConfig(tlsSessionCacheConfig)
+                .build();
+      }
+
       return new AlternatorConfig(
           seedHosts,
           scheme,
@@ -863,6 +939,7 @@ public class AlternatorConfig {
           headersWhitelist,
           authenticationEnabled,
           tlsSessionCacheConfig,
+          effectiveTlsConfig,
           keyRouteAffinityConfig,
           activeRefreshIntervalMs,
           idleRefreshIntervalMs);
