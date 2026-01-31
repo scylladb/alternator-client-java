@@ -204,58 +204,123 @@ public class AttributeValueHasherTest {
     }
   }
 
-  // ========== Collision Detection Tests ==========
-  // These tests document known collision scenarios in the current implementation.
-  // See GitHub issue #32 for the fix proposal.
+  // ========== Type Collision Prevention Tests ==========
+  // These tests verify that different types with the same value produce different hashes.
 
-  /**
-   * Documents that String and Number types with the same value currently produce the same hash.
-   *
-   * <p>This is a known limitation - see issue #32.
-   *
-   * <p>IMPORTANT: When issue #32 is fixed, this test should be updated to use assertNotEquals.
-   */
+  /** Verifies that String and Number types with the same value produce different hashes. */
   @Test
-  public void testStringNumberCollision_KnownIssue() {
-    // String "12345" and Number "12345" currently hash to the same value
-    // because both are encoded as UTF-8 bytes without type prefix
+  public void testStringNumberNoCollision() {
+    // String "12345" and Number "12345" should hash to different values
+    // because they have different type prefixes
     AttributeValue stringVal = AttributeValue.builder().s("12345").build();
     AttributeValue numberVal = AttributeValue.builder().n("12345").build();
 
     long stringHash = AttributeValueHasher.hash(stringVal);
     long numberHash = AttributeValueHasher.hash(numberVal);
 
-    // KNOWN ISSUE: These currently collide. After fix, change to assertNotEquals.
-    assertEquals(
-        "KNOWN ISSUE #32: String and Number with same value collide", stringHash, numberHash);
+    assertNotEquals("String and Number with same value should NOT collide", stringHash, numberHash);
   }
 
   /**
-   * Documents that different String Set element boundaries can produce the same hash.
-   *
-   * <p>This is a known limitation - see issue #32.
+   * Verifies that String and Binary types with the same byte representation produce different
+   * hashes.
    */
   @Test
-  public void testStringSetConcatenationCollision_KnownIssue() {
-    // SS ["a", "bc"] and SS ["ab", "c"] both concatenate to "abc"
+  public void testStringBinaryNoCollision() {
+    // String "hello" and Binary containing UTF-8 bytes of "hello"
+    AttributeValue stringVal = AttributeValue.builder().s("hello").build();
+    AttributeValue binaryVal =
+        AttributeValue.builder()
+            .b(SdkBytes.fromByteArray("hello".getBytes(java.nio.charset.StandardCharsets.UTF_8)))
+            .build();
+
+    long stringHash = AttributeValueHasher.hash(stringVal);
+    long binaryHash = AttributeValueHasher.hash(binaryVal);
+
+    assertNotEquals("String and Binary with same bytes should NOT collide", stringHash, binaryHash);
+  }
+
+  /** Verifies that Boolean and Null types produce different hashes. */
+  @Test
+  public void testBooleanNullNoCollision() {
+    // Boolean true and Null true should hash to different values
+    AttributeValue boolTrue = AttributeValue.builder().bool(true).build();
+    AttributeValue nullTrue = AttributeValue.builder().nul(true).build();
+
+    long boolHash = AttributeValueHasher.hash(boolTrue);
+    long nullHash = AttributeValueHasher.hash(nullTrue);
+
+    assertNotEquals("Boolean true and Null true should NOT collide", boolHash, nullHash);
+
+    // Also test false values
+    AttributeValue boolFalse = AttributeValue.builder().bool(false).build();
+    AttributeValue nullFalse = AttributeValue.builder().nul(false).build();
+
+    assertNotEquals(
+        "Boolean false and Null false should NOT collide",
+        AttributeValueHasher.hash(boolFalse),
+        AttributeValueHasher.hash(nullFalse));
+  }
+
+  // ========== Collection Boundary Collision Prevention Tests ==========
+  // These tests verify that different element boundaries produce different hashes.
+
+  /** Verifies that different String Set element boundaries produce different hashes. */
+  @Test
+  public void testStringSetBoundaryNoCollision() {
+    // SS ["a", "bc"] and SS ["ab", "c"] should hash to different values
+    // because of length-prefixed encoding
     AttributeValue set1 = AttributeValue.builder().ss(Arrays.asList("a", "bc")).build();
     AttributeValue set2 = AttributeValue.builder().ss(Arrays.asList("ab", "c")).build();
 
     long hash1 = AttributeValueHasher.hash(set1);
     long hash2 = AttributeValueHasher.hash(set2);
 
-    // KNOWN ISSUE: These currently collide. After fix, change to assertNotEquals.
-    assertEquals("KNOWN ISSUE #32: Different SS element boundaries collide", hash1, hash2);
+    assertNotEquals("Different SS element boundaries should NOT collide", hash1, hash2);
   }
 
-  /**
-   * Documents that different List element boundaries can produce the same hash.
-   *
-   * <p>This is a known limitation - see issue #32.
-   */
+  /** Verifies that different Number Set element boundaries produce different hashes. */
   @Test
-  public void testListConcatenationCollision_KnownIssue() {
-    // L [S("a"), S("bc")] and L [S("ab"), S("c")] both concatenate to "abc"
+  public void testNumberSetBoundaryNoCollision() {
+    // NS ["1", "23"] and NS ["12", "3"] should hash to different values
+    AttributeValue set1 = AttributeValue.builder().ns(Arrays.asList("1", "23")).build();
+    AttributeValue set2 = AttributeValue.builder().ns(Arrays.asList("12", "3")).build();
+
+    long hash1 = AttributeValueHasher.hash(set1);
+    long hash2 = AttributeValueHasher.hash(set2);
+
+    assertNotEquals("Different NS element boundaries should NOT collide", hash1, hash2);
+  }
+
+  /** Verifies that different Binary Set element boundaries produce different hashes. */
+  @Test
+  public void testBinarySetBoundaryNoCollision() {
+    // BS [{0x01}, {0x02, 0x03}] and BS [{0x01, 0x02}, {0x03}] should differ
+    AttributeValue set1 =
+        AttributeValue.builder()
+            .bs(
+                Arrays.asList(
+                    SdkBytes.fromByteArray(new byte[] {0x01}),
+                    SdkBytes.fromByteArray(new byte[] {0x02, 0x03})))
+            .build();
+    AttributeValue set2 =
+        AttributeValue.builder()
+            .bs(
+                Arrays.asList(
+                    SdkBytes.fromByteArray(new byte[] {0x01, 0x02}),
+                    SdkBytes.fromByteArray(new byte[] {0x03})))
+            .build();
+
+    long hash1 = AttributeValueHasher.hash(set1);
+    long hash2 = AttributeValueHasher.hash(set2);
+
+    assertNotEquals("Different BS element boundaries should NOT collide", hash1, hash2);
+  }
+
+  /** Verifies that different List element boundaries produce different hashes. */
+  @Test
+  public void testListBoundaryNoCollision() {
+    // L [S("a"), S("bc")] and L [S("ab"), S("c")] should hash to different values
     AttributeValue list1 =
         AttributeValue.builder()
             .l(
@@ -274,34 +339,52 @@ public class AttributeValueHasherTest {
     long hash1 = AttributeValueHasher.hash(list1);
     long hash2 = AttributeValueHasher.hash(list2);
 
-    // KNOWN ISSUE: These currently collide. After fix, change to assertNotEquals.
-    assertEquals("KNOWN ISSUE #32: Different List element boundaries collide", hash1, hash2);
+    assertNotEquals("Different List element boundaries should NOT collide", hash1, hash2);
   }
 
-  /**
-   * Documents that empty collections of different types currently produce the same hash.
-   *
-   * <p>This is a known limitation - see issue #32.
-   */
+  /** Verifies that different Map key boundaries produce different hashes. */
   @Test
-  public void testEmptyCollectionCollision_KnownIssue() {
-    // Empty SS, NS, and BS all produce empty byte array → hash 0
+  public void testMapKeyBoundaryNoCollision() {
+    // M {"a": S("x"), "bc": S("y")} and M {"ab": S("x"), "c": S("y")} should differ
+    Map<String, AttributeValue> map1 = new HashMap<>();
+    map1.put("a", AttributeValue.builder().s("x").build());
+    map1.put("bc", AttributeValue.builder().s("y").build());
+
+    Map<String, AttributeValue> map2 = new HashMap<>();
+    map2.put("ab", AttributeValue.builder().s("x").build());
+    map2.put("c", AttributeValue.builder().s("y").build());
+
+    long hash1 = AttributeValueHasher.hash(AttributeValue.builder().m(map1).build());
+    long hash2 = AttributeValueHasher.hash(AttributeValue.builder().m(map2).build());
+
+    assertNotEquals("Different Map key boundaries should NOT collide", hash1, hash2);
+  }
+
+  // ========== Empty Collection Collision Prevention Tests ==========
+
+  /** Verifies that empty collections of different types produce different hashes. */
+  @Test
+  public void testEmptyCollectionsNoCollision() {
+    // Empty SS, NS, BS, L, and M should all produce different hashes
     AttributeValue emptySS = AttributeValue.builder().ss(Arrays.<String>asList()).build();
     AttributeValue emptyNS = AttributeValue.builder().ns(Arrays.<String>asList()).build();
     AttributeValue emptyBS = AttributeValue.builder().bs(Arrays.<SdkBytes>asList()).build();
+    AttributeValue emptyL = AttributeValue.builder().l(Arrays.<AttributeValue>asList()).build();
+    AttributeValue emptyM =
+        AttributeValue.builder().m(new HashMap<String, AttributeValue>()).build();
 
     long hashSS = AttributeValueHasher.hash(emptySS);
     long hashNS = AttributeValueHasher.hash(emptyNS);
     long hashBS = AttributeValueHasher.hash(emptyBS);
+    long hashL = AttributeValueHasher.hash(emptyL);
+    long hashM = AttributeValueHasher.hash(emptyM);
 
-    // KNOWN ISSUE: Empty collections all hash to 0
-    assertEquals("Empty SS hashes to 0", 0L, hashSS);
-    assertEquals("Empty NS hashes to 0", 0L, hashNS);
-    assertEquals("Empty BS hashes to 0", 0L, hashBS);
-
-    // All three collide (after fix, these should differ)
-    assertEquals("KNOWN ISSUE #32: Empty SS and NS collide", hashSS, hashNS);
-    assertEquals("KNOWN ISSUE #32: Empty NS and BS collide", hashNS, hashBS);
+    // All empty collections should produce different hashes due to type prefixes
+    assertNotEquals("Empty SS and NS should NOT collide", hashSS, hashNS);
+    assertNotEquals("Empty NS and BS should NOT collide", hashNS, hashBS);
+    assertNotEquals("Empty BS and L should NOT collide", hashBS, hashL);
+    assertNotEquals("Empty L and M should NOT collide", hashL, hashM);
+    assertNotEquals("Empty SS and L should NOT collide", hashSS, hashL);
   }
 
   // ========== Binary Partition Key Tests ==========
@@ -405,13 +488,14 @@ public class AttributeValueHasherTest {
   public void testEmptyString() {
     AttributeValue value = AttributeValue.builder().s("").build();
     long hash = AttributeValueHasher.hash(value);
-    // Empty string hashes to 0 (same as empty byte array)
-    assertEquals("Empty string hashes to 0", 0L, hash);
+    // Empty string should still produce a non-zero hash due to type prefix
+    assertNotEquals("Empty string should produce non-zero hash (has type prefix)", 0L, hash);
   }
 
   @Test
   public void testUnicodeString() {
-    AttributeValue value = AttributeValue.builder().s("こんにちは世界").build();
+    AttributeValue value =
+        AttributeValue.builder().s("\u3053\u3093\u306b\u3061\u306f\u4e16\u754c").build();
     long hash = AttributeValueHasher.hash(value);
     assertNotEquals(0L, hash);
     // Verify consistency
@@ -464,5 +548,110 @@ public class AttributeValueHasherTest {
 
     assertNotEquals(0L, hash);
     assertEquals(hash, AttributeValueHasher.hash(value));
+  }
+
+  // ========== All Types Unique Tests ==========
+
+  /** Verifies that all primitive types produce unique hashes for reasonable test values. */
+  @Test
+  public void testAllPrimitiveTypesUnique() {
+    // Create one value of each primitive type with similar-looking data
+    AttributeValue stringVal = AttributeValue.builder().s("1").build();
+    AttributeValue numberVal = AttributeValue.builder().n("1").build();
+    AttributeValue binaryVal =
+        AttributeValue.builder()
+            .b(SdkBytes.fromByteArray(new byte[] {0x31})) // ASCII '1'
+            .build();
+    AttributeValue boolVal = AttributeValue.builder().bool(true).build();
+    AttributeValue nullVal = AttributeValue.builder().nul(true).build();
+
+    long hashS = AttributeValueHasher.hash(stringVal);
+    long hashN = AttributeValueHasher.hash(numberVal);
+    long hashB = AttributeValueHasher.hash(binaryVal);
+    long hashBool = AttributeValueHasher.hash(boolVal);
+    long hashNull = AttributeValueHasher.hash(nullVal);
+
+    // All should be different
+    assertNotEquals("S vs N", hashS, hashN);
+    assertNotEquals("S vs B", hashS, hashB);
+    assertNotEquals("S vs BOOL", hashS, hashBool);
+    assertNotEquals("S vs NULL", hashS, hashNull);
+    assertNotEquals("N vs B", hashN, hashB);
+    assertNotEquals("N vs BOOL", hashN, hashBool);
+    assertNotEquals("N vs NULL", hashN, hashNull);
+    assertNotEquals("B vs BOOL", hashB, hashBool);
+    assertNotEquals("B vs NULL", hashB, hashNull);
+    assertNotEquals("BOOL vs NULL", hashBool, hashNull);
+  }
+
+  /** Verifies that all collection types produce unique hashes when empty. */
+  @Test
+  public void testAllCollectionTypesUnique() {
+    AttributeValue ss = AttributeValue.builder().ss(Arrays.asList("a")).build();
+    AttributeValue ns = AttributeValue.builder().ns(Arrays.asList("1")).build();
+    AttributeValue bs =
+        AttributeValue.builder()
+            .bs(Arrays.asList(SdkBytes.fromByteArray(new byte[] {0x61})))
+            .build();
+    AttributeValue list =
+        AttributeValue.builder().l(Arrays.asList(AttributeValue.builder().s("a").build())).build();
+
+    Map<String, AttributeValue> mapData = new HashMap<>();
+    mapData.put("k", AttributeValue.builder().s("v").build());
+    AttributeValue map = AttributeValue.builder().m(mapData).build();
+
+    long hashSS = AttributeValueHasher.hash(ss);
+    long hashNS = AttributeValueHasher.hash(ns);
+    long hashBS = AttributeValueHasher.hash(bs);
+    long hashL = AttributeValueHasher.hash(list);
+    long hashM = AttributeValueHasher.hash(map);
+
+    // All collection types should produce different hashes
+    assertNotEquals("SS vs NS", hashSS, hashNS);
+    assertNotEquals("SS vs BS", hashSS, hashBS);
+    assertNotEquals("SS vs L", hashSS, hashL);
+    assertNotEquals("SS vs M", hashSS, hashM);
+    assertNotEquals("NS vs BS", hashNS, hashBS);
+    assertNotEquals("NS vs L", hashNS, hashL);
+    assertNotEquals("NS vs M", hashNS, hashM);
+    assertNotEquals("BS vs L", hashBS, hashL);
+    assertNotEquals("BS vs M", hashBS, hashM);
+    assertNotEquals("L vs M", hashL, hashM);
+  }
+
+  // ========== Mixed Type in Collections Tests ==========
+
+  /** Verifies that lists with different element types but same values produce different hashes. */
+  @Test
+  public void testListWithDifferentElementTypes() {
+    // L [S("123")] vs L [N("123")] should differ
+    AttributeValue listWithString =
+        AttributeValue.builder()
+            .l(Arrays.asList(AttributeValue.builder().s("123").build()))
+            .build();
+    AttributeValue listWithNumber =
+        AttributeValue.builder()
+            .l(Arrays.asList(AttributeValue.builder().n("123").build()))
+            .build();
+
+    assertNotEquals(
+        "Lists with S vs N elements should differ",
+        AttributeValueHasher.hash(listWithString),
+        AttributeValueHasher.hash(listWithNumber));
+  }
+
+  /** Verifies that maps with same keys but different value types produce different hashes. */
+  @Test
+  public void testMapWithDifferentValueTypes() {
+    Map<String, AttributeValue> map1 = new HashMap<>();
+    map1.put("key", AttributeValue.builder().s("123").build());
+
+    Map<String, AttributeValue> map2 = new HashMap<>();
+    map2.put("key", AttributeValue.builder().n("123").build());
+
+    assertNotEquals(
+        "Maps with S vs N values should differ",
+        AttributeValueHasher.hash(AttributeValue.builder().m(map1).build()),
+        AttributeValueHasher.hash(AttributeValue.builder().m(map2).build()));
   }
 }
