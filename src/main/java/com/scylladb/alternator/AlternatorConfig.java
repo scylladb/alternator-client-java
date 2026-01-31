@@ -1,5 +1,7 @@
 package com.scylladb.alternator;
 
+import com.scylladb.alternator.keyrouting.KeyRouteAffinity;
+import com.scylladb.alternator.keyrouting.KeyRouteAffinityConfig;
 import com.scylladb.alternator.routing.ClusterScope;
 import com.scylladb.alternator.routing.RoutingScope;
 import java.net.URI;
@@ -104,6 +106,7 @@ public class AlternatorConfig {
   private final Set<String> headersWhitelist;
   private final boolean authenticationEnabled;
   private final TlsSessionCacheConfig tlsSessionCacheConfig;
+  private final KeyRouteAffinityConfig keyRouteAffinityConfig;
 
   /**
    * Package-private constructor. Use {@link AlternatorConfig#builder()} to create instances.
@@ -118,6 +121,7 @@ public class AlternatorConfig {
    * @param headersWhitelist the set of headers to preserve when optimization is enabled
    * @param authenticationEnabled whether authentication is enabled
    * @param tlsSessionCacheConfig the TLS session cache configuration for quick TLS renegotiation
+   * @param keyRouteAffinityConfig the key route affinity configuration
    */
   protected AlternatorConfig(
       List<String> seedHosts,
@@ -129,7 +133,8 @@ public class AlternatorConfig {
       boolean optimizeHeaders,
       Set<String> headersWhitelist,
       boolean authenticationEnabled,
-      TlsSessionCacheConfig tlsSessionCacheConfig) {
+      TlsSessionCacheConfig tlsSessionCacheConfig,
+      KeyRouteAffinityConfig keyRouteAffinityConfig) {
     this.seedHosts =
         seedHosts != null
             ? Collections.unmodifiableList(new ArrayList<>(seedHosts))
@@ -154,6 +159,7 @@ public class AlternatorConfig {
     // Use default TLS session cache config if not provided
     this.tlsSessionCacheConfig =
         tlsSessionCacheConfig != null ? tlsSessionCacheConfig : TlsSessionCacheConfig.getDefault();
+    this.keyRouteAffinityConfig = keyRouteAffinityConfig;
   }
 
   /**
@@ -291,6 +297,20 @@ public class AlternatorConfig {
   }
 
   /**
+   * Gets the configured key route affinity configuration.
+   *
+   * <p>Key route affinity ensures that all requests for the same partition key are routed to the
+   * same Alternator node, which improves performance for Lightweight Transactions (LWT) that use
+   * Paxos consensus.
+   *
+   * @return the key route affinity configuration, or null if not configured
+   * @since 1.0.7
+   */
+  public KeyRouteAffinityConfig getKeyRouteAffinityConfig() {
+    return keyRouteAffinityConfig;
+  }
+
+  /**
    * Returns the set of HTTP headers required for this configuration.
    *
    * <p>This method returns the minimum set of headers needed based on the current settings
@@ -331,6 +351,7 @@ public class AlternatorConfig {
     private boolean headersWhitelistWasSet = false;
     private boolean authenticationEnabled = true;
     private TlsSessionCacheConfig tlsSessionCacheConfig = null; // null means use default
+    private KeyRouteAffinityConfig keyRouteAffinityConfig = null;
 
     /** Package-private constructor. Use {@link AlternatorConfig#builder()} to create instances. */
     Builder() {}
@@ -637,6 +658,50 @@ public class AlternatorConfig {
     }
 
     /**
+     * Sets the key route affinity configuration.
+     *
+     * <p>Key route affinity ensures that all requests for the same partition key are routed to the
+     * same Alternator node, which improves performance for Lightweight Transactions (LWT) that use
+     * Paxos consensus.
+     *
+     * <p>Example:
+     *
+     * <pre>{@code
+     * AlternatorConfig config = AlternatorConfig.builder()
+     *     .withSeedNode(URI.create("https://localhost:8043"))
+     *     .withKeyRouteAffinity(KeyRouteAffinityConfig.builder()
+     *         .withType(KeyRouteAffinity.RMW)
+     *         .withPkInfo("users", "user_id")
+     *         .build())
+     *     .build();
+     * }</pre>
+     *
+     * @param config the key route affinity configuration
+     * @return this builder instance
+     * @since 1.0.7
+     */
+    public Builder withKeyRouteAffinity(KeyRouteAffinityConfig config) {
+      this.keyRouteAffinityConfig = config;
+      return this;
+    }
+
+    /**
+     * Sets the key route affinity type with no pre-configured PK info.
+     *
+     * <p>This is a convenience method for configuring key route affinity without providing
+     * pre-configured partition key information. Partition key names will be auto-discovered via
+     * DescribeTable API on first access to each table.
+     *
+     * @param type the key route affinity type
+     * @return this builder instance
+     * @since 1.0.7
+     */
+    public Builder withKeyRouteAffinity(KeyRouteAffinity type) {
+      this.keyRouteAffinityConfig = KeyRouteAffinityConfig.of(type);
+      return this;
+    }
+
+    /**
      * Builds and returns an {@link AlternatorConfig} instance with the configured settings.
      *
      * @return a new {@link AlternatorConfig} instance
@@ -695,7 +760,8 @@ public class AlternatorConfig {
           optimizeHeaders,
           headersWhitelist,
           authenticationEnabled,
-          tlsSessionCacheConfig);
+          tlsSessionCacheConfig,
+          keyRouteAffinityConfig);
     }
   }
 }

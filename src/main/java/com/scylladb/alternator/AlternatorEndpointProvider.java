@@ -1,6 +1,7 @@
 package com.scylladb.alternator;
 
 import com.scylladb.alternator.internal.AlternatorLiveNodes;
+import com.scylladb.alternator.keyrouting.KeyRouteAffinityContext;
 import java.net.URI;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -38,7 +39,12 @@ public class AlternatorEndpointProvider implements DynamoDbEndpointProvider {
   /** {@inheritDoc} */
   @Override
   public CompletableFuture<Endpoint> resolveEndpoint(DynamoDbEndpointParams endpointParams) {
-    URI uri = liveNodes.nextAsURI();
+    // Check if key route affinity has set a target node
+    URI uri = KeyRouteAffinityContext.getTargetNode();
+    if (uri == null) {
+      // Fall back to round-robin selection
+      uri = liveNodes.nextAsURI();
+    }
     CompletableFuture<Endpoint> endpoint = futureCache.getOrDefault(uri, null);
     if (endpoint != null) {
       return endpoint;
