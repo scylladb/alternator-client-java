@@ -38,11 +38,15 @@ clean:
 
 verify:
 	${mvn} verify
-	${mvn} javadoc:test-javadoc javadoc:test-aggregate javadoc:test-aggregate-jar javadoc:test-jar javadoc:test-resource-bundle
-	${mvn} javadoc:jar javadoc:aggregate javadoc:aggregate-jar javadoc:resource-bundle
 
 lint:
 	${mvn} com.spotify.fmt:fmt-maven-plugin:check
+	${mvn} compile test-compile
+	$(MAKE) lint-docs
+
+lint-docs:
+	${mvn} javadoc:test-javadoc javadoc:test-aggregate javadoc:test-aggregate-jar javadoc:test-jar javadoc:test-resource-bundle
+	${mvn} javadoc:jar javadoc:aggregate javadoc:aggregate-jar javadoc:resource-bundle
 
 lint-fix:
 	${mvn} com.spotify.fmt:fmt-maven-plugin:format
