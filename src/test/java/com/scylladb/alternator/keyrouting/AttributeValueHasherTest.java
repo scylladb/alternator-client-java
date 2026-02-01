@@ -2,9 +2,16 @@ package com.scylladb.alternator.keyrouting;
 
 import static org.junit.Assert.*;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.Test;
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
@@ -252,14 +259,20 @@ public class AttributeValueHasherTest {
 
     assertNotEquals("Boolean true and Null true should NOT collide", boolHash, nullHash);
 
-    // Also test false values
+    // Boolean false should differ from Null true
     AttributeValue boolFalse = AttributeValue.builder().bool(false).build();
-    AttributeValue nullFalse = AttributeValue.builder().nul(false).build();
-
     assertNotEquals(
-        "Boolean false and Null false should NOT collide",
+        "Boolean false and Null true should NOT collide",
         AttributeValueHasher.hash(boolFalse),
-        AttributeValueHasher.hash(nullFalse));
+        nullHash);
+  }
+
+  /** Verifies that nul(false) throws an exception since it's not a valid DynamoDB value. */
+  @Test(expected = IllegalArgumentException.class)
+  public void testNullFalseThrowsException() {
+    // nul(false) is not a valid DynamoDB NULL value - NULL is semantically always true
+    AttributeValue nullFalse = AttributeValue.builder().nul(false).build();
+    AttributeValueHasher.hash(nullFalse);
   }
 
   // ========== Collection Boundary Collision Prevention Tests ==========
@@ -653,5 +666,129 @@ public class AttributeValueHasherTest {
         "Maps with S vs N values should differ",
         AttributeValueHasher.hash(AttributeValue.builder().m(map1).build()),
         AttributeValueHasher.hash(AttributeValue.builder().m(map2).build()));
+  }
+
+  // ========== Thread Safety Tests ==========
+
+  /** Verifies that concurrent access from multiple threads produces consistent results. */
+  @Test
+  public void testConcurrentAccess() throws InterruptedException {
+    final int threadCount = 10;
+    final int iterationsPerThread = 1000;
+
+    // Create test values of different types
+    final AttributeValue stringValue = AttributeValue.builder().s("test_user_123").build();
+    final AttributeValue numberValue = AttributeValue.builder().n("12345").build();
+    final AttributeValue listValue =
+        AttributeValue.builder()
+            .l(
+                Arrays.asList(
+                    AttributeValue.builder().s("item1").build(),
+                    AttributeValue.builder().n("42").build()))
+            .build();
+
+    // Compute expected hashes
+    final long expectedStringHash = AttributeValueHasher.hash(stringValue);
+    final long expectedNumberHash = AttributeValueHasher.hash(numberValue);
+    final long expectedListHash = AttributeValueHasher.hash(listValue);
+
+    final AtomicBoolean failed = new AtomicBoolean(false);
+    final CountDownLatch startLatch = new CountDownLatch(1);
+    final CountDownLatch doneLatch = new CountDownLatch(threadCount);
+
+    ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+
+    for (int t = 0; t < threadCount; t++) {
+      executor.submit(
+          () -> {
+            try {
+              startLatch.await();
+              for (int i = 0; i < iterationsPerThread && !failed.get(); i++) {
+                long stringHash = AttributeValueHasher.hash(stringValue);
+                long numberHash = AttributeValueHasher.hash(numberValue);
+                long listHash = AttributeValueHasher.hash(listValue);
+
+                if (stringHash != expectedStringHash
+                    || numberHash != expectedNumberHash
+                    || listHash != expectedListHash) {
+                  failed.set(true);
+                }
+              }
+            } catch (Exception e) {
+              failed.set(true);
+            } finally {
+              doneLatch.countDown();
+            }
+          });
+    }
+
+    // Start all threads simultaneously
+    startLatch.countDown();
+
+    // Wait for all threads to complete
+    assertTrue("Threads did not complete in time", doneLatch.await(30, TimeUnit.SECONDS));
+
+    executor.shutdown();
+
+    assertFalse("Concurrent hash computation produced inconsistent results", failed.get());
+  }
+
+  // ========== Large Collection Tests ==========
+
+  /** Verifies hashing works correctly with large collections (10,000+ elements). */
+  @Test
+  public void testLargeStringSet() {
+    List<String> largeSet = new ArrayList<>();
+    for (int i = 0; i < 10000; i++) {
+      largeSet.add("element_" + i);
+    }
+
+    AttributeValue value = AttributeValue.builder().ss(largeSet).build();
+    long hash = AttributeValueHasher.hash(value);
+
+    // Verify non-zero hash
+    assertNotEquals("Large string set should produce non-zero hash", 0L, hash);
+
+    // Verify consistency
+    assertEquals(
+        "Large string set hash should be consistent",
+        hash,
+        AttributeValueHasher.hash(AttributeValue.builder().ss(largeSet).build()));
+  }
+
+  /** Verifies hashing works correctly with large lists (10,000+ elements). */
+  @Test
+  public void testLargeList() {
+    List<AttributeValue> largeList = new ArrayList<>();
+    for (int i = 0; i < 10000; i++) {
+      largeList.add(AttributeValue.builder().s("item_" + i).build());
+    }
+
+    AttributeValue value = AttributeValue.builder().l(largeList).build();
+    long hash = AttributeValueHasher.hash(value);
+
+    // Verify non-zero hash
+    assertNotEquals("Large list should produce non-zero hash", 0L, hash);
+
+    // Verify consistency
+    assertEquals("Large list hash should be consistent", hash, AttributeValueHasher.hash(value));
+  }
+
+  /** Verifies hashing works correctly with large maps (10,000+ entries). */
+  @Test
+  public void testLargeMap() {
+    Map<String, AttributeValue> largeMap = new HashMap<>();
+    for (int i = 0; i < 10000; i++) {
+      largeMap.put("key_" + i, AttributeValue.builder().s("value_" + i).build());
+    }
+
+    AttributeValue value = AttributeValue.builder().m(largeMap).build();
+    long hash = AttributeValueHasher.hash(value);
+
+    // Verify non-zero hash
+    assertNotEquals("Large map should produce non-zero hash", 0L, hash);
+
+    // Verify consistency
+    assertEquals("Large map hash should be consistent", hash, AttributeValueHasher.hash(value));
   }
 }
