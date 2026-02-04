@@ -14,6 +14,16 @@ OS := $(shell uname | tr '[:upper:]' '[:lower:]')
 ARCH := $(shell uname -m)
 DOCKER_COMPOSE_VERSION := 2.34.0
 
+MAVEN_GPG_PASSPHRASE ?=
+MAVEN_OPTS ?=
+
+SONATYPE_TOKEN_USERNAME ?=
+SONATYPE_TOKEN_PASSWORD ?=
+
+RELEASE_SKIP_TESTS ?= false
+RELEASE_TARGET_TAG ?=
+RELEASE_VERSION ?=
+
 ifeq ($(ARCH),aarch64)
 	DOCKER_COMPOSE_DOWNLOAD_URL := "https://github.com/docker/compose/releases/download/v$(DOCKER_COMPOSE_VERSION)/docker-compose-$(OS)-aarch64"
 else ifeq ($(ARCH),x86_64)
@@ -81,16 +91,44 @@ test-demo: scylla-start
 
 .PHONY: release-prepare
 release-prepare:
-	${mvn} versions:set -DnewVersion=${RELEASE_VERSION}
-	${mvn} clean verify -Prelease
+	@if [[ "${MAVEN_GPG_PASSPHRASE}" == "" ]]; then
+		echo "MAVEN_GPG_PASSPHRASE is empty, can't continue"
+		exit 1
+	fi
+
+	@if [[ "${RELEASE_SKIP_TESTS}" == "true" ]] || [[ "${RELEASE_SKIP_TESTS}" == "1" ]]; then
+		export MAVEN_OPTS="${MAVEN_OPTS} -DskipTests=true -DskipITs=true"
+	fi
+	NEXT_RELEASE=""
+	if [[ -n "${RELEASE_VERSION}" ]]; then
+		NEXT_RELEASE="-DreleaseVersion=${RELEASE_VERSION}"
+	fi
+	export MAVEN_OPTS
+	${mvn} release:prepare -DpushChanges=false $${NEXT_RELEASE}
 
 .PHONY: release
 release:
-	${mvn} clean deploy -Prelease
+	@if [[ "${MAVEN_GPG_PASSPHRASE}" == "" ]]; then
+		echo "MAVEN_GPG_PASSPHRASE is empty, can't continue"
+		exit 1
+	fi
+	@if [[ "${RELEASE_SKIP_TESTS}" == "true" ]] || [[ "${RELEASE_SKIP_TESTS}" == "1" ]]; then
+		export MAVEN_OPTS="${MAVEN_OPTS} -DskipTests=true -DskipITs=true"
+	fi
+	mkdir /tmp/release-logs/ 2>/dev/null || true
+	${mvn} release:perform -Drelease.autopublish=true > >(tee /tmp/release-logs/stdout.log) 2> >(tee /tmp/release-logs/stderr.log)
 
 .PHONY: release-dry-run
 release-dry-run:
-	${mvn} clean deploy -Prelease -DskipRemoteStaging=true
+	@if [[ "${MAVEN_GPG_PASSPHRASE}" == "" ]]; then
+		echo "MAVEN_GPG_PASSPHRASE is empty, can't continue"
+		exit 1
+	fi
+	@if [[ -n "${RELEASE_SKIP_TESTS}" ]]; then
+		export MAVEN_OPTS="${MAVEN_OPTS} -DskipTests=true -DskipITs=true"
+	fi
+	mkdir /tmp/release-logs/ 2>/dev/null || true
+	${mvn} release:perform > >(tee /tmp/release-logs/stdout.log) 2> >(tee /tmp/release-logs/stderr.log)
 
 .prepare-environment-update-aio-max-nr:
 	@if (( $$(< /proc/sys/fs/aio-max-nr) < 2097152 )); then
@@ -162,4 +200,14 @@ cert-cache-load:
 	else \
 		echo "Certificate cache not found, generating..."; \
 		$(MAKE) .prepare-cert; \
+	fi
+
+checkout-one-commit-before:
+	@if [[ "${RELEASE_TARGET_TAG}" == 3.* ]]; then
+		echo "Checking out one commit before ${RELEASE_TARGET_TAG}"
+		cp -f Makefile /tmp/tmp-Makefile
+		git fetch --prune --unshallow || git fetch --prune || true
+		git checkout ${RELEASE_TARGET_TAG}~1
+		git tag -d ${RELEASE_TARGET_TAG}
+		mv -f /tmp/tmp-Makefile ./Makefile
 	fi
