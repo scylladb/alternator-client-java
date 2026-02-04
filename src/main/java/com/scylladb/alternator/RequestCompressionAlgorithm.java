@@ -17,7 +17,7 @@ package com.scylladb.alternator;
  * }</pre>
  *
  * @author dmitry.kropachev
- * @since 1.0.5
+ * @since 2.0.0
  */
 public enum RequestCompressionAlgorithm {
   /**

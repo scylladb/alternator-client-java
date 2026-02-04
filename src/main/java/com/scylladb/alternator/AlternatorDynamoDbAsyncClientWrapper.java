@@ -30,45 +30,36 @@ import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
  * }</pre>
  *
  * @author dmitry.kropachev
- * @since 1.0.5
+ * @since 2.0.0
  */
 public class AlternatorDynamoDbAsyncClientWrapper implements AutoCloseable {
 
   private final DynamoDbAsyncClient client;
   private final AlternatorLiveNodes liveNodes;
-  private final AlternatorEndpointProvider endpointProvider;
   private final AlternatorConfig config;
 
   /**
-   * Creates a new wrapper with the given client, live nodes, and endpoint provider.
+   * Creates a new wrapper with the given client and live nodes.
    *
    * @param client the underlying DynamoDbAsyncClient
    * @param liveNodes the AlternatorLiveNodes instance managing node discovery
-   * @param endpointProvider the AlternatorEndpointProvider used for this client
    */
   public AlternatorDynamoDbAsyncClientWrapper(
-      DynamoDbAsyncClient client,
-      AlternatorLiveNodes liveNodes,
-      AlternatorEndpointProvider endpointProvider) {
-    this(client, liveNodes, endpointProvider, null);
+      DynamoDbAsyncClient client, AlternatorLiveNodes liveNodes) {
+    this(client, liveNodes, null);
   }
 
   /**
-   * Creates a new wrapper with the given client, live nodes, endpoint provider, and config.
+   * Creates a new wrapper with the given client, live nodes, and config.
    *
    * @param client the underlying DynamoDbAsyncClient
    * @param liveNodes the AlternatorLiveNodes instance managing node discovery
-   * @param endpointProvider the AlternatorEndpointProvider used for this client
    * @param config the AlternatorConfig used for this client
    */
   public AlternatorDynamoDbAsyncClientWrapper(
-      DynamoDbAsyncClient client,
-      AlternatorLiveNodes liveNodes,
-      AlternatorEndpointProvider endpointProvider,
-      AlternatorConfig config) {
+      DynamoDbAsyncClient client, AlternatorLiveNodes liveNodes, AlternatorConfig config) {
     this.client = client;
     this.liveNodes = liveNodes;
-    this.endpointProvider = endpointProvider;
     this.config = config;
   }
 
@@ -120,17 +111,6 @@ public class AlternatorDynamoDbAsyncClientWrapper implements AutoCloseable {
   }
 
   /**
-   * Returns the AlternatorEndpointProvider used for endpoint resolution.
-   *
-   * <p>The endpoint provider is responsible for selecting which node to use for each request.
-   *
-   * @return the {@link AlternatorEndpointProvider} instance
-   */
-  public AlternatorEndpointProvider getAlternatorEndpointProvider() {
-    return endpointProvider;
-  }
-
-  /**
    * Returns the AlternatorConfig used to create this client.
    *
    * <p>The config contains all settings including TLS session cache configuration, compression
@@ -142,14 +122,7 @@ public class AlternatorDynamoDbAsyncClientWrapper implements AutoCloseable {
     return config;
   }
 
-  /**
-   * Closes the underlying DynamoDbAsyncClient.
-   *
-   * <p>Note: Unlike {@link AlternatorDynamoDbClientWrapper#close()}, this method does not need to
-   * shut down a PartitionKeyResolver because key route affinity is not supported for async clients.
-   * The async client builder rejects key affinity configuration at build time since it relies on
-   * ThreadLocal context passing which doesn't work with async/reactive patterns.
-   */
+  /** Closes the underlying DynamoDbAsyncClient. */
   @Override
   public void close() {
     client.close();

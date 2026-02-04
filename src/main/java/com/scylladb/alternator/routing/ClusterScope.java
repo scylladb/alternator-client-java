@@ -20,7 +20,7 @@ package com.scylladb.alternator.routing;
  * @see RoutingScope
  * @see DatacenterScope
  * @see RackScope
- * @since 1.0.5
+ * @since 2.0.0
  */
 public final class ClusterScope implements RoutingScope {
 

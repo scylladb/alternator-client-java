@@ -3,6 +3,7 @@ package com.scylladb.alternator;
 import static org.junit.Assert.*;
 
 import com.scylladb.alternator.internal.AlternatorLiveNodes;
+import com.scylladb.alternator.queryplan.BasicQueryPlanInterceptor;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.*;
@@ -76,11 +77,15 @@ public class DynamoDbEnhancedClientTest {
             new URI("http://node3.example.com:8000"));
 
     AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(nodes, "http", 8000, "", "");
-    AlternatorEndpointProvider endpointProvider = new AlternatorEndpointProvider(liveNodes);
+    BasicQueryPlanInterceptor interceptor = new BasicQueryPlanInterceptor(liveNodes);
+
+    ClientOverrideConfiguration overrideConfig =
+        ClientOverrideConfiguration.builder().addExecutionInterceptor(interceptor).build();
 
     DynamoDbClient client =
         DynamoDbClient.builder()
-            .endpointProvider(endpointProvider)
+            .endpointOverride(nodes.get(0))
+            .overrideConfiguration(overrideConfig)
             .credentialsProvider(TEST_CREDENTIALS)
             .region(Region.US_EAST_1)
             .build();
@@ -109,11 +114,15 @@ public class DynamoDbEnhancedClientTest {
             new URI("http://node3.example.com:8000"));
 
     AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(nodes, "http", 8000, "", "");
-    AlternatorEndpointProvider endpointProvider = new AlternatorEndpointProvider(liveNodes);
+    BasicQueryPlanInterceptor interceptor = new BasicQueryPlanInterceptor(liveNodes);
+
+    ClientOverrideConfiguration overrideConfig =
+        ClientOverrideConfiguration.builder().addExecutionInterceptor(interceptor).build();
 
     DynamoDbAsyncClient asyncClient =
         DynamoDbAsyncClient.builder()
-            .endpointProvider(endpointProvider)
+            .endpointOverride(nodes.get(0))
+            .overrideConfiguration(overrideConfig)
             .credentialsProvider(TEST_CREDENTIALS)
             .region(Region.US_EAST_1)
             .build();
@@ -136,7 +145,7 @@ public class DynamoDbEnhancedClientTest {
             new URI("http://node3.example.com:8000"));
 
     AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(nodes, "http", 8000, "", "");
-    AlternatorEndpointProvider endpointProvider = new AlternatorEndpointProvider(liveNodes);
+    BasicQueryPlanInterceptor interceptor = new BasicQueryPlanInterceptor(liveNodes);
 
     // Track which hosts are being targeted
     Set<String> targetedHosts = Collections.synchronizedSet(new HashSet<>());
@@ -154,11 +163,14 @@ public class DynamoDbEnhancedClientTest {
         };
 
     ClientOverrideConfiguration overrideConfig =
-        ClientOverrideConfiguration.builder().addExecutionInterceptor(hostTracker).build();
+        ClientOverrideConfiguration.builder()
+            .addExecutionInterceptor(interceptor)
+            .addExecutionInterceptor(hostTracker)
+            .build();
 
     DynamoDbClient client =
         DynamoDbClient.builder()
-            .endpointProvider(endpointProvider)
+            .endpointOverride(nodes.get(0))
             .credentialsProvider(TEST_CREDENTIALS)
             .overrideConfiguration(overrideConfig)
             .region(Region.US_EAST_1)
@@ -170,8 +182,8 @@ public class DynamoDbEnhancedClientTest {
     DynamoDbTable<TestItem> table =
         enhancedClient.table("test_table", TableSchema.fromBean(TestItem.class));
 
-    // Make multiple requests - each should go to different nodes in round-robin
-    for (int i = 0; i < 6; i++) {
+    // Make multiple requests - with random distribution across 3 nodes
+    for (int i = 0; i < 30; i++) {
       final int index = i;
       try {
         table.getItem(r -> r.key(k -> k.partitionValue("item-" + index)));
@@ -180,11 +192,12 @@ public class DynamoDbEnhancedClientTest {
       }
     }
 
-    // Verify that multiple hosts were targeted (round-robin distribution)
+    // Verify that multiple hosts were targeted (random distribution)
     // Note: SDK may retry failed requests, so we verify distribution rather than exact count
-    assertTrue("Should have made at least 6 requests", requestCount.get() >= 6);
+    assertTrue("Should have made at least 30 requests", requestCount.get() >= 30);
+    // With random distribution over 30 requests across 3 nodes, we should hit all nodes
     assertEquals(
-        "Round-robin should distribute requests across all 3 nodes", 3, targetedHosts.size());
+        "Random distribution should hit all 3 nodes over 30+ requests", 3, targetedHosts.size());
     assertTrue("Should have targeted node1", targetedHosts.contains("node1.example.com"));
     assertTrue("Should have targeted node2", targetedHosts.contains("node2.example.com"));
     assertTrue("Should have targeted node3", targetedHosts.contains("node3.example.com"));
@@ -201,7 +214,7 @@ public class DynamoDbEnhancedClientTest {
             new URI("http://node3.example.com:8000"));
 
     AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(nodes, "http", 8000, "", "");
-    AlternatorEndpointProvider endpointProvider = new AlternatorEndpointProvider(liveNodes);
+    BasicQueryPlanInterceptor interceptor = new BasicQueryPlanInterceptor(liveNodes);
 
     // Track which hosts are being targeted
     Set<String> targetedHosts = Collections.synchronizedSet(new HashSet<>());
@@ -219,11 +232,14 @@ public class DynamoDbEnhancedClientTest {
         };
 
     ClientOverrideConfiguration overrideConfig =
-        ClientOverrideConfiguration.builder().addExecutionInterceptor(hostTracker).build();
+        ClientOverrideConfiguration.builder()
+            .addExecutionInterceptor(interceptor)
+            .addExecutionInterceptor(hostTracker)
+            .build();
 
     DynamoDbAsyncClient asyncClient =
         DynamoDbAsyncClient.builder()
-            .endpointProvider(endpointProvider)
+            .endpointOverride(nodes.get(0))
             .credentialsProvider(TEST_CREDENTIALS)
             .overrideConfiguration(overrideConfig)
             .region(Region.US_EAST_1)
@@ -235,9 +251,9 @@ public class DynamoDbEnhancedClientTest {
     software.amazon.awssdk.enhanced.dynamodb.DynamoDbAsyncTable<TestItem> table =
         enhancedAsyncClient.table("test_table", TableSchema.fromBean(TestItem.class));
 
-    // Make multiple async requests - each should go to different nodes in round-robin
+    // Make multiple async requests - with random distribution across 3 nodes
     List<java.util.concurrent.CompletableFuture<?>> futures = new ArrayList<>();
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < 30; i++) {
       final int index = i;
       futures.add(
           table
@@ -250,11 +266,12 @@ public class DynamoDbEnhancedClientTest {
             futures.toArray(new java.util.concurrent.CompletableFuture[0]))
         .join();
 
-    // Verify that multiple hosts were targeted (round-robin distribution)
+    // Verify that multiple hosts were targeted (random distribution)
     // Note: SDK may retry failed requests, so we verify distribution rather than exact count
-    assertTrue("Should have made at least 6 requests", requestCount.get() >= 6);
+    assertTrue("Should have made at least 30 requests", requestCount.get() >= 30);
+    // With random distribution over 30 requests across 3 nodes, we should hit all nodes
     assertEquals(
-        "Round-robin should distribute requests across all 3 nodes", 3, targetedHosts.size());
+        "Random distribution should hit all 3 nodes over 30+ requests", 3, targetedHosts.size());
     assertTrue("Should have targeted node1", targetedHosts.contains("node1.example.com"));
     assertTrue("Should have targeted node2", targetedHosts.contains("node2.example.com"));
     assertTrue("Should have targeted node3", targetedHosts.contains("node3.example.com"));
@@ -263,7 +280,7 @@ public class DynamoDbEnhancedClientTest {
   }
 
   @Test
-  public void testEnhancedClientWithAlternatorBuilderApi() throws URISyntaxException {
+  public void testEnhancedClientWithQueryPlanInterceptor() throws URISyntaxException {
     List<URI> nodes =
         Arrays.asList(
             new URI("http://node1.example.com:8000"),
@@ -271,7 +288,7 @@ public class DynamoDbEnhancedClientTest {
             new URI("http://node3.example.com:8000"));
 
     AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(nodes, "http", 8000, "", "");
-    AlternatorEndpointProvider endpointProvider = new AlternatorEndpointProvider(liveNodes);
+    BasicQueryPlanInterceptor interceptor = new BasicQueryPlanInterceptor(liveNodes);
 
     // Track hosts
     Set<String> targetedHosts = Collections.synchronizedSet(new HashSet<>());
@@ -286,12 +303,15 @@ public class DynamoDbEnhancedClientTest {
         };
 
     ClientOverrideConfiguration overrideConfig =
-        ClientOverrideConfiguration.builder().addExecutionInterceptor(hostTracker).build();
+        ClientOverrideConfiguration.builder()
+            .addExecutionInterceptor(interceptor)
+            .addExecutionInterceptor(hostTracker)
+            .build();
 
-    // Using AlternatorEndpointProvider directly (as documented in README)
+    // Using BasicQueryPlanInterceptor for load balancing
     DynamoDbClient client =
         DynamoDbClient.builder()
-            .endpointProvider(endpointProvider)
+            .endpointOverride(nodes.get(0))
             .credentialsProvider(TEST_CREDENTIALS)
             .overrideConfiguration(overrideConfig)
             .region(Region.US_EAST_1)
