@@ -1,4 +1,4 @@
-name: Release ScyllaDB Java Driver
+name: Release
 
 on:
   workflow_dispatch:
