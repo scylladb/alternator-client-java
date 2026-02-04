@@ -3,10 +3,10 @@ package com.scylladb.alternator;
 import static org.junit.Assert.*;
 
 import com.scylladb.alternator.internal.AlternatorLiveNodes;
-import com.scylladb.alternator.internal.LazyQueryPlan;
 import com.scylladb.alternator.keyrouting.KeyRouteAffinity;
 import com.scylladb.alternator.keyrouting.KeyRouteAffinityConfig;
-import com.scylladb.alternator.keyrouting.KeyRouteAffinityInterceptor;
+import com.scylladb.alternator.queryplan.AffinityQueryPlanInterceptor;
+import com.scylladb.alternator.queryplan.BasicQueryPlanInterceptor;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.net.URI;
@@ -41,7 +41,7 @@ import software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest;
  * <p>These tests verify key route affinity at the HTTP request level by:
  *
  * <ul>
- *   <li>Building a full DynamoDbClient with AlternatorEndpointProvider
+ *   <li>Building a full DynamoDbClient with query plan interceptors
  *   <li>Mocking HTTP at the SdkHttpClient layer to capture actual requests
  *   <li>Using a mock AlternatorLiveNodes to provide a controlled node list
  *   <li>Verifying requests are routed to correct nodes based on partition key
@@ -77,28 +77,28 @@ public class KeyRouteAffinityClientTest {
    * <ul>
    *   <li>A mock AlternatorLiveNodes that provides a fixed node list without network calls
    *   <li>A mock SdkHttpClient that captures all HTTP requests for verification
-   *   <li>The KeyRouteAffinityInterceptor for request routing
+   *   <li>The query plan interceptor for request routing (affinity or basic)
    * </ul>
    */
   private DynamoDbClient createClientWithKeyAffinity(KeyRouteAffinityConfig keyAffinity) {
     // Create mock AlternatorLiveNodes that provides our test nodes
     AlternatorLiveNodes liveNodes = new MockAlternatorLiveNodes(testNodeUris);
 
-    // Create the endpoint provider with mock live nodes
-    AlternatorEndpointProvider endpointProvider = new AlternatorEndpointProvider(liveNodes);
-
-    // Build override configuration with key affinity interceptor
+    // Build override configuration with query plan interceptor
     ClientOverrideConfiguration.Builder overrideBuilder = ClientOverrideConfiguration.builder();
     if (keyAffinity != null && keyAffinity.isEnabled()) {
       overrideBuilder.addExecutionInterceptor(
-          new KeyRouteAffinityInterceptor(keyAffinity, liveNodes));
+          new AffinityQueryPlanInterceptor(keyAffinity, liveNodes));
+    } else {
+      overrideBuilder.addExecutionInterceptor(new BasicQueryPlanInterceptor(liveNodes));
     }
 
     // Build the DynamoDB client with our mock components
+    // Use first test node as base endpoint - interceptor will override with actual target
     return DynamoDbClient.builder()
         .region(Region.of("test-region"))
         .credentialsProvider(AnonymousCredentialsProvider.create())
-        .endpointProvider(endpointProvider)
+        .endpointOverride(testNodeUris.get(0))
         .httpClient(mockHttpClient)
         .overrideConfiguration(overrideBuilder.build())
         .build();
@@ -932,23 +932,23 @@ public class KeyRouteAffinityClientTest {
     }
   }
 
-  // ========== Tests for async client rejection ==========
+  // ========== Tests for async client key affinity support ==========
 
-  @Test(expected = IllegalStateException.class)
-  public void testAsyncClientRejectsKeyAffinity() {
-    // Key route affinity uses ThreadLocal to pass routing information from the interceptor
-    // to the endpoint provider. Async clients execute requests on different threads than
-    // where the interceptor runs, so the ThreadLocal-based approach doesn't work.
-    // The async client builder should fail fast with a clear error message.
-
-    AlternatorDynamoDbAsyncClient.builder()
-        .endpointOverride(URI.create("http://localhost:8000"))
-        .withKeyRouteAffinity(KeyRouteAffinity.ANY_WRITE)
-        .build();
+  @Test
+  public void testAsyncClientAcceptsKeyAffinity() {
+    // Key route affinity now works with async clients using ExecutionAttributes
+    // instead of ThreadLocal, so the async client should accept key affinity config.
+    DynamoDbAsyncClient client =
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(URI.create("http://localhost:8000"))
+            .withKeyRouteAffinity(KeyRouteAffinity.ANY_WRITE)
+            .build();
+    assertNotNull("Async client should be created with key affinity", client);
+    client.close();
   }
 
-  @Test(expected = IllegalStateException.class)
-  public void testAsyncClientRejectsKeyAffinityConfig() {
+  @Test
+  public void testAsyncClientAcceptsKeyAffinityConfig() {
     // Also test with full KeyRouteAffinityConfig object
     KeyRouteAffinityConfig keyAffinity =
         KeyRouteAffinityConfig.builder()
@@ -956,26 +956,25 @@ public class KeyRouteAffinityClientTest {
             .withPkInfo("users", "user_id")
             .build();
 
-    AlternatorDynamoDbAsyncClient.builder()
-        .endpointOverride(URI.create("http://localhost:8000"))
-        .withKeyRouteAffinity(keyAffinity)
-        .build();
+    DynamoDbAsyncClient client =
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(URI.create("http://localhost:8000"))
+            .withKeyRouteAffinity(keyAffinity)
+            .build();
+    assertNotNull("Async client should be created with key affinity config", client);
+    client.close();
   }
 
   @Test
   public void testAsyncClientAcceptsNoneMode() {
-    // NONE mode should be accepted since it doesn't actually use key affinity
-    // This verifies the check is specific to enabled key affinity, not just any config
-    try {
-      DynamoDbAsyncClient client =
-          AlternatorDynamoDbAsyncClient.builder()
-              .endpointOverride(URI.create("http://localhost:8000"))
-              .withKeyRouteAffinity(KeyRouteAffinity.NONE)
-              .build();
-      client.close();
-    } catch (IllegalStateException e) {
-      fail("NONE mode should not throw IllegalStateException: " + e.getMessage());
-    }
+    // NONE mode should also be accepted
+    DynamoDbAsyncClient client =
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(URI.create("http://localhost:8000"))
+            .withKeyRouteAffinity(KeyRouteAffinity.NONE)
+            .build();
+    assertNotNull("Async client should be created with NONE mode", client);
+    client.close();
   }
 
   // ========== Mock implementations ==========
@@ -988,7 +987,7 @@ public class KeyRouteAffinityClientTest {
    * <ul>
    *   <li>Does not start any background threads
    *   <li>Provides a fixed list of test nodes
-   *   <li>Supports LazyQueryPlan creation for key affinity
+   *   <li>Supports LazyQueryPlan creation for key affinity (via base class)
    *   <li>Implements round-robin across all test nodes
    * </ul>
    */
@@ -1008,13 +1007,8 @@ public class KeyRouteAffinityClientTest {
     }
 
     @Override
-    public LazyQueryPlan newQueryPlan(long seed) {
-      return new LazyQueryPlan(nodes, Collections.<URI>emptyList(), seed);
-    }
-
-    @Override
-    public LazyQueryPlan newQueryPlan() {
-      return new LazyQueryPlan(nodes, Collections.<URI>emptyList());
+    protected List<URI> getLiveNodesInternal() {
+      return nodes;
     }
 
     @Override

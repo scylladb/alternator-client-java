@@ -99,29 +99,8 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
     .build();
 ```
 
-The `AlternatorDynamoDbClient` automatically integrates the `AlternatorEndpointProvider`
+The `AlternatorDynamoDbClient` automatically integrates query plan interceptors
 to provide load balancing across all Alternator nodes.
-
-#### Option 2: Using `AlternatorEndpointProvider` directly (Outdated)
-
-Alternatively, you can manually use the `AlternatorEndpointProvider`:
-
-```java
-    import com.scylladb.alternator.AlternatorEndpointProvider;
-
-    static AwsCredentialsProvider myCredentials =
-        StaticCredentialsProvider.create(AwsBasicCredentials.create("myuser", "mypassword"));
-    URI uri = URI.create("https://127.0.0.1:8043");
-    AlternatorEndpointProvider alternatorEndpointProvider = new AlternatorEndpointProvider(uri);
-    DynamoDbClient client = DynamoDbClient.builder()
-        .region(Region.US_EAST_1)
-        .endpointProvider(alternatorEndpointProvider)
-        .credentialsProvider(myCredentials)
-        .build();
-```
-
-Please note that the `endpointProvider()` API is new to AWS Java SDK 2.20
-(Release February 2023), so you should use this version or newer.
 
 The application can then use this `DynamoDbClient` object completely normally,
 just that each request will go to a different Alternator node, instead of all
@@ -132,11 +111,11 @@ discover the rest. After this initialization, this original node may go down
 at any time - any other already-known node can be used to retrieve the node
 list, and we no longer rely on the original node.
 
-You can see `src/test/java/com/scylladb/alternator/test/Demo2.java` for a
+You can see `src/integration-test/java/com/scylladb/alternator/demo/Demo2.java` for a
 complete example of using client-side load balancing with AWS SDK for Java.
 After building with `mvn package`, you can run this demo with the command:
 ```
-mvn exec:java -Dexec.mainClass=com.scylladb.alternator.test.Demo2 -Dexec.classpathScope=test
+mvn exec:java -Dexec.mainClass=com.scylladb.alternator.demo.Demo2 -Dexec.classpathScope=test
 ```
 
 #### Asynchronous operation
@@ -161,30 +140,11 @@ DynamoDbAsyncClient client = AlternatorDynamoDbAsyncClient.builder()
     .build();
 ```
 
-##### Option 2: Using `AlternatorEndpointProvider` directly (Outdated)
-
-Alternatively, you can manually use the `endpointProvider()` method on the
-`DynamoDbAsyncClientBuilder`, passing an `AlternatorEndpointProvider` object:
-
-```java
-    import com.scylladb.alternator.AlternatorEndpointProvider;
-
-    static AwsCredentialsProvider myCredentials =
-        StaticCredentialsProvider.create(AwsBasicCredentials.create("myuser", "mypassword"));
-    URI uri = URI.create("https://127.0.0.1:8043");
-    AlternatorEndpointProvider alternatorEndpointProvider = new AlternatorEndpointProvider(uri);
-    DynamoDbAsyncClient client = DynamoDbAsyncClient.builder()
-        .region(Region.US_EAST_1)
-        .endpointProvider(alternatorEndpointProvider)
-        .credentialsProvider(myCredentials)
-        .build();
-```
-
-You can see `src/test/java/com/scylladb/alternator/test/Demo3.java` for a
+You can see `src/integration-test/java/com/scylladb/alternator/demo/Demo3.java` for a
 complete example of using client-side load balancing with the asynchronous API.
 After building with `mvn package`, you can run this demo with the command:
 ```
-mvn exec:java -Dexec.mainClass=com.scylladb.alternator.test.Demo3 -Dexec.classpathScope=test
+mvn exec:java -Dexec.mainClass=com.scylladb.alternator.demo.Demo3 -Dexec.classpathScope=test
 ```
 
 ### Using DynamoDB Enhanced Client

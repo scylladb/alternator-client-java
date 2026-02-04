@@ -17,7 +17,7 @@ import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
  * <p>Other DynamoDB types (BOOL, NULL, SS, NS, BS, L, M) are not supported as partition keys in
  * Alternator and will throw an {@link IllegalArgumentException}.
  *
- * <h3>Composite Partition Keys</h3>
+ * <h2>Composite Partition Keys</h2>
  *
  * <p>This hasher operates on individual {@link AttributeValue} objects. For tables with composite
  * keys (partition key + sort key), only the partition key should be hashed for routing purposes,
@@ -32,7 +32,7 @@ import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
  * long hash = AttributeValueHasher.hash(partitionKey);
  * }</pre>
  *
- * <h3>Number Representation</h3>
+ * <h2>Number Representation</h2>
  *
  * <p>Number values (N type) are hashed using their exact string representation as stored in
  * DynamoDB. This means that numerically equivalent values with different representations will
@@ -47,7 +47,7 @@ import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
  * <p>This behavior preserves the exact representation stored in DynamoDB and matches how DynamoDB
  * itself handles number comparisons in certain contexts.
  *
- * <h3>Cross-Language Compatibility</h3>
+ * <h2>Cross-Language Compatibility</h2>
  *
  * <p>This hashing implementation is designed to be compatible with other Alternator client
  * libraries (e.g., the Go client). For clients to produce identical hashes for the same partition
@@ -63,7 +63,7 @@ import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
  * <p>If you are implementing a compatible hasher in another language, ensure your implementation
  * passes the same test vectors as this Java implementation.
  *
- * <h3>Performance Characteristics</h3>
+ * <h2>Performance Characteristics</h2>
  *
  * <p>Time complexity is O(n) for all supported types where n is the byte length.
  *

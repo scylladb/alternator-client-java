@@ -28,7 +28,7 @@ import java.util.Objects;
  * }</pre>
  *
  * @author dmitry.kropachev
- * @since 1.0.5
+ * @since 2.0.0
  */
 public final class TlsSessionCacheConfig {
   /** Default session cache size (number of sessions to cache). */

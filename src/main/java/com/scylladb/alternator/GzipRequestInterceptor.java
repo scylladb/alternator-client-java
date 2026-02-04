@@ -22,7 +22,7 @@ import software.amazon.awssdk.http.SdkHttpRequest;
  * AlternatorDynamoDbAsyncClient} when compression is enabled via {@link AlternatorConfig}.
  *
  * @author dmitry.kropachev
- * @since 1.0.5
+ * @since 2.0.0
  */
 public class GzipRequestInterceptor implements ExecutionInterceptor {
 

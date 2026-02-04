@@ -1,146 +1,190 @@
 package com.scylladb.alternator.internal;
 
 import java.net.URI;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.NoSuchElementException;
+import java.util.Random;
+import java.util.Set;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * A lazy iterator over URI nodes that provides pseudo-random access to active nodes followed by
- * quarantined nodes. The iterator reads from active nodes first in pseudo-random order, then
- * continues with quarantined nodes, also in pseudo-random order.
+ * A lazy iterator over URI nodes that pulls nodes from {@link AlternatorLiveNodes} one at a time
+ * only when needed. The iterator tracks which nodes have already been returned to avoid duplicates.
  *
  * <p>The pseudo-random order is determined by a seed value, which can be either provided explicitly
- * (for reproducible sequences) or generated randomly (for non-deterministic behavior).
+ * (for reproducible sequences based on partition key hash) or generated randomly (for
+ * non-deterministic load balancing).
+ *
+ * <p>This implementation is truly lazy - it doesn't copy the node list upfront. Instead, when
+ * {@link #hasNext()} or {@link #next()} is called, it:
+ *
+ * <ol>
+ *   <li>Reads the current live nodes from {@link AlternatorLiveNodes}
+ *   <li>Filters out nodes that have already been returned
+ *   <li>Randomly selects one from the remaining nodes and caches it
+ *   <li>On {@link #next()}, returns the cached node and marks it as used
+ * </ol>
  *
  * <p>Example usage:
  *
  * <pre>{@code
- * List<URI> activeNodes = Arrays.asList(uri1, uri2, uri3);
- * List<URI> quarantinedNodes = Arrays.asList(uri4, uri5);
+ * AlternatorLiveNodes liveNodes = ...;
  *
- * // Create with random seed
- * LazyQueryPlan plan = new LazyQueryPlan(activeNodes, quarantinedNodes);
+ * // Create with random seed for load balancing
+ * LazyQueryPlan plan = new LazyQueryPlan(liveNodes);
  *
- * // Or create with hardcoded seed for reproducibility
- * LazyQueryPlan deterministicPlan = new LazyQueryPlan(activeNodes, quarantinedNodes, 42L);
+ * // Or create with deterministic seed for key affinity
+ * long partitionKeyHash = AttributeValueHasher.hash(pkValue);
+ * LazyQueryPlan affinityPlan = new LazyQueryPlan(liveNodes, partitionKeyHash);
  *
- * // Iterate through nodes
- * while (plan.hasNext()) {
+ * // Get the first available node
+ * if (plan.hasNext()) {
  *     URI node = plan.next();
  *     // Use node...
  * }
  * }</pre>
  *
+ * <p><strong>Thread Safety:</strong> This class is NOT thread-safe. It is designed for single
+ * request use only, where the same thread (or async context) iterates through nodes during retry
+ * attempts. Do not share instances between concurrent requests.
+ *
  * @author dmitry.kropachev
- * @since 1.0.5
+ * @since 2.0.0
  */
 public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
-  private final List<URI> shuffledNodes;
-  private int currentIndex;
+  private final AlternatorLiveNodes liveNodes;
+  private final Set<URI> usedNodes;
+  private final Random rnd;
+  private URI nextNode;
 
   /**
-   * Creates a LazyQueryPlan with a random seed. The iteration order will be non-deterministic.
-   *
-   * @param activeNodes a {@link java.util.List} of active URI nodes to iterate first
-   * @param quarantinedNodes a {@link java.util.List} of quarantined URI nodes to iterate after
-   *     active nodes
+   * Tracks the last node returned by {@link #next()} before it's added to {@code usedNodes}. This
+   * optimization defers adding to the usedNodes set until another node is requested, avoiding set
+   * modification when the first request succeeds without retries.
    */
-  public LazyQueryPlan(List<URI> activeNodes, List<URI> quarantinedNodes) {
-    this(activeNodes, quarantinedNodes, System.nanoTime());
+  private URI lastUsedNode;
+
+  /**
+   * Creates a LazyQueryPlan with a random seed. The iteration order will be non-deterministic,
+   * suitable for general load balancing.
+   *
+   * @param liveNodes the {@link AlternatorLiveNodes} instance to pull nodes from
+   */
+  public LazyQueryPlan(AlternatorLiveNodes liveNodes) {
+    this(liveNodes, null);
   }
 
   /**
    * Creates a LazyQueryPlan with a specified seed for pseudo-random iteration. Using the same seed
-   * with the same node lists will produce the same iteration order, enabling reproducible behavior.
+   * with the same node list will produce the same first node selection, enabling reproducible
+   * behavior for key route affinity.
    *
-   * @param activeNodes a {@link java.util.List} of active URI nodes to iterate first
-   * @param quarantinedNodes a {@link java.util.List} of quarantined URI nodes to iterate after
-   *     active nodes
+   * @param liveNodes the {@link AlternatorLiveNodes} instance to pull nodes from
    * @param seed a long value used to initialize the pseudo-random number generator
    */
-  public LazyQueryPlan(List<URI> activeNodes, List<URI> quarantinedNodes, long seed) {
-    if (activeNodes == null) {
-      throw new IllegalArgumentException("activeNodes cannot be null");
-    }
-    if (quarantinedNodes == null) {
-      throw new IllegalArgumentException("quarantinedNodes cannot be null");
-    }
-
-    // Combine both lists - active nodes first, then quarantined
-    this.shuffledNodes = new ArrayList<>(activeNodes.size() + quarantinedNodes.size());
-
-    // Shuffle active nodes
-    List<URI> activeNodesCopy = new ArrayList<>(activeNodes);
-    Collections.shuffle(activeNodesCopy, new Random(seed));
-    this.shuffledNodes.addAll(activeNodesCopy);
-
-    // Shuffle quarantined nodes with a different seed derived from the original
-    List<URI> quarantinedNodesCopy = new ArrayList<>(quarantinedNodes);
-    Collections.shuffle(quarantinedNodesCopy, new Random(seed + 1));
-    this.shuffledNodes.addAll(quarantinedNodesCopy);
-
-    this.currentIndex = 0;
+  public LazyQueryPlan(AlternatorLiveNodes liveNodes, long seed) {
+    this(liveNodes, new Random(seed));
   }
 
-  /** {@inheritDoc} */
+  /**
+   * Creates a LazyQueryPlan with an optional Random instance.
+   *
+   * @param liveNodes the {@link AlternatorLiveNodes} instance to pull nodes from
+   * @param rnd a pseudo-random number generator, or null to use ThreadLocalRandom
+   */
+  private LazyQueryPlan(AlternatorLiveNodes liveNodes, Random rnd) {
+    if (liveNodes == null) {
+      throw new IllegalArgumentException("liveNodes cannot be null");
+    }
+    this.liveNodes = liveNodes;
+    this.usedNodes = new HashSet<>();
+    this.rnd = rnd;
+  }
+
+  private Random getRandom() {
+    if (rnd != null) {
+      return rnd;
+    }
+    return ThreadLocalRandom.current();
+  }
+
+  /**
+   * Computes and caches the next node if not already cached.
+   *
+   * @return the next node, or null if no more nodes are available
+   */
+  private URI computeNextIfNeeded() {
+    if (nextNode != null) {
+      return nextNode;
+    }
+
+    // Track this node as used and clear the cache
+    if (lastUsedNode != null) {
+      usedNodes.add(lastUsedNode);
+      lastUsedNode = null;
+    }
+
+    List<URI> currentNodes = liveNodes.getLiveNodesInternal();
+
+    // Build list of available nodes (not yet used)
+    List<URI> availableNodes = new ArrayList<>();
+    for (URI node : currentNodes) {
+      if (!usedNodes.contains(node)) {
+        availableNodes.add(node);
+      }
+    }
+
+    if (availableNodes.isEmpty()) {
+      return null;
+    }
+
+    // Select a random node from available nodes
+    int index = getRandom().nextInt(availableNodes.size());
+    nextNode = availableNodes.get(index);
+
+    return nextNode;
+  }
+
+  /**
+   * Returns true if there are more nodes available that haven't been returned yet.
+   *
+   * @return true if there are unused nodes available
+   */
   @Override
   public boolean hasNext() {
-    return currentIndex < shuffledNodes.size();
+    return computeNextIfNeeded() != null;
   }
 
-  /** {@inheritDoc} */
+  /**
+   * Returns the next available node that hasn't been returned yet. Nodes are selected in
+   * pseudo-random order based on the seed.
+   *
+   * @return the next available node URI
+   * @throws NoSuchElementException if no more nodes are available
+   */
   @Override
   public URI next() {
-    if (!hasNext()) {
+    URI node = computeNextIfNeeded();
+    if (node == null) {
       throw new NoSuchElementException("No more nodes available in query plan");
     }
-    return shuffledNodes.get(currentIndex++);
+
+    lastUsedNode = nextNode;
+    nextNode = null;
+
+    return node;
   }
 
   /**
-   * Returns the total number of nodes (active + quarantined) in this query plan.
+   * Returns this iterator, allowing use in for-each loops.
    *
-   * @return the total number of nodes
-   */
-  public int size() {
-    return shuffledNodes.size();
-  }
-
-  /**
-   * Returns the number of remaining nodes that haven't been iterated yet.
-   *
-   * @return the number of remaining nodes
-   */
-  public int remaining() {
-    return shuffledNodes.size() - currentIndex;
-  }
-
-  /**
-   * Resets the iterator to the beginning, allowing re-iteration over the same shuffled sequence.
-   */
-  public void reset() {
-    this.currentIndex = 0;
-  }
-
-  /**
-   * Returns an iterator over the nodes in this query plan. Note that this returns the same instance
-   * (after resetting), so only one iteration can be active at a time.
-   *
-   * @return this query plan as an iterator, reset to the beginning
+   * @return this iterator
    */
   @Override
   public Iterator<URI> iterator() {
-    reset();
     return this;
-  }
-
-  /**
-   * Returns a copy of all nodes in this query plan in their shuffled order. This is useful when you
-   * need to examine the full sequence without consuming the iterator.
-   *
-   * @return an unmodifiable list of all nodes in shuffled order (active nodes first, then
-   *     quarantined)
-   */
-  public List<URI> getNodes() {
-    return Collections.unmodifiableList(shuffledNodes);
   }
 }

@@ -20,6 +20,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.stream.Collectors;
 import javax.net.ssl.SSLContext;
 import org.apache.http.HttpEntity;
 import org.apache.http.HttpResponse;
@@ -128,7 +129,7 @@ public class AlternatorLiveNodes extends Thread {
    *
    * @param liveNode a {@link java.net.URI} object
    * @param routingScope the routing scope for node targeting
-   * @since 1.0.5
+   * @since 2.0.0
    * @deprecated Use {@link #AlternatorLiveNodes(AlternatorConfig)} instead.
    */
   @Deprecated
@@ -141,7 +142,7 @@ public class AlternatorLiveNodes extends Thread {
    *
    * @param seedUri the seed URI for the initial node
    * @param config the Alternator configuration containing routing scope and other settings
-   * @since 1.0.5
+   * @since 2.0.0
    * @deprecated Use {@link #AlternatorLiveNodes(AlternatorConfig)} with config containing seed
    *     node.
    */
@@ -174,73 +175,43 @@ public class AlternatorLiveNodes extends Thread {
   @Deprecated
   public AlternatorLiveNodes(
       List<URI> liveNodes, String scheme, int port, String datacenter, String rack) {
-    this(buildConfigFromUris(liveNodes, datacenter, rack, null));
+    this(
+        AlternatorConfig.builder()
+            .withSeedHosts(extractHosts(liveNodes))
+            .withRoutingScope(deriveRoutingScope(datacenter, rack))
+            .withScheme(scheme)
+            .withPort(port)
+            .build());
   }
 
   /**
    * Constructor for AlternatorLiveNodes with RoutingScope.
    *
-   * @param liveNodes a {@link java.util.List} object of URIs
+   * @param seeds a {@link java.util.List} object of URIs
    * @param scheme a {@link java.lang.String} object (ignored, extracted from URIs)
    * @param port a int (ignored, extracted from URIs)
    * @param routingScope the routing scope for node targeting
-   * @since 1.0.5
+   * @since 2.0.0
    * @deprecated Use {@link #AlternatorLiveNodes(AlternatorConfig)} instead.
    */
   @Deprecated
   public AlternatorLiveNodes(
-      List<URI> liveNodes, String scheme, int port, RoutingScope routingScope) {
-    this(buildConfigFromUris(liveNodes, null, null, routingScope));
-  }
-
-  /**
-   * Constructor for AlternatorLiveNodes with AlternatorConfig containing seed nodes, scheme, port,
-   * and routing settings.
-   *
-   * @param liveNodes a {@link java.util.List} object of URIs
-   * @param scheme a {@link java.lang.String} object (ignored, extracted from URIs)
-   * @param port a int (ignored, extracted from URIs)
-   * @param config the Alternator configuration containing routing scope and other settings
-   * @since 1.0.5
-   * @deprecated Use {@link #AlternatorLiveNodes(AlternatorConfig)} with config containing seed
-   *     nodes.
-   */
-  @Deprecated
-  public AlternatorLiveNodes(
-      List<URI> liveNodes, String scheme, int port, AlternatorConfig config) {
+      List<String> seeds, String scheme, int port, RoutingScope routingScope) {
     this(
-        config.getSeedHosts().isEmpty()
-            ? buildConfigFromUris(liveNodes, null, null, config.getRoutingScope())
-            : config);
+        AlternatorConfig.builder()
+            .withSeedHosts(seeds)
+            .withRoutingScope(routingScope)
+            .withScheme(scheme)
+            .withPort(port)
+            .build());
   }
 
-  /**
-   * Helper method to build AlternatorConfig from a list of URIs.
-   *
-   * @param uris the list of URIs
-   * @param datacenter optional datacenter
-   * @param rack optional rack
-   * @param routingScope optional routing scope
-   * @return the built config
-   */
-  private static AlternatorConfig buildConfigFromUris(
-      List<URI> uris, String datacenter, String rack, RoutingScope routingScope) {
-    if (uris == null || uris.isEmpty()) {
-      throw new RuntimeException("uris cannot be null or empty");
-    }
-    URI first = uris.get(0);
-    List<String> hosts = new ArrayList<>();
-    for (URI uri : uris) {
-      hosts.add(uri.getHost());
-    }
-    RoutingScope effectiveScope =
-        routingScope != null ? routingScope : deriveRoutingScope(datacenter, rack);
-    return AlternatorConfig.builder()
-        .withSeedHosts(hosts)
-        .withScheme(first.getScheme())
-        .withPort(first.getPort())
-        .withRoutingScope(effectiveScope)
-        .build();
+  private static List<String> extractHosts(List<URI> seeds) {
+    return seeds.stream()
+        .map(URI::getHost)
+        .filter(Objects::nonNull)
+        .distinct()
+        .collect(Collectors.toList());
   }
 
   /**
@@ -272,7 +243,7 @@ public class AlternatorLiveNodes extends Thread {
    * @param config the Alternator configuration containing seed hosts, scheme, port, routing scope,
    *     and other settings
    * @throws RuntimeException if config is null or contains no seed hosts
-   * @since 1.0.5
+   * @since 2.0.0
    */
   public AlternatorLiveNodes(AlternatorConfig config) {
     if (config == null) {
@@ -645,56 +616,32 @@ public class AlternatorLiveNodes extends Thread {
    * Returns the routing scope configured for this instance.
    *
    * @return the routing scope (never null)
-   * @since 1.0.5
+   * @since 2.0.0
    */
   public RoutingScope getRoutingScope() {
     return config.getRoutingScope();
   }
 
   /**
-   * Creates a new LazyQueryPlan for iterating over the current live nodes. The plan provides
-   * pseudo-random iteration order with a random seed for load distribution.
+   * Returns the internal live nodes list directly. This is intended for use by {@link
+   * LazyQueryPlan} to avoid copying the list on every access.
    *
-   * <p>This is useful for implementing retry logic where you want to try different nodes in
-   * sequence until a request succeeds.
+   * <p>Note: The returned list should not be modified. It may be replaced atomically at any time by
+   * the background refresh thread.
    *
-   * @return a new {@link LazyQueryPlan} containing the current live nodes
-   * @since 1.0.5
+   * <p>This method is protected to allow test mocks to override it.
+   *
+   * @return the current live nodes list (not a copy)
    */
-  public LazyQueryPlan newQueryPlan() {
-    return new LazyQueryPlan(liveNodes.get(), Collections.<URI>emptyList());
-  }
-
-  /**
-   * Creates a new LazyQueryPlan for iterating over the current live nodes with a specific seed for
-   * reproducible ordering.
-   *
-   * @param seed the seed for pseudo-random ordering
-   * @return a new {@link LazyQueryPlan} containing the current live nodes
-   * @since 1.0.5
-   */
-  public LazyQueryPlan newQueryPlan(long seed) {
-    return new LazyQueryPlan(liveNodes.get(), Collections.<URI>emptyList(), seed);
-  }
-
-  /**
-   * Creates a new LazyQueryPlan with both active (live) and quarantined nodes. Active nodes are
-   * tried first, followed by quarantined nodes. This is useful for implementing retry logic with
-   * fallback to potentially recovering nodes.
-   *
-   * @param quarantinedNodes a list of quarantined nodes to try after active nodes
-   * @return a new {@link LazyQueryPlan} containing live nodes followed by quarantined nodes
-   * @since 1.0.5
-   */
-  public LazyQueryPlan newQueryPlan(List<URI> quarantinedNodes) {
-    return new LazyQueryPlan(liveNodes.get(), quarantinedNodes);
+  protected List<URI> getLiveNodesInternal() {
+    return liveNodes.get();
   }
 
   /**
    * Returns a snapshot of the current live nodes list.
    *
    * @return an unmodifiable list of the current live node URIs
-   * @since 1.0.5
+   * @since 2.0.0
    */
   public List<URI> getLiveNodes() {
     return Collections.unmodifiableList(new ArrayList<>(liveNodes.get()));

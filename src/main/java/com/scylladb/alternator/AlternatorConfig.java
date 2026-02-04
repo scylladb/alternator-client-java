@@ -44,7 +44,7 @@ import java.util.Set;
  * }</pre>
  *
  * @author dmitry.kropachev
- * @since 1.0.5
+ * @since 2.0.0
  */
 public class AlternatorConfig {
   /** Default minimum request body size (in bytes) that triggers compression. */
@@ -69,7 +69,7 @@ public class AlternatorConfig {
    *   <li>{@code Accept-Encoding} - For response compression negotiation
    * </ul>
    *
-   * @since 1.0.6
+   * @since 2.0.0
    */
   public static final Set<String> BASE_REQUIRED_HEADERS =
       Collections.unmodifiableSet(
@@ -84,7 +84,7 @@ public class AlternatorConfig {
    *   <li>{@code Content-Encoding} - For request compression (e.g., gzip)
    * </ul>
    *
-   * @since 1.0.6
+   * @since 2.0.0
    */
   public static final Set<String> COMPRESSION_HEADERS =
       Collections.unmodifiableSet(new HashSet<>(Arrays.asList("Content-Encoding")));
@@ -97,7 +97,7 @@ public class AlternatorConfig {
    *   <li>{@code X-Amz-Date} - Timestamp for AWS signature
    * </ul>
    *
-   * @since 1.0.6
+   * @since 2.0.0
    */
   public static final Set<String> AUTHENTICATION_HEADERS =
       Collections.unmodifiableSet(new HashSet<>(Arrays.asList("Authorization", "X-Amz-Date")));
@@ -191,7 +191,7 @@ public class AlternatorConfig {
    * #getPort()} to construct full URIs.
    *
    * @return an unmodifiable list of seed host addresses, never null but may be empty
-   * @since 1.0.5
+   * @since 2.0.0
    */
   public List<String> getSeedHosts() {
     return seedHosts;
@@ -201,7 +201,7 @@ public class AlternatorConfig {
    * Gets the URI scheme (http or https).
    *
    * @return the scheme, or empty string if not set
-   * @since 1.0.5
+   * @since 2.0.0
    */
   public String getScheme() {
     return scheme;
@@ -211,7 +211,7 @@ public class AlternatorConfig {
    * Gets the port number for Alternator connections.
    *
    * @return the port number
-   * @since 1.0.5
+   * @since 2.0.0
    */
   public int getPort() {
     return port;
@@ -225,7 +225,7 @@ public class AlternatorConfig {
    * ClusterScope} if not configured).
    *
    * @return the routing scope, never {@code null}
-   * @since 1.0.5
+   * @since 2.0.0
    */
   public RoutingScope getRoutingScope() {
     return routingScope;
@@ -238,7 +238,7 @@ public class AlternatorConfig {
    * By default, compression is disabled ({@link RequestCompressionAlgorithm#NONE}).
    *
    * @return the compression algorithm, never null
-   * @since 1.0.5
+   * @since 2.0.0
    */
   public RequestCompressionAlgorithm getCompressionAlgorithm() {
     return compressionAlgorithm;
@@ -254,7 +254,7 @@ public class AlternatorConfig {
    * <p>Default value: {@link #DEFAULT_MIN_COMPRESSION_SIZE_BYTES} (1024 bytes / 1 KB)
    *
    * @return the minimum request size in bytes, always non-negative
-   * @since 1.0.5
+   * @since 2.0.0
    */
   public int getMinCompressionSizeBytes() {
     return minCompressionSizeBytes;
@@ -268,7 +268,7 @@ public class AlternatorConfig {
    * DynamoDB normally uses, so this optimization can reduce outgoing traffic by up to 56%.
    *
    * @return true if header optimization is enabled, false otherwise
-   * @since 1.0.6
+   * @since 2.0.0
    */
   public boolean isOptimizeHeaders() {
     return optimizeHeaders;
@@ -282,7 +282,7 @@ public class AlternatorConfig {
    * 7230.
    *
    * @return unmodifiable set of allowed header names
-   * @since 1.0.6
+   * @since 2.0.0
    */
   public Set<String> getHeadersWhitelist() {
     return headersWhitelist;
@@ -298,7 +298,7 @@ public class AlternatorConfig {
    * <p>This is useful when connecting to Alternator clusters that have authentication disabled.
    *
    * @return true if authentication is enabled (default), false if disabled
-   * @since 1.0.6
+   * @since 2.0.0
    */
   public boolean isAuthenticationEnabled() {
     return authenticationEnabled;
@@ -311,7 +311,7 @@ public class AlternatorConfig {
    * using session tickets (RFC 5077). This reduces handshake latency for subsequent connections.
    *
    * @return the TLS session cache configuration, never null
-   * @since 1.0.5
+   * @since 2.0.0
    * @deprecated Use {@link #getTlsConfig()} and {@link TlsConfig#getSessionCacheConfig()} instead
    */
   @Deprecated
@@ -384,7 +384,7 @@ public class AlternatorConfig {
    * (compression algorithm and authentication state).
    *
    * @return an unmodifiable set of required header names
-   * @since 1.0.6
+   * @since 2.0.0
    */
   public Set<String> getRequiredHeaders() {
     Set<String> required = new HashSet<>(BASE_REQUIRED_HEADERS);
@@ -446,7 +446,7 @@ public class AlternatorConfig {
      *
      * @param seedUri the seed URI for Alternator cluster discovery
      * @return this builder instance
-     * @since 1.0.5
+     * @since 2.0.0
      */
     public Builder withSeedNode(URI seedUri) {
       if (seedUri != null) {
@@ -462,7 +462,7 @@ public class AlternatorConfig {
      *
      * @param scheme the URI scheme ("http" or "https")
      * @return this builder instance
-     * @since 1.0.5
+     * @since 2.0.0
      */
     public Builder withScheme(String scheme) {
       this.scheme = scheme != null ? scheme : "";
@@ -474,7 +474,7 @@ public class AlternatorConfig {
      *
      * @param port the port number
      * @return this builder instance
-     * @since 1.0.5
+     * @since 2.0.0
      */
     public Builder withPort(int port) {
       this.port = port;
@@ -489,7 +489,7 @@ public class AlternatorConfig {
      *
      * @param hosts the collection of seed host addresses (IP or hostname)
      * @return this builder instance
-     * @since 1.0.5
+     * @since 2.0.0
      */
     public Builder withSeedHosts(Collection<String> hosts) {
       if (hosts != null) {
@@ -506,7 +506,7 @@ public class AlternatorConfig {
      *
      * @param host the seed host address (IP or hostname)
      * @return this builder instance
-     * @since 1.0.5
+     * @since 2.0.0
      */
     public Builder withSeedHost(String host) {
       if (host != null) {
@@ -534,7 +534,7 @@ public class AlternatorConfig {
      * }</pre>
      *
      * @return an unmodifiable set of required header names for the current configuration
-     * @since 1.0.6
+     * @since 2.0.0
      */
     public Set<String> getRequiredHeaders() {
       Set<String> required = new HashSet<>(BASE_REQUIRED_HEADERS);
@@ -568,7 +568,7 @@ public class AlternatorConfig {
      *
      * @param routingScope the routing scope, or {@code null} to use all nodes (ClusterScope)
      * @return this builder instance
-     * @since 1.0.5
+     * @since 2.0.0
      */
     public Builder withRoutingScope(RoutingScope routingScope) {
       this.routingScope = routingScope;
@@ -592,7 +592,7 @@ public class AlternatorConfig {
      *
      * @param algorithm the compression algorithm to use, or null to disable compression
      * @return this builder instance
-     * @since 1.0.5
+     * @since 2.0.0
      */
     public Builder withCompressionAlgorithm(RequestCompressionAlgorithm algorithm) {
       this.compressionAlgorithm = algorithm != null ? algorithm : RequestCompressionAlgorithm.NONE;
@@ -618,7 +618,7 @@ public class AlternatorConfig {
      *
      * @param minCompressionSizeBytes minimum request size in bytes, must be non-negative
      * @return this builder instance
-     * @since 1.0.5
+     * @since 2.0.0
      */
     public Builder withMinCompressionSizeBytes(int minCompressionSizeBytes) {
       this.minCompressionSizeBytes = minCompressionSizeBytes;
@@ -644,7 +644,7 @@ public class AlternatorConfig {
      *
      * @param optimizeHeaders true to enable header filtering, false to disable
      * @return this builder instance
-     * @since 1.0.6
+     * @since 2.0.0
      */
     public Builder withOptimizeHeaders(boolean optimizeHeaders) {
       this.optimizeHeaders = optimizeHeaders;
@@ -682,7 +682,7 @@ public class AlternatorConfig {
      *
      * @param headers collection of header names to preserve (case-insensitive), must not be null
      * @return this builder instance
-     * @since 1.0.6
+     * @since 2.0.0
      */
     public Builder withHeadersWhitelist(Collection<String> headers) {
       this.headersWhitelist = headers != null ? new HashSet<>(headers) : null;
@@ -720,7 +720,7 @@ public class AlternatorConfig {
      *
      * @param tlsSessionCacheConfig the TLS session cache configuration, or null to use default
      * @return this builder instance
-     * @since 1.0.5
+     * @since 2.0.0
      * @deprecated Use {@link #withTlsConfig(TlsConfig)} instead
      */
     @Deprecated

@@ -3,6 +3,7 @@ package com.scylladb.alternator;
 import static org.junit.Assert.*;
 import static org.junit.Assume.*;
 
+import com.scylladb.alternator.internal.AlternatorLiveNodes;
 import com.scylladb.alternator.routing.ClusterScope;
 import com.scylladb.alternator.routing.DatacenterScope;
 import com.scylladb.alternator.routing.RackScope;
@@ -174,7 +175,7 @@ public class AlternatorDynamoDbClientIT {
   public void testUpdateLiveNodes() throws Exception {
     AlternatorDynamoDbClientWrapper client = buildClient();
 
-    // The background thread is already started by AlternatorEndpointProvider
+    // The background thread is already started by AlternatorLiveNodes
     // Wait for node list to update
     Thread.sleep(1000);
 
@@ -275,13 +276,14 @@ public class AlternatorDynamoDbClientIT {
   }
 
   @Test
-  public void testAccessToAlternatorEndpointProvider() throws Exception {
+  public void testAccessToAlternatorLiveNodes() throws Exception {
     AlternatorDynamoDbClientWrapper client = buildClient();
 
-    AlternatorEndpointProvider provider = client.getAlternatorEndpointProvider();
-    assertNotNull("Should be able to access endpoint provider", provider);
+    // Test that wrapper exposes live nodes
+    AlternatorLiveNodes liveNodes = client.getAlternatorLiveNodes();
+    assertNotNull("Should be able to access live nodes", liveNodes);
 
-    // Test that wrapper exposes live nodes directly
+    // Test that wrapper exposes live nodes list directly
     List<URI> nodes = client.getLiveNodes();
     assertNotNull("Should be able to access live nodes from wrapper", nodes);
 

@@ -59,7 +59,7 @@ public class Demo2 {
   // And this is the Alternator-specific way to get a DynamoDB connection
   // which load-balances several Scylla nodes.
   // Using AlternatorDynamoDbClient.builder() provides a simplified API
-  // that automatically integrates the AlternatorEndpointProvider for
+  // that automatically integrates query plan interceptors for
   // client-side load balancing.
   static DynamoDbClient getAlternatorClient(
       URI url, AwsCredentialsProvider myCredentials, String datacenter, String rack) {

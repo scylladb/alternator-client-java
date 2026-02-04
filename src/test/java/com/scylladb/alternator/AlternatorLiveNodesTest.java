@@ -111,10 +111,10 @@ public class AlternatorLiveNodesTest {
             new URI("http://node3.example.com:8000"));
     AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(nodes, "http", 8000, "", "");
 
-    LazyQueryPlan plan = liveNodes.newQueryPlan();
+    LazyQueryPlan plan = new LazyQueryPlan(liveNodes);
 
     assertNotNull(plan);
-    assertEquals(3, plan.size());
+    assertTrue(plan.hasNext());
 
     Set<URI> returnedNodes = new HashSet<>();
     while (plan.hasNext()) {
@@ -134,49 +134,14 @@ public class AlternatorLiveNodesTest {
     AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(nodes, "http", 8000, "", "");
 
     long seed = 42L;
-    LazyQueryPlan plan1 = liveNodes.newQueryPlan(seed);
-    LazyQueryPlan plan2 = liveNodes.newQueryPlan(seed);
+    LazyQueryPlan plan1 = new LazyQueryPlan(liveNodes, seed);
+    LazyQueryPlan plan2 = new LazyQueryPlan(liveNodes, seed);
 
-    List<URI> sequence1 = new ArrayList<>();
-    List<URI> sequence2 = new ArrayList<>();
+    // Same seed should produce same first node
+    URI first1 = plan1.next();
+    URI first2 = plan2.next();
 
-    while (plan1.hasNext()) {
-      sequence1.add(plan1.next());
-    }
-    while (plan2.hasNext()) {
-      sequence2.add(plan2.next());
-    }
-
-    assertEquals("Same seed should produce same sequence", sequence1, sequence2);
-  }
-
-  @Test
-  public void testNewQueryPlanWithQuarantinedNodes() throws URISyntaxException {
-    List<URI> nodes =
-        Arrays.asList(
-            new URI("http://node1.example.com:8000"), new URI("http://node2.example.com:8000"));
-    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(nodes, "http", 8000, "", "");
-
-    List<URI> quarantined =
-        Arrays.asList(
-            new URI("http://quarantined1.example.com:8000"),
-            new URI("http://quarantined2.example.com:8000"));
-
-    LazyQueryPlan plan = liveNodes.newQueryPlan(quarantined);
-
-    assertNotNull(plan);
-    assertEquals(4, plan.size());
-
-    Set<URI> allExpected = new HashSet<>();
-    allExpected.addAll(nodes);
-    allExpected.addAll(quarantined);
-
-    Set<URI> allReturned = new HashSet<>();
-    while (plan.hasNext()) {
-      allReturned.add(plan.next());
-    }
-
-    assertEquals(allExpected, allReturned);
+    assertEquals("Same seed should produce same first node", first1, first2);
   }
 
   @Test

@@ -16,7 +16,7 @@ import software.amazon.awssdk.http.async.SdkAsyncHttpClient;
  * including SDK-internal headers like User-Agent and amz-sdk-request.
  *
  * @author dmitry.kropachev
- * @since 1.0.6
+ * @since 2.0.0
  */
 public class HeadersFilteringSdkAsyncHttpClient implements SdkAsyncHttpClient {
 

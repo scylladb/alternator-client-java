@@ -3,6 +3,8 @@ package com.scylladb.alternator;
 import com.scylladb.alternator.internal.AlternatorLiveNodes;
 import com.scylladb.alternator.keyrouting.KeyRouteAffinity;
 import com.scylladb.alternator.keyrouting.KeyRouteAffinityConfig;
+import com.scylladb.alternator.queryplan.AffinityQueryPlanInterceptor;
+import com.scylladb.alternator.queryplan.BasicQueryPlanInterceptor;
 import com.scylladb.alternator.routing.RoutingScope;
 import java.net.URI;
 import java.util.Collection;
@@ -26,7 +28,7 @@ import software.amazon.awssdk.utils.AttributeMap;
  * <p>This class provides a builder that simplifies the construction of an async DynamoDB client
  * (AWS SDK v2) that automatically distributes requests across all nodes in an Alternator cluster.
  * It provides a fluent API compatible with {@link DynamoDbAsyncClient#builder()} while
- * automatically integrating {@link AlternatorEndpointProvider} for client-side load balancing.
+ * automatically integrating query plan interceptors for client-side load balancing.
  *
  * <p>The builder implements {@link DynamoDbAsyncClientBuilder}, ensuring compatibility with
  * standard AWS SDK v2 patterns while adding Alternator-specific configuration via {@link
@@ -53,7 +55,7 @@ import software.amazon.awssdk.utils.AttributeMap;
  * }</pre>
  *
  * @author dmitry.kropachev
- * @since 1.0.5
+ * @since 2.0.0
  */
 public class AlternatorDynamoDbAsyncClient {
 
@@ -73,10 +75,10 @@ public class AlternatorDynamoDbAsyncClient {
    *
    * <p>This builder implements {@link DynamoDbAsyncClientBuilder} and delegates most configuration
    * to the standard AWS SDK {@link DynamoDbAsyncClient} builder while automatically integrating
-   * {@link AlternatorEndpointProvider} for node discovery and load balancing.
+   * query plan interceptors for node discovery and load balancing.
    *
    * <p>The builder tracks the seed URI (via {@link #endpointOverride(URI)}) and optional
-   * datacenter/rack configuration, then creates an {@link AlternatorEndpointProvider} during the
+   * datacenter/rack configuration, then creates the appropriate query plan interceptor during the
    * {@link #build()} phase.
    *
    * <p>Note: Some AWS-specific features are not supported by Alternator and will throw {@link
@@ -118,7 +120,7 @@ public class AlternatorDynamoDbAsyncClient {
      *
      * @param routingScope the routing scope, or {@code null} to use all nodes
      * @return this builder instance
-     * @since 1.0.5
+     * @since 2.0.0
      */
     public AlternatorDynamoDbAsyncClientBuilder withRoutingScope(RoutingScope routingScope) {
       configBuilder.withRoutingScope(routingScope);
@@ -192,7 +194,7 @@ public class AlternatorDynamoDbAsyncClient {
      *
      * @param tlsSessionCacheConfig the TLS session cache configuration, or null to use default
      * @return this builder instance
-     * @since 1.0.5
+     * @since 2.0.0
      * @deprecated Use {@link #withTlsConfig(TlsConfig)} instead
      */
     @Deprecated
@@ -286,7 +288,7 @@ public class AlternatorDynamoDbAsyncClient {
      *
      * @param config the Alternator configuration
      * @return this builder instance
-     * @since 1.0.5
+     * @since 2.0.0
      */
     public AlternatorDynamoDbAsyncClientBuilder withAlternatorConfig(AlternatorConfig config) {
       if (config != null) {
@@ -519,9 +521,8 @@ public class AlternatorDynamoDbAsyncClient {
     /**
      * This method is not supported by AlternatorDynamoDbAsyncClient.
      *
-     * <p>The endpoint provider is automatically configured to use {@link
-     * AlternatorEndpointProvider} for load balancing. Use {@link #endpointOverride(URI)} to specify
-     * the seed endpoint instead.
+     * <p>The endpoint routing is automatically handled by query plan interceptors for load
+     * balancing. Use {@link #endpointOverride(URI)} to specify the seed endpoint instead.
      *
      * @param endpointProvider ignored
      * @return never returns
@@ -609,7 +610,7 @@ public class AlternatorDynamoDbAsyncClient {
      * <ol>
      *   <li>Validates that {@link #endpointOverride(URI)} was called (required)
      *   <li>Initializes {@link AlternatorConfig} with default values if not configured
-     *   <li>Creates an {@link AlternatorEndpointProvider} with the seed URI and routing scope
+     *   <li>Creates a query plan interceptor with the seed URI and routing scope
      *   <li>Sets a default region ("fake-aws-region") if none was specified
      *   <li>Builds the underlying {@link DynamoDbAsyncClient} with all configurations applied
      * </ol>
@@ -618,7 +619,7 @@ public class AlternatorDynamoDbAsyncClient {
      *
      * <ul>
      *   <li>Discover all nodes in the Alternator cluster via the {@code /localnodes} API
-     *   <li>Distribute requests across discovered nodes using round-robin load balancing
+     *   <li>Distribute requests across discovered nodes using load balancing
      *   <li>Periodically refresh the node list (every 5 seconds) to handle topology changes
      *   <li>Filter nodes by routing scope if configured via {@link #withRoutingScope}
      * </ul>
@@ -647,8 +648,8 @@ public class AlternatorDynamoDbAsyncClient {
      *   <li>{@link AlternatorDynamoDbAsyncClientWrapper#nextAsURI()} - Get next node in round-robin
      *   <li>{@link AlternatorDynamoDbAsyncClientWrapper#checkIfRackDatacenterFeatureIsSupported()}
      *       - Check server capabilities
-     *   <li>{@link AlternatorDynamoDbAsyncClientWrapper#getAlternatorEndpointProvider()} - Access
-     *       the endpoint provider
+     *   <li>{@link AlternatorDynamoDbAsyncClientWrapper#getAlternatorLiveNodes()} - Access the live
+     *       nodes manager
      * </ul>
      *
      * @return an {@link AlternatorDynamoDbAsyncClientWrapper} instance configured with Alternator
@@ -729,26 +730,27 @@ public class AlternatorDynamoDbAsyncClient {
       AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(alternatorConfig);
       liveNodes.start();
 
-      // Create AlternatorEndpointProvider with the live nodes
-      AlternatorEndpointProvider alternatorEndpointProvider =
-          new AlternatorEndpointProvider(liveNodes);
+      // Add query plan interceptor - use affinity interceptor if configured, otherwise basic
+      // The interceptor handles all routing via modifyHttpRequest() using ExecutionAttributes,
+      // which works correctly with both sync and async clients.
+      ClientOverrideConfiguration.Builder overrideBuilder =
+          delegate.overrideConfiguration() != null
+              ? delegate.overrideConfiguration().toBuilder()
+              : ClientOverrideConfiguration.builder();
 
-      // Fail fast if key route affinity is configured - it won't work with async clients
-      // because the interceptor uses ThreadLocal to pass the target node to the endpoint provider,
-      // but async clients execute requests on different threads than the interceptor runs on.
       KeyRouteAffinityConfig keyAffinityConfig = alternatorConfig.getKeyRouteAffinityConfig();
       if (keyAffinityConfig != null
           && keyAffinityConfig.getType() != null
           && keyAffinityConfig.getType() != KeyRouteAffinity.NONE) {
-        throw new IllegalStateException(
-            "Key route affinity is not supported with async clients due to ThreadLocal limitations. "
-                + "The interceptor uses ThreadLocal to pass routing information, but async clients "
-                + "execute requests on different threads. Use the synchronous DynamoDbClient "
-                + "(AlternatorDynamoDbClient) instead, or disable key route affinity.");
+        overrideBuilder.addExecutionInterceptor(
+            new AffinityQueryPlanInterceptor(keyAffinityConfig, liveNodes));
+      } else {
+        overrideBuilder.addExecutionInterceptor(new BasicQueryPlanInterceptor(liveNodes));
       }
+      delegate.overrideConfiguration(overrideBuilder.build());
 
-      // Set the endpoint provider on the delegate
-      delegate.endpointProvider(alternatorEndpointProvider);
+      // Use seed URI as base endpoint - interceptor will override with actual target node
+      delegate.endpointOverride(seedUri);
 
       // Set default region if not specified (required by AWS SDK but not used by Alternator)
       if (region == null) {
@@ -757,8 +759,7 @@ public class AlternatorDynamoDbAsyncClient {
 
       // Build the underlying client and wrap it with Alternator metadata
       DynamoDbAsyncClient client = delegate.build();
-      return new AlternatorDynamoDbAsyncClientWrapper(
-          client, liveNodes, alternatorEndpointProvider, alternatorConfig);
+      return new AlternatorDynamoDbAsyncClientWrapper(client, liveNodes, alternatorConfig);
     }
   }
 }

@@ -1,32 +1,37 @@
-package com.scylladb.alternator.keyrouting;
+package com.scylladb.alternator.queryplan;
 
 import com.scylladb.alternator.internal.AlternatorLiveNodes;
 import com.scylladb.alternator.internal.LazyQueryPlan;
-import java.net.URI;
+import com.scylladb.alternator.keyrouting.AttributeValueHasher;
+import com.scylladb.alternator.keyrouting.KeyAffinityRequestClassifier;
+import com.scylladb.alternator.keyrouting.KeyRouteAffinityConfig;
+import com.scylladb.alternator.keyrouting.PartitionKeyResolver;
 import software.amazon.awssdk.core.SdkRequest;
 import software.amazon.awssdk.core.interceptor.Context;
 import software.amazon.awssdk.core.interceptor.ExecutionAttributes;
-import software.amazon.awssdk.core.interceptor.ExecutionInterceptor;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 
 /**
  * Execution interceptor that implements key-based route affinity.
  *
- * <p>This interceptor examines DynamoDB requests before execution, extracts the partition key when
- * applicable, hashes it, and selects a target node deterministically. The target node is stored in
- * {@link KeyRouteAffinityContext} for the endpoint provider to use.
+ * <p>This interceptor extends {@link BasicQueryPlanInterceptor} to provide deterministic routing
+ * based on partition key values. When key affinity conditions are met, it creates a {@link
+ * LazyQueryPlan} with a seed derived from the partition key hash, ensuring that requests for the
+ * same partition key are routed to the same node.
+ *
+ * <p>When key affinity conditions are not met (e.g., request type doesn't qualify, partition key
+ * not found), the interceptor falls back to the random plan created by the base class.
  *
  * <p>The interceptor is automatically configured when key route affinity is enabled via {@link
  * com.scylladb.alternator.AlternatorDynamoDbClient.AlternatorDynamoDbClientBuilder#withKeyRouteAffinity}.
  *
  * @author dmitry.kropachev
- * @since 1.0.7
+ * @since 2.0.0
  */
-public class KeyRouteAffinityInterceptor implements ExecutionInterceptor {
+public class AffinityQueryPlanInterceptor extends BasicQueryPlanInterceptor {
 
   private final KeyRouteAffinityConfig config;
-  private final AlternatorLiveNodes liveNodes;
   private final PartitionKeyResolver pkResolver;
   private volatile DynamoDbClient clientForDiscovery;
 
@@ -37,12 +42,12 @@ public class KeyRouteAffinityInterceptor implements ExecutionInterceptor {
    * @param liveNodes the live nodes manager
    * @param clientForDiscovery the DynamoDB client to use for PK discovery (may be null)
    */
-  public KeyRouteAffinityInterceptor(
+  public AffinityQueryPlanInterceptor(
       KeyRouteAffinityConfig config,
       AlternatorLiveNodes liveNodes,
       DynamoDbClient clientForDiscovery) {
+    super(liveNodes);
     this.config = config;
-    this.liveNodes = liveNodes;
     this.pkResolver = new PartitionKeyResolver(config.getPkInfoPerTable());
     this.clientForDiscovery = clientForDiscovery;
   }
@@ -56,7 +61,8 @@ public class KeyRouteAffinityInterceptor implements ExecutionInterceptor {
    * @param config the key route affinity configuration
    * @param liveNodes the live nodes manager
    */
-  public KeyRouteAffinityInterceptor(KeyRouteAffinityConfig config, AlternatorLiveNodes liveNodes) {
+  public AffinityQueryPlanInterceptor(
+      KeyRouteAffinityConfig config, AlternatorLiveNodes liveNodes) {
     this(config, liveNodes, null);
   }
 
@@ -75,27 +81,22 @@ public class KeyRouteAffinityInterceptor implements ExecutionInterceptor {
     this.clientForDiscovery = client;
   }
 
-  @Override
-  public void beforeExecution(
-      Context.BeforeExecution context, ExecutionAttributes executionAttributes) {
-    // Clear any previous context
-    KeyRouteAffinityContext.clear();
-
+  private LazyQueryPlan getQueryPlan(SdkRequest request) {
     if (!config.isEnabled()) {
-      return;
+      return null;
     }
-
-    SdkRequest request = context.request();
 
     // Check if this request qualifies for key affinity
     if (!KeyAffinityRequestClassifier.shouldApply(config.getType(), request)) {
-      return;
+      // Keep the random plan from base class
+      return null;
     }
 
     // Extract table name
     String tableName = KeyAffinityRequestClassifier.extractTableName(request);
     if (tableName == null) {
-      return;
+      // Keep the random plan from base class
+      return null;
     }
 
     // Get partition key name
@@ -105,38 +106,32 @@ public class KeyRouteAffinityInterceptor implements ExecutionInterceptor {
       if (clientForDiscovery != null) {
         pkResolver.triggerDiscovery(tableName, clientForDiscovery);
       }
-      // Fall back to random routing for this request
-      return;
+      // Keep the random plan from base class for this request
+      return null;
     }
 
     // Extract partition key value
     AttributeValue pkValue = KeyAffinityRequestClassifier.extractPartitionKey(request, pkName);
     if (pkValue == null) {
-      return;
+      // Keep the random plan from base class
+      return null;
     }
 
-    // Hash the partition key and select a node
+    // Hash the partition key and create a deterministic query plan
     long hash = AttributeValueHasher.hash(pkValue);
-    LazyQueryPlan plan = liveNodes.newQueryPlan(hash);
+    return new LazyQueryPlan(liveNodes, hash);
+  }
 
-    if (plan.hasNext()) {
-      URI targetUri = plan.next();
-      KeyRouteAffinityContext.setTargetNode(targetUri);
+  @Override
+  public void beforeExecution(
+      Context.BeforeExecution context, ExecutionAttributes executionAttributes) {
+    LazyQueryPlan plan = getQueryPlan(context.request());
+    if (plan == null) {
+      plan = new LazyQueryPlan(liveNodes);
     }
-  }
 
-  @Override
-  public void afterExecution(
-      Context.AfterExecution context, ExecutionAttributes executionAttributes) {
-    // Clean up the context
-    KeyRouteAffinityContext.clear();
-  }
-
-  @Override
-  public void onExecutionFailure(
-      Context.FailedExecution context, ExecutionAttributes executionAttributes) {
-    // Clean up the context on failure as well
-    KeyRouteAffinityContext.clear();
+    // Override the random plan with the deterministic one
+    executionAttributes.putAttribute(QUERY_PLAN, plan);
   }
 
   /**
@@ -146,5 +141,14 @@ public class KeyRouteAffinityInterceptor implements ExecutionInterceptor {
    */
   public PartitionKeyResolver getPartitionKeyResolver() {
     return pkResolver;
+  }
+
+  /**
+   * Returns the key route affinity configuration.
+   *
+   * @return the configuration
+   */
+  public KeyRouteAffinityConfig getConfig() {
+    return config;
   }
 }

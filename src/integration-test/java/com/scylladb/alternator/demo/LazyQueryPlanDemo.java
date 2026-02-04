@@ -1,5 +1,6 @@
 package com.scylladb.alternator.demo;
 
+import com.scylladb.alternator.internal.AlternatorLiveNodes;
 import com.scylladb.alternator.internal.LazyQueryPlan;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -7,6 +8,9 @@ import java.util.*;
 
 /**
  * Demonstration of LazyQueryPlan functionality.
+ *
+ * <p>LazyQueryPlan is truly lazy - it pulls nodes one at a time from AlternatorLiveNodes only when
+ * needed, and tracks which nodes have been returned to avoid duplicates.
  *
  * @author dmitry.kropachev
  */
@@ -22,120 +26,101 @@ public class LazyQueryPlanDemo {
     System.out.println("=== LazyQueryPlan Test and Demonstration ===\n");
 
     // Create sample URIs
-    List<URI> activeNodes = createUriList("active", 5);
-    List<URI> quarantinedNodes = createUriList("quarantined", 3);
+    List<URI> nodes = createUriList("node", 5);
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(nodes, "http", 8000, "", "");
 
-    System.out.println("Active nodes: " + activeNodes);
-    System.out.println("Quarantined nodes: " + quarantinedNodes);
+    System.out.println("Available nodes: " + nodes);
     System.out.println();
 
     // Test 1: Random seed (non-deterministic)
-    System.out.println("--- Test 1: Random seed (two runs should differ) ---");
-    LazyQueryPlan plan1 = new LazyQueryPlan(activeNodes, quarantinedNodes);
+    System.out.println("--- Test 1: Random seed (two runs may differ) ---");
+    LazyQueryPlan plan1 = new LazyQueryPlan(liveNodes);
     System.out.print("Run 1: ");
     printPlan(plan1);
 
-    LazyQueryPlan plan2 = new LazyQueryPlan(activeNodes, quarantinedNodes);
+    LazyQueryPlan plan2 = new LazyQueryPlan(liveNodes);
     System.out.print("Run 2: ");
     printPlan(plan2);
     System.out.println();
 
-    // Test 2: Fixed seed (deterministic/reproducible)
-    System.out.println("--- Test 2: Fixed seed (two runs should be identical) ---");
+    // Test 2: Fixed seed (deterministic/reproducible first node)
+    System.out.println("--- Test 2: Fixed seed (first node should be identical) ---");
     long seed = 42L;
-    LazyQueryPlan plan3 = new LazyQueryPlan(activeNodes, quarantinedNodes, seed);
+    LazyQueryPlan plan3 = new LazyQueryPlan(liveNodes, seed);
     System.out.print("Run 1 (seed=" + seed + "): ");
-    printPlan(plan3);
+    URI first1 = plan3.next();
+    System.out.println("First node: " + first1.getHost());
 
-    LazyQueryPlan plan4 = new LazyQueryPlan(activeNodes, quarantinedNodes, seed);
+    LazyQueryPlan plan4 = new LazyQueryPlan(liveNodes, seed);
     System.out.print("Run 2 (seed=" + seed + "): ");
-    printPlan(plan4);
+    URI first2 = plan4.next();
+    System.out.println("First node: " + first2.getHost());
+    System.out.println("First nodes match: " + first1.equals(first2));
     System.out.println();
 
-    // Test 3: Different seeds produce different orders
-    System.out.println("--- Test 3: Different seeds produce different orders ---");
-    LazyQueryPlan plan5 = new LazyQueryPlan(activeNodes, quarantinedNodes, 100L);
+    // Test 3: Different seeds produce different first nodes
+    System.out.println("--- Test 3: Different seeds produce different first nodes ---");
+    LazyQueryPlan plan5 = new LazyQueryPlan(liveNodes, 100L);
     System.out.print("Seed 100: ");
     printPlan(plan5);
 
-    LazyQueryPlan plan6 = new LazyQueryPlan(activeNodes, quarantinedNodes, 200L);
+    LazyQueryPlan plan6 = new LazyQueryPlan(liveNodes, 200L);
     System.out.print("Seed 200: ");
     printPlan(plan6);
     System.out.println();
 
     // Test 4: Iterator operations
     System.out.println("--- Test 4: Iterator operations ---");
-    LazyQueryPlan plan7 = new LazyQueryPlan(activeNodes, quarantinedNodes, 123L);
-    System.out.println("Total size: " + plan7.size());
-    System.out.println("Remaining before iteration: " + plan7.remaining());
+    LazyQueryPlan plan7 = new LazyQueryPlan(liveNodes, 123L);
+    System.out.println("hasNext before iteration: " + plan7.hasNext());
 
     System.out.println("Iterating through first 3 nodes:");
     for (int i = 0; i < 3 && plan7.hasNext(); i++) {
       URI node = plan7.next();
       System.out.println("  Node " + (i + 1) + ": " + node.getHost());
     }
-    System.out.println("Remaining after 3 iterations: " + plan7.remaining());
-
-    System.out.println("Resetting iterator...");
-    plan7.reset();
-    System.out.println("Remaining after reset: " + plan7.remaining());
+    System.out.println("hasNext after 3 iterations: " + plan7.hasNext());
     System.out.println();
 
-    // Test 5: Active nodes appear before quarantined
-    System.out.println("--- Test 5: Verify active nodes come before quarantined ---");
-    LazyQueryPlan plan8 = new LazyQueryPlan(activeNodes, quarantinedNodes, 999L);
-    Set<String> activeHosts = new HashSet<>();
-    for (URI uri : activeNodes) {
-      activeHosts.add(uri.getHost());
-    }
-
-    int activeCount = 0;
-    int quarantinedCount = 0;
-    boolean foundQuarantined = false;
+    // Test 5: Lazy behavior - no node duplication
+    System.out.println("--- Test 5: Verify no duplicate nodes returned ---");
+    LazyQueryPlan plan8 = new LazyQueryPlan(liveNodes, 999L);
+    Set<URI> seenNodes = new HashSet<>();
+    boolean duplicateFound = false;
 
     while (plan8.hasNext()) {
       URI node = plan8.next();
-      if (activeHosts.contains(node.getHost())) {
-        activeCount++;
-        if (foundQuarantined) {
-          System.out.println("ERROR: Found active node after quarantined node!");
-        }
-      } else {
-        quarantinedCount++;
-        foundQuarantined = true;
+      if (seenNodes.contains(node)) {
+        System.out.println("ERROR: Duplicate node found: " + node);
+        duplicateFound = true;
       }
+      seenNodes.add(node);
     }
 
-    System.out.println("Active nodes in first part: " + activeCount);
-    System.out.println("Quarantined nodes in second part: " + quarantinedCount);
-    System.out.println("Order is correct: " + (activeCount == activeNodes.size()));
+    System.out.println("Total unique nodes returned: " + seenNodes.size());
+    System.out.println("No duplicates: " + !duplicateFound);
     System.out.println();
 
-    // Test 6: Empty lists
+    // Test 6: Empty node list
     System.out.println("--- Test 6: Edge cases ---");
-    LazyQueryPlan emptyActive = new LazyQueryPlan(Collections.emptyList(), quarantinedNodes);
-    System.out.println("Empty active list size: " + emptyActive.size());
-
-    LazyQueryPlan emptyQuarantined = new LazyQueryPlan(activeNodes, Collections.emptyList());
-    System.out.println("Empty quarantined list size: " + emptyQuarantined.size());
-
-    LazyQueryPlan bothEmpty = new LazyQueryPlan(Collections.emptyList(), Collections.emptyList());
-    System.out.println("Both empty size: " + bothEmpty.size());
-    System.out.println("Both empty hasNext: " + bothEmpty.hasNext());
+    AlternatorLiveNodes emptyLiveNodes =
+        new AlternatorLiveNodes(Collections.<URI>emptyList(), "http", 8000, "", "");
+    LazyQueryPlan emptyPlan = new LazyQueryPlan(emptyLiveNodes);
+    System.out.println("Empty node list hasNext: " + emptyPlan.hasNext());
     System.out.println();
 
     // Test 7: Exception handling
     System.out.println("--- Test 7: Exception handling ---");
     try {
-      LazyQueryPlan nullActive = new LazyQueryPlan(null, quarantinedNodes);
+      new LazyQueryPlan(null);
       System.out.println("ERROR: Should have thrown IllegalArgumentException");
     } catch (IllegalArgumentException e) {
       System.out.println(
-          "Correctly threw IllegalArgumentException for null activeNodes: " + e.getMessage());
+          "Correctly threw IllegalArgumentException for null liveNodes: " + e.getMessage());
     }
 
     try {
-      LazyQueryPlan exhausted = new LazyQueryPlan(Collections.emptyList(), Collections.emptyList());
+      LazyQueryPlan exhausted = new LazyQueryPlan(emptyLiveNodes);
       exhausted.next();
       System.out.println("ERROR: Should have thrown NoSuchElementException");
     } catch (NoSuchElementException e) {
@@ -146,7 +131,7 @@ public class LazyQueryPlanDemo {
 
     // Test 8: Iterable interface (for-each loop)
     System.out.println("--- Test 8: Iterable interface (for-each loop) ---");
-    LazyQueryPlan iterablePlan = new LazyQueryPlan(activeNodes, quarantinedNodes, 42L);
+    LazyQueryPlan iterablePlan = new LazyQueryPlan(liveNodes, 42L);
     System.out.print("Using for-each: ");
     List<String> forEachHosts = new ArrayList<>();
     for (URI node : iterablePlan) {
@@ -155,15 +140,18 @@ public class LazyQueryPlanDemo {
     System.out.println(forEachHosts);
     System.out.println();
 
-    // Test 9: getNodes() method
-    System.out.println("--- Test 9: getNodes() returns all nodes ---");
-    LazyQueryPlan nodesPlan = new LazyQueryPlan(activeNodes, quarantinedNodes, 42L);
-    System.out.println("getNodes() size: " + nodesPlan.getNodes().size());
-    System.out.println("First 3 nodes from getNodes(): ");
-    for (int i = 0; i < 3; i++) {
-      System.out.println("  " + nodesPlan.getNodes().get(i).getHost());
+    // Test 9: Iterator exhaustion
+    System.out.println("--- Test 9: Iterator exhaustion ---");
+    LazyQueryPlan trackPlan = new LazyQueryPlan(liveNodes, 42L);
+    trackPlan.next();
+    trackPlan.next();
+    System.out.println("hasNext after 2 calls: " + trackPlan.hasNext());
+    int remainingCount = 0;
+    while (trackPlan.hasNext()) {
+      trackPlan.next();
+      remainingCount++;
     }
-    System.out.println("Remaining (not consumed by getNodes): " + nodesPlan.remaining());
+    System.out.println("Remaining nodes after 2 calls: " + remainingCount);
 
     System.out.println("\n=== All tests completed ===");
   }
@@ -172,7 +160,7 @@ public class LazyQueryPlanDemo {
     List<URI> uris = new ArrayList<>();
     for (int i = 1; i <= count; i++) {
       uris.add(
-          new URI("http", null, prefix + "-node" + i + ".example.com", 8000, null, null, null));
+          new URI("http", null, prefix + i + ".example.com", 8000, null, null, null));
     }
     return uris;
   }
