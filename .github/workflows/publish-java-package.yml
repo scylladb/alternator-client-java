@@ -1,175 +1,105 @@
-name: Release Java Package to Maven Central
+name: Release ScyllaDB Java Driver
 
 on:
   workflow_dispatch:
     inputs:
-      releaseVersion:
-        description: 'Release version (e.g. "1.0.5")'
-        required: true
-        type: string
       dry-run:
-        description: 'Dry run: build and verify without publishing'
-        required: false
         type: boolean
+        description: 'dry-run: run without pushing SCM changes to upstream'
         default: false
-      skip-tests:
-        description: 'Skip tests during release'
-        required: false
-        type: boolean
-        default: false
-      create-tag:
-        description: 'Create and push git tag'
-        required: false
-        type: boolean
-        default: true
 
-env:
-  IS_CICD: 1
+      skip-tests:
+        type: boolean
+        description: 'skip-tests: do not run tests while releasing'
+        default: false
+
+      target-tag:
+        type: string
+        description: 'target-tag: tag or branch name to release. Use to re-release tagged releases'
+        default: main
+
+      release-version:
+        required: false
+        type: string
+        description: 'release-version: override next version'
 
 jobs:
-  validate:
-    name: Validate Release
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.validate.outputs.version }}
-
-    steps:
-      - name: Validate version format
-        id: validate
-        run: |
-          VERSION="${{ inputs.releaseVersion }}"
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+)?$ ]]; then
-            echo "Error: Version '$VERSION' does not match expected format (e.g., 1.0.5 or 1.0.5-SNAPSHOT)"
-            exit 1
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "✅ Version format validated: $VERSION"
-
   release:
-    name: Release to Maven Central
+    name: Release
     runs-on: ubuntu-latest
-    needs: [validate]
-    timeout-minutes: 30
 
     permissions:
       contents: write
 
+    env:
+      MVNCMD: mvn -B -X -ntp
+
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
+
+      - name: Checkout Code One Commit Before ${{ inputs.version_tag }}
+        if: inputs.target-tag != 'main'
+        env:
+          RELEASE_TARGET_TAG: ${{ inputs.version_tag }}
+        run: make checkout-one-commit-before
 
       - name: Set up Java
         uses: actions/setup-java@v5
         with:
-          java-version: '8'
+          java-version: '11'
           distribution: 'temurin'
-          cache: maven
-          server-id: ossrh
-          server-username: MAVEN_USERNAME
-          server-password: MAVEN_CENTRAL_TOKEN
-          gpg-private-key: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
+          server-id: central
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
           gpg-passphrase: MAVEN_GPG_PASSPHRASE
+          server-username: SONATYPE_TOKEN_USERNAME
+          server-password: SONATYPE_TOKEN_PASSWORD
+          cache: maven
 
       - name: Configure Git user
         run: |
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
+          git config user.name "ScyllaDB Promoter"
+          git config user.email "github-promoter@scylladb.com"
 
-      - name: Set release version
-        run: |
-          echo "Setting version to ${{ needs.validate.outputs.version }}"
-          mvn versions:set -DnewVersion=${{ needs.validate.outputs.version }} -DgenerateBackupPoms=false
-
-      - name: Verify build
-        run: |
-          mvn clean verify -Prelease ${{ inputs.skip-tests && '-DskipTests' || '' }}
-
-      - name: Deploy to Maven Central (dry-run)
-        if: inputs.dry-run == true
-        run: |
-          echo "🧪 DRY RUN: Skipping actual deployment"
-          mvn clean deploy -Prelease -DskipRemoteStaging=true ${{ inputs.skip-tests && '-DskipTests' || '' }}
+      - name: Prepare release
         env:
-          MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
-          MAVEN_CENTRAL_TOKEN: ${{ secrets.MAVEN_CENTRAL_TOKEN }}
-          MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          RELEASE_SKIP_TESTS: ${{ inputs.skip-tests }}
+          RELEASE_VERSION: ${{ inputs.release-version }}
+          RELEASE_TARGET_TAG: ${{ inputs.target-tag }}
+          IS_CICD: true
+        run: |
+          make release-prepare
 
-      - name: Deploy to Maven Central
+      - name: Perform release
         if: inputs.dry-run == false
-        run: |
-          echo "🚀 Publishing to Maven Central..."
-          mvn clean deploy -Prelease ${{ inputs.skip-tests && '-DskipTests' || '' }}
         env:
-          MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
-          MAVEN_CENTRAL_TOKEN: ${{ secrets.MAVEN_CENTRAL_TOKEN }}
-          MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+          RELEASE_SKIP_TESTS: ${{ inputs.skip-tests }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          SONATYPE_TOKEN_USERNAME: ${{ secrets.SONATYPE_TOKEN_USERNAME }}
+          SONATYPE_TOKEN_PASSWORD: ${{ secrets.SONATYPE_TOKEN_PASSWORD }}
+          IS_CICD: true
+        run: make release
 
-      - name: Create git tag
-        if: inputs.dry-run == false && inputs.create-tag == true
-        run: |
-          TAG="java-v${{ needs.validate.outputs.version }}"
-          echo "Creating tag: $TAG"
-          git tag -a "$TAG" -m "Release Java package version ${{ needs.validate.outputs.version }}"
-          git push origin "$TAG"
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v6
-        if: always()
-        with:
-          name: release-artifacts
-          path: |
-            target/*.jar
-            target/*.pom
-          retention-days: 30
-
-      - name: Create GitHub Release
-        if: inputs.dry-run == false && inputs.create-tag == true
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: java-v${{ needs.validate.outputs.version }}
-          name: Java Load Balancing v${{ needs.validate.outputs.version }}
-          body: |
-            ## Java Load Balancing Library v${{ needs.validate.outputs.version }}
-
-            ### Maven Coordinates
-            ```xml
-            <dependency>
-                <groupId>com.scylladb.alternator</groupId>
-                <artifactId>load-balancing</artifactId>
-                <version>${{ needs.validate.outputs.version }}</version>
-            </dependency>
-            ```
-
-            ### Installation
-            Available on [Maven Central](https://central.sonatype.com/artifact/com.scylladb.alternator/load-balancing/${{ needs.validate.outputs.version }})
-          draft: false
-          prerelease: ${{ contains(needs.validate.outputs.version, '-') }}
-          files: |
-            target/load-balancing-${{ needs.validate.outputs.version }}.jar
+      - name: Perform release dry-run
+        if: inputs.dry-run == true
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_SKIP_TESTS: ${{ inputs.skip-tests }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          SONATYPE_TOKEN_USERNAME: ${{ secrets.SONATYPE_TOKEN_USERNAME }}
+          SONATYPE_TOKEN_PASSWORD: ${{ secrets.SONATYPE_TOKEN_PASSWORD }}
+          IS_CICD: true
+        run: make release-dry-run
 
-  notify:
-    name: Notify Release Status
-    runs-on: ubuntu-latest
-    needs: [validate, release]
-    if: always()
+      - name: Upload release logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maven-stdout
+          path: /tmp/release-logs/*.log
 
-    steps:
-      - name: Release Summary
+      - name: Push changes to SCM
+        if: ${{ inputs.dry-run == false && inputs.target-tag == 'main' }}
         run: |
-          if [ "${{ needs.release.result }}" == "success" ]; then
-            if [ "${{ inputs.dry-run }}" == "true" ]; then
-              echo "✅ Dry run completed successfully for version ${{ needs.validate.outputs.version }}"
-            else
-              echo "🎉 Successfully released version ${{ needs.validate.outputs.version }} to Maven Central!"
-              echo ""
-              echo "Maven coordinates:"
-              echo "  groupId: com.scylladb.alternator"
-              echo "  artifactId: load-balancing"
-              echo "  version: ${{ needs.validate.outputs.version }}"
-            fi
-          else
-            echo "❌ Release failed for version ${{ needs.validate.outputs.version }}"
-            exit 1
-          fi
+          git status && git log -3
+          git push origin --follow-tags -v
