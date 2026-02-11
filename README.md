@@ -1,7 +1,7 @@
 # Alternator - Client-side load balancing - Java
 
 ## Introduction
-As explained in the [toplevel README](../README.md), DynamoDB applications
+DynamoDB applications
 are usually aware of a _single endpoint_, a single URL to which they
 connect - e.g., `http://dynamodb.us-east-1.amazonaws.com`. But Alternator
 is distributed over a cluster of nodes and we would like the application to
@@ -12,7 +12,7 @@ Alternator nodes.
 
 One of the ways to do this is to provide a modified library, which will
 allow a mostly-unmodified application which is only aware of one
-"enpoint URL" to send its requests to many different Alternator nodes.
+"endpoint URL" to send its requests to many different Alternator nodes.
 
 Our intention is _not_ to fork the existing AWS client library (SDK) for Java.
 Rather, our intention is to provide a tiny library which tacks on to any
@@ -32,7 +32,7 @@ following `dependency` to your `pom.xml` definition:
 <dependency>
   <groupId>com.scylladb.alternator</groupId>
   <artifactId>load-balancing</artifactId>
-  <version>1.0.0</version>
+  <version>2.0.0</version>
 </dependency>
 ~~~
 
@@ -43,7 +43,7 @@ To build a jar of the Alternator client-side load balancer, use
 ```
 mvn package
 ```
-Which creates `target/load-balancing-1.0.0-SNAPSHOT.jar`.
+Which creates `target/load-balancing-2.0.1-SNAPSHOT.jar`.
 
 ## Usage
 
@@ -72,7 +72,7 @@ code that looks something like this:
     URI uri = URI.create("https://127.0.0.1:8043");
     DynamoDbClient client = DynamoDbClient.builder()
         .region(Region.US_EAST_1)
-        .endpointOverride(url)
+        .endpointOverride(uri)
         .credentialsProvider(myCredentials)
         .build();
 ```
@@ -82,7 +82,7 @@ with `endpointOverride()`, but nevertheless should be specified otherwise the
 SDK will try to look it up in a configuration file, and complain if it isn't
 set there.
 
-#### Option 1: Using `AlternatorDynamoDbClient` (Recommended)
+#### Using `AlternatorDynamoDbClient`
 
 The simplest way to use the Alternator load balancer is to use the `AlternatorDynamoDbClient.builder()`,
 which provides a familiar builder API that implements `DynamoDbClientBuilder`:
@@ -123,7 +123,7 @@ mvn exec:java -Dexec.mainClass=com.scylladb.alternator.demo.Demo2 -Dexec.classpa
 You can achieve better scalability and performance using the asynchronous
 versions of API calls and `java.util.concurrent` completion chaining.
 
-##### Option 1: Using `AlternatorDynamoDbAsyncClient` (Recommended)
+##### Using `AlternatorDynamoDbAsyncClient`
 
 The simplest way to create a `DynamoDbAsyncClient` with Alternator load balancing is to use
 the `AlternatorDynamoDbAsyncClient.builder()`:
@@ -169,6 +169,9 @@ public class Customer {
     private String id;
     private String name;
 
+    public Customer() {}
+    public Customer(String id, String name) { this.id = id; this.name = name; }
+
     @DynamoDbPartitionKey
     public String getId() { return id; }
     public void setId(String id) { this.id = id; }
@@ -195,10 +198,10 @@ DynamoDbTable<Customer> customerTable = enhancedClient.table(
 customerTable.putItem(new Customer("123", "John Doe"));
 ```
 
-You can see `src/test/java/com/scylladb/alternator/test/Demo4.java` for a
+You can see `src/integration-test/java/com/scylladb/alternator/demo/Demo4.java` for a
 complete example. After building with `mvn package`, you can run this demo with:
 ```
-mvn exec:java -Dexec.mainClass=com.scylladb.alternator.test.Demo4 -Dexec.classpathScope=test
+mvn exec:java -Dexec.mainClass=com.scylladb.alternator.demo.Demo4 -Dexec.classpathScope=test
 ```
 
 #### Asynchronous Enhanced Client
@@ -229,10 +232,10 @@ customerTable.putItem(new Customer("123", "John Doe"))
     .join();
 ```
 
-You can see `src/test/java/com/scylladb/alternator/test/Demo5.java` for a
+You can see `src/integration-test/java/com/scylladb/alternator/demo/Demo5.java` for a
 complete example. After building with `mvn package`, you can run this demo with:
 ```
-mvn exec:java -Dexec.mainClass=com.scylladb.alternator.test.Demo5 -Dexec.classpathScope=test
+mvn exec:java -Dexec.mainClass=com.scylladb.alternator.demo.Demo5 -Dexec.classpathScope=test
 ```
 
 ### Request Compression
@@ -329,11 +332,10 @@ When headers optimization is enabled, only the following headers are preserved b
 - `Content-Length` - Required for request body
 - `Accept-Encoding` - For response compression negotiation
 - `Content-Encoding` - For request compression (when enabled)
-- `Authorization` - AWS SigV4 signature
-- `X-Amz-Date` - Timestamp for AWS signature
-- `X-Amz-Content-Sha256` - Content hash for AWS SigV4
+- `Authorization` - AWS SigV4 signature (when authentication is enabled)
+- `X-Amz-Date` - Timestamp for AWS signature (when authentication is enabled)
 
-All other headers (such as `User-Agent`, `X-Amz-Sdk-Invocation-Id`, `amz-sdk-request`) are removed.
+All other headers (such as `User-Agent`, `X-Amz-Sdk-Invocation-Id`, `amz-sdk-request`, `X-Amz-Content-Sha256`) are removed.
 
 #### Custom headers whitelist
 
@@ -373,37 +375,23 @@ AlternatorConfig config = AlternatorConfig.builder()
 
 #### No authentication mode
 
-When connecting to Alternator clusters with authentication disabled, you can configure the client
-to skip authentication entirely:
-
-```java
-AlternatorConfig config = AlternatorConfig.builder()
-    .withAuthenticationEnabled(false)
-    .withOptimizeHeaders(true)
-    .build();
-
-// No credentials needed - client will use anonymous credentials
-DynamoDbClient client = AlternatorDynamoDbClient.builder()
-    .endpointOverride(URI.create("http://localhost:8000"))
-    .withAlternatorConfig(config)
-    .build();
-```
-
-When `withAuthenticationEnabled(false)` is set:
-- The client uses anonymous credentials (no AWS signature)
-- When header optimization is enabled, authentication headers (`Authorization`, `X-Amz-Date`)
-  are automatically excluded from the whitelist
-
-**Auto-detection:** When using `AlternatorDynamoDbClient` or `AlternatorDynamoDbAsyncClient` builders,
-authentication is automatically detected based on whether `credentialsProvider()` was called. If no
+When connecting to Alternator clusters with authentication disabled, you can skip
+authentication by simply not setting a `credentialsProvider()`. When using
+`AlternatorDynamoDbClient` or `AlternatorDynamoDbAsyncClient` builders, authentication
+is automatically detected based on whether `credentialsProvider()` was called. If no
 credentials provider is set, the client automatically uses anonymous credentials:
 
 ```java
-// Automatic: no credentials provider = no authentication
+// No credentials provider = no authentication
 DynamoDbClient client = AlternatorDynamoDbClient.builder()
     .endpointOverride(URI.create("http://localhost:8000"))
     .build();
 ```
+
+When authentication is disabled:
+- The client uses anonymous credentials (no AWS signature)
+- When header optimization is enabled, authentication headers (`Authorization`, `X-Amz-Date`)
+  are automatically excluded from the whitelist
 
 ### Routing Scope (Datacenter/Rack Targeting)
 
