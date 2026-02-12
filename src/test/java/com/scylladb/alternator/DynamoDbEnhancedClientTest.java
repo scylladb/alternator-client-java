@@ -325,7 +325,7 @@ public class DynamoDbEnhancedClientTest {
         enhancedClient.table("test_table", TableSchema.fromBean(TestItem.class));
 
     // Multiple operations should hit different nodes
-    for (int i = 0; i < 9; i++) {
+    for (int i = 0; i < 30; i++) {
       try {
         table.putItem(new TestItem("id-" + i, "data-" + i));
       } catch (Exception e) {
@@ -333,7 +333,7 @@ public class DynamoDbEnhancedClientTest {
       }
     }
 
-    // All three nodes should have been targeted
+    // With random distribution over 30 requests across 3 nodes, we should hit all nodes
     assertEquals("Should target all 3 nodes", 3, targetedHosts.size());
 
     client.close();
