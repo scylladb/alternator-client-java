@@ -337,6 +337,8 @@ public class AlternatorDynamoDbClient {
         configBuilder.withHeadersWhitelist(config.getHeadersWhitelist());
         configBuilder.withTlsConfig(config.getTlsConfig());
         configBuilder.withKeyRouteAffinity(config.getKeyRouteAffinityConfig());
+        configBuilder.withActiveRefreshIntervalMs(config.getActiveRefreshIntervalMs());
+        configBuilder.withIdleRefreshIntervalMs(config.getIdleRefreshIntervalMs());
       }
       return this;
     }
