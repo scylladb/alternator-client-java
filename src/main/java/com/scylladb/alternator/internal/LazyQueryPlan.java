@@ -2,31 +2,28 @@ package com.scylladb.alternator.internal;
 
 import java.net.URI;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.NoSuchElementException;
-import java.util.Random;
-import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * A lazy iterator over URI nodes that pulls nodes from {@link AlternatorLiveNodes} one at a time
- * only when needed. The iterator tracks which nodes have already been returned to avoid duplicates.
+ * only when needed.
  *
- * <p>The pseudo-random order is determined by a seed value, which can be either provided explicitly
- * (for reproducible sequences based on partition key hash) or generated randomly (for
- * non-deterministic load balancing).
+ * <p>When created with a seed, this implementation uses a Go-compatible Lagged Fibonacci Generator
+ * ({@link GoRand}) and pick-and-remove selection to produce identical node sequences across all
+ * Alternator client implementations (Go, Java, etc.) for the same seed. This cross-language
+ * compatibility is critical for key route affinity, where requests with the same partition key hash
+ * must be routed to the same coordinator node regardless of client language.
  *
- * <p>This implementation is truly lazy - it doesn't copy the node list upfront. Instead, when
- * {@link #hasNext()} or {@link #next()} is called, it:
+ * <p>When created without a seed, uses {@link ThreadLocalRandom} for non-deterministic load
+ * balancing.
  *
- * <ol>
- *   <li>Reads the current live nodes from {@link AlternatorLiveNodes}
- *   <li>Filters out nodes that have already been returned
- *   <li>Randomly selects one from the remaining nodes and caches it
- *   <li>On {@link #next()}, returns the cached node and marks it as used
- * </ol>
+ * <p>The pick-and-remove algorithm works by maintaining a mutable copy of the node list. On each
+ * {@link #next()} call, a random index is chosen, the node at that index is returned, and the node
+ * is replaced with the last element in the list (which is then truncated). This ensures each node
+ * is returned exactly once with O(1) per selection.
  *
  * <p>Example usage:
  *
@@ -56,16 +53,22 @@ import java.util.concurrent.ThreadLocalRandom;
  */
 public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
   private final AlternatorLiveNodes liveNodes;
-  private final Set<URI> usedNodes;
-  private final Random rnd;
-  private URI nextNode;
+  private final GoRand goRand;
 
   /**
-   * Tracks the last node returned by {@link #next()} before it's added to {@code usedNodes}. This
-   * optimization defers adding to the usedNodes set until another node is requested, avoiding set
-   * modification when the first request succeeds without retries.
+   * Mutable list of remaining nodes for pick-and-remove. Initialized lazily on first access when
+   * using a seeded GoRand. Null when using ThreadLocalRandom (non-seeded mode).
    */
-  private URI lastUsedNode;
+  private List<URI> remaining;
+
+  /** Whether the remaining list has been initialized (only used in seeded mode). */
+  private boolean initialized;
+
+  /** Cached next node for hasNext()/next() contract in non-seeded mode. */
+  private URI nextNode;
+
+  /** Tracks nodes already returned in non-seeded mode to avoid duplicates. */
+  private java.util.Set<URI> usedNodes;
 
   /**
    * Creates a LazyQueryPlan with a random seed. The iteration order will be non-deterministic,
@@ -74,62 +77,71 @@ public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
    * @param liveNodes the {@link AlternatorLiveNodes} instance to pull nodes from
    */
   public LazyQueryPlan(AlternatorLiveNodes liveNodes) {
-    this(liveNodes, null);
-  }
-
-  /**
-   * Creates a LazyQueryPlan with a specified seed for pseudo-random iteration. Using the same seed
-   * with the same node list will produce the same first node selection, enabling reproducible
-   * behavior for key route affinity.
-   *
-   * @param liveNodes the {@link AlternatorLiveNodes} instance to pull nodes from
-   * @param seed a long value used to initialize the pseudo-random number generator
-   */
-  public LazyQueryPlan(AlternatorLiveNodes liveNodes, long seed) {
-    this(liveNodes, new Random(seed));
-  }
-
-  /**
-   * Creates a LazyQueryPlan with an optional Random instance.
-   *
-   * @param liveNodes the {@link AlternatorLiveNodes} instance to pull nodes from
-   * @param rnd a pseudo-random number generator, or null to use ThreadLocalRandom
-   */
-  private LazyQueryPlan(AlternatorLiveNodes liveNodes, Random rnd) {
     if (liveNodes == null) {
       throw new IllegalArgumentException("liveNodes cannot be null");
     }
     this.liveNodes = liveNodes;
-    this.usedNodes = new HashSet<>();
-    this.rnd = rnd;
-  }
-
-  private Random getRandom() {
-    if (rnd != null) {
-      return rnd;
-    }
-    return ThreadLocalRandom.current();
+    this.goRand = null;
+    this.usedNodes = new java.util.HashSet<>();
   }
 
   /**
-   * Computes and caches the next node if not already cached.
+   * Creates a LazyQueryPlan with a specified seed for deterministic iteration. Uses Go-compatible
+   * PRNG and pick-and-remove selection to produce identical sequences across all Alternator client
+   * implementations.
    *
-   * @return the next node, or null if no more nodes are available
+   * @param liveNodes the {@link AlternatorLiveNodes} instance to pull nodes from
+   * @param seed a long value used to initialize the Go-compatible PRNG
    */
-  private URI computeNextIfNeeded() {
+  public LazyQueryPlan(AlternatorLiveNodes liveNodes, long seed) {
+    if (liveNodes == null) {
+      throw new IllegalArgumentException("liveNodes cannot be null");
+    }
+    this.liveNodes = liveNodes;
+    this.goRand = new GoRand(seed);
+  }
+
+  /**
+   * Initializes the remaining list from current live nodes (seeded mode only). Called lazily on
+   * first access so the snapshot is as fresh as possible.
+   */
+  private void ensureInitialized() {
+    if (!initialized) {
+      remaining = new ArrayList<>(liveNodes.getLiveNodesInternal());
+      initialized = true;
+    }
+  }
+
+  /**
+   * Picks and removes a random node from the remaining list using Go's pick-and-remove algorithm.
+   *
+   * @return the selected node, or null if no nodes remain
+   */
+  private URI pickAndRemove() {
+    ensureInitialized();
+    if (remaining.isEmpty()) {
+      return null;
+    }
+    int idx = goRand.intn(remaining.size());
+    URI node = remaining.get(idx);
+    int last = remaining.size() - 1;
+    remaining.set(idx, remaining.get(last));
+    remaining.remove(last);
+    return node;
+  }
+
+  /**
+   * Computes next node for non-seeded mode (ThreadLocalRandom).
+   *
+   * @return the next node, or null if no more available
+   */
+  private URI computeNextNonSeeded() {
     if (nextNode != null) {
       return nextNode;
     }
 
-    // Track this node as used and clear the cache
-    if (lastUsedNode != null) {
-      usedNodes.add(lastUsedNode);
-      lastUsedNode = null;
-    }
-
     List<URI> currentNodes = liveNodes.getLiveNodesInternal();
 
-    // Build list of available nodes (not yet used)
     List<URI> availableNodes = new ArrayList<>();
     for (URI node : currentNodes) {
       if (!usedNodes.contains(node)) {
@@ -141,48 +153,39 @@ public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
       return null;
     }
 
-    // Select a random node from available nodes
-    int index = getRandom().nextInt(availableNodes.size());
+    int index = ThreadLocalRandom.current().nextInt(availableNodes.size());
     nextNode = availableNodes.get(index);
-
     return nextNode;
   }
 
-  /**
-   * Returns true if there are more nodes available that haven't been returned yet.
-   *
-   * @return true if there are unused nodes available
-   */
   @Override
   public boolean hasNext() {
-    return computeNextIfNeeded() != null;
+    if (goRand != null) {
+      ensureInitialized();
+      return !remaining.isEmpty();
+    }
+    return computeNextNonSeeded() != null;
   }
 
-  /**
-   * Returns the next available node that hasn't been returned yet. Nodes are selected in
-   * pseudo-random order based on the seed.
-   *
-   * @return the next available node URI
-   * @throws NoSuchElementException if no more nodes are available
-   */
   @Override
   public URI next() {
-    URI node = computeNextIfNeeded();
+    if (goRand != null) {
+      URI node = pickAndRemove();
+      if (node == null) {
+        throw new NoSuchElementException("No more nodes available in query plan");
+      }
+      return node;
+    }
+
+    URI node = computeNextNonSeeded();
     if (node == null) {
       throw new NoSuchElementException("No more nodes available in query plan");
     }
-
-    lastUsedNode = nextNode;
+    usedNodes.add(node);
     nextNode = null;
-
     return node;
   }
 
-  /**
-   * Returns this iterator, allowing use in for-each loops.
-   *
-   * @return this iterator
-   */
   @Override
   public Iterator<URI> iterator() {
     return this;
