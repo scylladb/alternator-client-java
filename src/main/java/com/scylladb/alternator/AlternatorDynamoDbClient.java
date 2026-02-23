@@ -300,6 +300,41 @@ public class AlternatorDynamoDbClient {
     }
 
     /**
+     * Sets the refresh interval for updating the node list when there are active requests.
+     *
+     * <p>When requests are being made to the cluster, the node list is refreshed at this interval
+     * to quickly detect topology changes.
+     *
+     * <p>Default: {@link AlternatorConfig#DEFAULT_ACTIVE_REFRESH_INTERVAL_MS} (1000ms / 1 second)
+     *
+     * @param intervalMs the refresh interval in milliseconds, must be positive
+     * @return this builder instance
+     * @since 1.0.8
+     */
+    public AlternatorDynamoDbClientBuilder withActiveRefreshIntervalMs(long intervalMs) {
+      configBuilder.withActiveRefreshIntervalMs(intervalMs);
+      return this;
+    }
+
+    /**
+     * Sets the refresh interval for updating the node list when the client is idle.
+     *
+     * <p>When no requests have been made recently, the node list is refreshed at this longer
+     * interval to reduce unnecessary network traffic while still keeping the node list reasonably
+     * up-to-date.
+     *
+     * <p>Default: {@link AlternatorConfig#DEFAULT_IDLE_REFRESH_INTERVAL_MS} (60000ms / 1 minute)
+     *
+     * @param intervalMs the refresh interval in milliseconds, must be positive
+     * @return this builder instance
+     * @since 1.0.8
+     */
+    public AlternatorDynamoDbClientBuilder withIdleRefreshIntervalMs(long intervalMs) {
+      configBuilder.withIdleRefreshIntervalMs(intervalMs);
+      return this;
+    }
+
+    /**
      * Sets the complete Alternator configuration.
      *
      * <p>This method allows setting all Alternator-specific configuration options at once using a
@@ -327,7 +362,10 @@ public class AlternatorDynamoDbClient {
      * @param config the Alternator configuration
      * @return this builder instance
      * @since 2.0.0
+     * @deprecated Use individual builder methods instead (e.g., {@link #withRoutingScope}, {@link
+     *     #withCompressionAlgorithm}, {@link #withTlsConfig}, etc.)
      */
+    @Deprecated
     public AlternatorDynamoDbClientBuilder withAlternatorConfig(AlternatorConfig config) {
       if (config != null) {
         configBuilder.withRoutingScope(config.getRoutingScope());
