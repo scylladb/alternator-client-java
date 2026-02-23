@@ -563,3 +563,77 @@ The default configuration works well for most use cases. Consider adjusting sett
 - **Memory constraints**: Decrease `sessionCacheSize` on memory-limited systems
 - **Long-running connections**: Default settings are optimal; session resumption primarily
   benefits reconnection scenarios
+
+### Key Route Affinity (LWT Optimization)
+
+Key route affinity is an optimization for Lightweight Transactions (LWT) that use Paxos
+consensus. By routing all requests with the same partition key to the same coordinator node,
+it reduces Paxos round-trips and improves latency for conditional writes.
+
+**Note:** Key route affinity only works reliably with synchronous DynamoDB clients
+(`DynamoDbClient`). Do not use it with `DynamoDbAsyncClient` due to cross-thread
+execution limitations.
+
+#### Quick start
+
+The simplest way to enable key route affinity is to pass an affinity mode directly:
+
+```java
+import com.scylladb.alternator.AlternatorDynamoDbClient;
+import com.scylladb.alternator.keyrouting.KeyRouteAffinity;
+
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://127.0.0.1:8043"))
+    .credentialsProvider(myCredentials)
+    .withKeyRouteAffinity(KeyRouteAffinity.RMW)
+    .build();
+```
+
+#### Affinity modes
+
+| Mode | Description |
+|------|-------------|
+| `KeyRouteAffinity.NONE` | Default — standard round-robin load balancing |
+| `KeyRouteAffinity.RMW` | Optimize read-before-write operations (conditional updates/puts/deletes with `ConditionExpression`, `Expected`, or non-NONE `ReturnValues`) |
+| `KeyRouteAffinity.ANY_WRITE` | Optimize all write operations (`PutItem`, `UpdateItem`, `DeleteItem`, `BatchWriteItem`) |
+
+#### Pre-configuring partition key names
+
+By default, the library auto-discovers partition key names via `DescribeTable` on first
+use of each table. To avoid this initial lookup, you can pre-configure them:
+
+```java
+import com.scylladb.alternator.keyrouting.KeyRouteAffinityConfig;
+
+KeyRouteAffinityConfig keyAffinity = KeyRouteAffinityConfig.builder()
+    .withType(KeyRouteAffinity.RMW)
+    .withPkInfo("users", "user_id")
+    .withPkInfo("orders", "order_id")
+    .build();
+
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://127.0.0.1:8043"))
+    .credentialsProvider(myCredentials)
+    .withKeyRouteAffinity(keyAffinity)
+    .build();
+```
+
+#### How it works
+
+1. The `AffinityQueryPlanInterceptor` intercepts each DynamoDB request
+2. For qualifying operations, it extracts the partition key value from the request
+3. A deterministic hash (MurmurHash3) of the partition key selects a consistent node
+4. All requests for the same partition key are routed to the same Alternator node
+5. Non-qualifying operations continue to use round-robin load balancing
+
+#### When to use key route affinity
+
+Key route affinity is recommended for:
+- Conditional writes (`ConditionExpression`) on frequently updated keys
+- Read-modify-write patterns that benefit from same-node coordination
+- Workloads with high contention on specific partition keys
+
+Key route affinity may not be beneficial for:
+- Read-heavy workloads (reads don't use Paxos)
+- Workloads with uniformly distributed writes across many keys
+- Async clients (use sync clients only)
