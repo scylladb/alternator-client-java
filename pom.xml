@@ -166,6 +166,7 @@
                         <configuration>
                             <sources>
                                 <source>src/integration-test/java</source>
+                                <source>src/demo/java</source>
                             </sources>
                         </configuration>
                     </execution>
