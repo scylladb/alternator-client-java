@@ -4,7 +4,7 @@
 
     <groupId>com.scylladb.alternator</groupId>
     <artifactId>load-balancing</artifactId>
-    <version>2.0.1</version>
+    <version>2.0.2-SNAPSHOT</version>
     <name>Scylla Alternator client performing load balancing</name>
     <description>DynamoDB client request handler balancing the load across all the nodes of a Scylla cluster</description>
     <url>https://github.com/scylladb/alternator-client-java</url>
@@ -136,7 +136,7 @@
         <connection>scm:git:https://github.com/scylladb/alternator-client-java</connection>
         <developerConnection>scm:git:https://github.com/scylladb/alternator-client-java</developerConnection>
         <url>https://github.com/scylladb/alternator-client-java</url>
-        <tag>2.0.1</tag>
+        <tag>HEAD</tag>
     </scm>
     <developers>
         <developer>
