@@ -10,7 +10,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.MalformedURLException;
-import java.net.ProtocolException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.*;
@@ -23,8 +22,7 @@ import java.util.logging.Logger;
 import java.util.stream.Collectors;
 import javax.net.ssl.SSLContext;
 import org.apache.http.HttpEntity;
-import org.apache.http.HttpResponse;
-import org.apache.http.client.HttpClient;
+import org.apache.http.client.methods.CloseableHttpResponse;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.config.RegistryBuilder;
 import org.apache.http.conn.socket.ConnectionSocketFactory;
@@ -32,8 +30,11 @@ import org.apache.http.conn.socket.PlainConnectionSocketFactory;
 import org.apache.http.conn.ssl.DefaultHostnameVerifier;
 import org.apache.http.conn.ssl.NoopHostnameVerifier;
 import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
+import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.HttpClients;
 import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
+import org.apache.http.pool.PoolStats;
+import org.apache.http.util.EntityUtils;
 
 /**
  * Maintains and automatically updates a list of known live Alternator nodes. Live Alternator nodes
@@ -52,7 +53,8 @@ public class AlternatorLiveNodes extends Thread {
   private final AtomicInteger nextLiveNodeIndex;
   private final AlternatorConfig config;
   private final AtomicBoolean running = new AtomicBoolean(false);
-  private final HttpClient httpClient;
+  private final CloseableHttpClient httpClient;
+  private final PoolingHttpClientConnectionManager httpConnectionManager;
   private final AtomicLong lastActivityTime = new AtomicLong(0);
 
   private static Logger logger = Logger.getLogger(AlternatorLiveNodes.class.getName());
@@ -76,7 +78,17 @@ public class AlternatorLiveNodes extends Thread {
         }
       }
     } finally {
+      closeHttpClient();
       logger.log(Level.INFO, "AlternatorLiveNodes thread stopped");
+    }
+  }
+
+  /** Closes the internal HTTP client and releases its connection pool resources. */
+  private void closeHttpClient() {
+    try {
+      httpClient.close();
+    } catch (IOException e) {
+      logger.log(Level.WARNING, "Failed to close HTTP client", e);
     }
   }
 
@@ -274,7 +286,8 @@ public class AlternatorLiveNodes extends Thread {
       throw new RuntimeException(e);
     }
     this.liveNodes.set(initialNodes);
-    this.httpClient = prepareHttpClient(config.getTlsConfig());
+    this.httpConnectionManager = createConnectionManager(config.getTlsConfig());
+    this.httpClient = HttpClients.custom().setConnectionManager(httpConnectionManager).build();
   }
 
   /**
@@ -425,7 +438,7 @@ public class AlternatorLiveNodes extends Thread {
     return result;
   }
 
-  private void updateLiveNodes() throws IOException {
+  void updateLiveNodes() throws IOException {
     RoutingScope scope = this.config.getRoutingScope();
     while (scope != null) {
       String query = scope.getLocalNodesQuery();
@@ -453,47 +466,40 @@ public class AlternatorLiveNodes extends Thread {
   }
 
   private List<URI> getNodes(URI uri) throws IOException {
-    // Note that despite this being called HttpURLConnection, it actually
-    // supports HTTPS as well.
-    HttpResponse httpResponse;
-    try {
-      httpResponse = httpClient.execute(new HttpGet(uri));
+    try (CloseableHttpResponse httpResponse = httpClient.execute(new HttpGet(uri))) {
       if (httpResponse.getStatusLine().getStatusCode() != HttpURLConnection.HTTP_OK) {
+        EntityUtils.consume(httpResponse.getEntity());
         return Collections.emptyList();
       }
-    } catch (ProtocolException e) {
-      // It can happen only of conn is already connected or "GET" is not a valid method
-      // Both cases not true, os it should happen
-      throw new RuntimeException(e);
-    }
-    String response = streamToString(httpResponse.getEntity());
-    // response looks like: ["127.0.0.2","127.0.0.3","127.0.0.1"]
-    response = response.trim();
-    response = response.substring(1, response.length() - 1);
-    String[] list = response.split(",");
-    List<URI> newHosts = new ArrayList<>();
-    for (String host : list) {
-      if (host.isEmpty()) {
-        continue;
+      String response = streamToString(httpResponse.getEntity());
+      // response looks like: ["127.0.0.2","127.0.0.3","127.0.0.1"]
+      response = response.trim();
+      response = response.substring(1, response.length() - 1);
+      String[] list = response.split(",");
+      List<URI> newHosts = new ArrayList<>();
+      for (String host : list) {
+        if (host.isEmpty()) {
+          continue;
+        }
+        host = host.trim();
+        host = host.substring(1, host.length() - 1);
+        try {
+          newHosts.add(this.hostToURI(host));
+        } catch (URISyntaxException | MalformedURLException e) {
+          logger.log(Level.WARNING, "Invalid host: " + host, e);
+        }
       }
-      host = host.trim();
-      host = host.substring(1, host.length() - 1);
-      try {
-        newHosts.add(this.hostToURI(host));
-      } catch (URISyntaxException | MalformedURLException e) {
-        logger.log(Level.WARNING, "Invalid host: " + host, e);
-      }
+      return newHosts;
     }
-    return newHosts;
   }
 
   /**
-   * Creates an HTTP client configured with TLS settings from the provided configuration.
+   * Creates a connection manager configured with TLS settings from the provided configuration.
    *
    * @param tlsConfig the TLS configuration
-   * @return a configured HTTP client
+   * @return a configured connection manager
    */
-  private static HttpClient prepareHttpClient(TlsConfig tlsConfig) {
+  private static PoolingHttpClientConnectionManager createConnectionManager(TlsConfig tlsConfig) {
     RegistryBuilder<ConnectionSocketFactory> socketFactoryRegistryBuilder =
         RegistryBuilder.<ConnectionSocketFactory>create()
             .register("http", PlainConnectionSocketFactory.getSocketFactory())
@@ -511,11 +517,20 @@ public class AlternatorLiveNodes extends Thread {
     socketFactoryRegistryBuilder.register(
         "https", new SSLConnectionSocketFactory(sslContext, hostnameVerifier));
 
-    PoolingHttpClientConnectionManager httpConnectionManager =
+    PoolingHttpClientConnectionManager connectionManager =
         new PoolingHttpClientConnectionManager(socketFactoryRegistryBuilder.build());
-    httpConnectionManager.setMaxTotal(200);
-    httpConnectionManager.setDefaultMaxPerRoute(1);
-    return HttpClients.custom().setConnectionManager(httpConnectionManager).build();
+    connectionManager.setMaxTotal(200);
+    connectionManager.setDefaultMaxPerRoute(1);
+    return connectionManager;
+  }
+
+  /**
+   * Returns the connection pool stats. Intended for testing only.
+   *
+   * @return the pool stats from the underlying connection manager
+   */
+  PoolStats getConnectionPoolStats() {
+    return httpConnectionManager.getTotalStats();
   }
 
   /** Exception thrown when a check operation cannot be completed. */
