@@ -79,7 +79,7 @@ test-integration: scylla-start
 	@echo "Waiting for Scylla cluster to be ready..."
 	sleep 30
 	INTEGRATION_TESTS=true ALTERNATOR_HOST=172.39.0.2 ALTERNATOR_PORT=9998 ALTERNATOR_HTTPS=false \
-		${mvn} test -Dtest=AlternatorDynamoDbClientIT,AlternatorDynamoDbAsyncClientIT,TlsConfigIT,TlsSessionResumptionIT || (make scylla-stop && exit 1)
+		${mvn} test -Dtest=AlternatorDynamoDbClientIT,AlternatorDynamoDbAsyncClientIT,TlsConfigIT,TlsSessionResumptionIT,com.scylladb.alternator.internal.ConnectionPoolIT || (make scylla-stop && exit 1)
 	make scylla-stop
 
 .PHONY: test-demo
