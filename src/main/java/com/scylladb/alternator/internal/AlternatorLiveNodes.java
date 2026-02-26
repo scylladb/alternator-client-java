@@ -20,6 +20,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
+import javax.net.ssl.HostnameVerifier;
 import javax.net.ssl.SSLContext;
 import org.apache.http.HttpEntity;
 import org.apache.http.client.methods.CloseableHttpResponse;
@@ -509,7 +510,7 @@ public class AlternatorLiveNodes extends Thread {
     SSLContext sslContext = TlsContextFactory.createSslContext(tlsConfig);
 
     // Choose hostname verifier based on config
-    javax.net.ssl.HostnameVerifier hostnameVerifier =
+    HostnameVerifier hostnameVerifier =
         (tlsConfig != null && tlsConfig.isVerifyHostname())
             ? new DefaultHostnameVerifier()
             : NoopHostnameVerifier.INSTANCE;
