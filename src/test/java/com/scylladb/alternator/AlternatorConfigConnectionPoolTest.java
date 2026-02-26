@@ -28,8 +28,7 @@ public class AlternatorConfigConnectionPoolTest {
 
   @Test
   public void testCustomMaxConnections() {
-    AlternatorConfig config =
-        AlternatorConfig.builder().withMaxConnections(100).build();
+    AlternatorConfig config = AlternatorConfig.builder().withMaxConnections(100).build();
 
     assertEquals(100, config.getMaxConnections());
     assertTrue(config.hasCustomConnectionPoolSettings());
@@ -37,8 +36,7 @@ public class AlternatorConfigConnectionPoolTest {
 
   @Test
   public void testCustomConnectionMaxIdleTime() {
-    AlternatorConfig config =
-        AlternatorConfig.builder().withConnectionMaxIdleTimeMs(30000).build();
+    AlternatorConfig config = AlternatorConfig.builder().withConnectionMaxIdleTimeMs(30000).build();
 
     assertEquals(30000, config.getConnectionMaxIdleTimeMs());
     assertTrue(config.hasCustomConnectionPoolSettings());
@@ -46,8 +44,7 @@ public class AlternatorConfigConnectionPoolTest {
 
   @Test
   public void testCustomConnectionTimeToLive() {
-    AlternatorConfig config =
-        AlternatorConfig.builder().withConnectionTimeToLiveMs(60000).build();
+    AlternatorConfig config = AlternatorConfig.builder().withConnectionTimeToLiveMs(60000).build();
 
     assertEquals(60000, config.getConnectionTimeToLiveMs());
     assertTrue(config.hasCustomConnectionPoolSettings());
@@ -100,24 +97,21 @@ public class AlternatorConfigConnectionPoolTest {
 
   @Test
   public void testHasCustomConnectionPoolSettingsWithOnlyMaxConnections() {
-    AlternatorConfig config =
-        AlternatorConfig.builder().withMaxConnections(50).build();
+    AlternatorConfig config = AlternatorConfig.builder().withMaxConnections(50).build();
 
     assertTrue(config.hasCustomConnectionPoolSettings());
   }
 
   @Test
   public void testHasCustomConnectionPoolSettingsWithOnlyIdleTime() {
-    AlternatorConfig config =
-        AlternatorConfig.builder().withConnectionMaxIdleTimeMs(10000).build();
+    AlternatorConfig config = AlternatorConfig.builder().withConnectionMaxIdleTimeMs(10000).build();
 
     assertTrue(config.hasCustomConnectionPoolSettings());
   }
 
   @Test
   public void testHasCustomConnectionPoolSettingsWithOnlyTtl() {
-    AlternatorConfig config =
-        AlternatorConfig.builder().withConnectionTimeToLiveMs(120000).build();
+    AlternatorConfig config = AlternatorConfig.builder().withConnectionTimeToLiveMs(120000).build();
 
     assertTrue(config.hasCustomConnectionPoolSettings());
   }

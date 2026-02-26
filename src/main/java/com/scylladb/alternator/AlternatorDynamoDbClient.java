@@ -368,8 +368,7 @@ public class AlternatorDynamoDbClient {
      * @return this builder instance
      * @since 2.0.2
      */
-    public AlternatorDynamoDbClientBuilder withConnectionTimeToLiveMs(
-        long connectionTimeToLiveMs) {
+    public AlternatorDynamoDbClientBuilder withConnectionTimeToLiveMs(long connectionTimeToLiveMs) {
       configBuilder.withConnectionTimeToLiveMs(connectionTimeToLiveMs);
       return this;
     }
