@@ -4,8 +4,11 @@ import static org.junit.Assert.*;
 
 import com.scylladb.alternator.internal.AlternatorLiveNodes;
 import com.scylladb.alternator.queryplan.BasicQueryPlanInterceptor;
+import java.io.IOException;
+import java.net.ServerSocket;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.Test;
@@ -31,6 +34,9 @@ import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
  *
  * <p>The enhanced client wraps the standard DynamoDbClient, so load balancing should work
  * transparently when the underlying client is created with AlternatorDynamoDbClient.builder().
+ *
+ * <p>Uses loopback addresses (127.0.0.x) instead of fake hostnames to avoid DNS lookup timeouts.
+ * Connection-refused errors on loopback addresses are instant, keeping unit tests fast.
  */
 public class DynamoDbEnhancedClientTest {
 
@@ -68,15 +74,36 @@ public class DynamoDbEnhancedClientTest {
   private static final StaticCredentialsProvider TEST_CREDENTIALS =
       StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test"));
 
-  @Test
-  public void testEnhancedClientCanBeBuiltFromAlternatorClient() throws URISyntaxException {
-    List<URI> nodes =
-        Arrays.asList(
-            new URI("http://node1.example.com:8000"),
-            new URI("http://node2.example.com:8000"),
-            new URI("http://node3.example.com:8000"));
+  /**
+   * Returns a free local port. The port is released immediately so it can be used by the test. This
+   * ensures connection-refused errors (instant) instead of DNS lookup timeouts (slow).
+   */
+  private static int findFreePort() throws IOException {
+    try (ServerSocket socket = new ServerSocket(0)) {
+      return socket.getLocalPort();
+    }
+  }
 
-    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(nodes, "http", 8000, "", "");
+  /**
+   * Creates 3 loopback-address URIs on a random unused port for fast-failing connection tests. Uses
+   * distinct loopback IPs (127.0.0.1, 127.0.0.2, 127.0.0.3) so AlternatorLiveNodes treats them as
+   * separate nodes, while avoiding DNS lookup timeouts that occur with fake hostnames.
+   */
+  private static List<URI> createLocalNodes() throws IOException, URISyntaxException {
+    int port = findFreePort();
+    return Arrays.asList(
+        new URI("http://127.0.0.1:" + port),
+        new URI("http://127.0.0.2:" + port),
+        new URI("http://127.0.0.3:" + port));
+  }
+
+  @Test
+  public void testEnhancedClientCanBeBuiltFromAlternatorClient()
+      throws URISyntaxException, IOException {
+    List<URI> nodes = createLocalNodes();
+
+    AlternatorLiveNodes liveNodes =
+        new AlternatorLiveNodes(nodes, "http", nodes.get(0).getPort(), "", "");
     BasicQueryPlanInterceptor interceptor = new BasicQueryPlanInterceptor(liveNodes);
 
     ClientOverrideConfiguration overrideConfig =
@@ -106,14 +133,11 @@ public class DynamoDbEnhancedClientTest {
 
   @Test
   public void testEnhancedAsyncClientCanBeBuiltFromAlternatorAsyncClient()
-      throws URISyntaxException {
-    List<URI> nodes =
-        Arrays.asList(
-            new URI("http://node1.example.com:8000"),
-            new URI("http://node2.example.com:8000"),
-            new URI("http://node3.example.com:8000"));
+      throws URISyntaxException, IOException {
+    List<URI> nodes = createLocalNodes();
 
-    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(nodes, "http", 8000, "", "");
+    AlternatorLiveNodes liveNodes =
+        new AlternatorLiveNodes(nodes, "http", nodes.get(0).getPort(), "", "");
     BasicQueryPlanInterceptor interceptor = new BasicQueryPlanInterceptor(liveNodes);
 
     ClientOverrideConfiguration overrideConfig =
@@ -137,14 +161,11 @@ public class DynamoDbEnhancedClientTest {
   }
 
   @Test
-  public void testLoadBalancingWorksWithEnhancedClient() throws URISyntaxException {
-    List<URI> nodes =
-        Arrays.asList(
-            new URI("http://node1.example.com:8000"),
-            new URI("http://node2.example.com:8000"),
-            new URI("http://node3.example.com:8000"));
+  public void testLoadBalancingWorksWithEnhancedClient() throws URISyntaxException, IOException {
+    List<URI> nodes = createLocalNodes();
 
-    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(nodes, "http", 8000, "", "");
+    AlternatorLiveNodes liveNodes =
+        new AlternatorLiveNodes(nodes, "http", nodes.get(0).getPort(), "", "");
     BasicQueryPlanInterceptor interceptor = new BasicQueryPlanInterceptor(liveNodes);
 
     // Track which hosts are being targeted
@@ -166,6 +187,7 @@ public class DynamoDbEnhancedClientTest {
         ClientOverrideConfiguration.builder()
             .addExecutionInterceptor(interceptor)
             .addExecutionInterceptor(hostTracker)
+            .apiCallTimeout(Duration.ofMillis(500))
             .build();
 
     DynamoDbClient client =
@@ -198,22 +220,20 @@ public class DynamoDbEnhancedClientTest {
     // With random distribution over 30 requests across 3 nodes, we should hit all nodes
     assertEquals(
         "Random distribution should hit all 3 nodes over 30+ requests", 3, targetedHosts.size());
-    assertTrue("Should have targeted node1", targetedHosts.contains("node1.example.com"));
-    assertTrue("Should have targeted node2", targetedHosts.contains("node2.example.com"));
-    assertTrue("Should have targeted node3", targetedHosts.contains("node3.example.com"));
+    assertTrue("Should have targeted 127.0.0.1", targetedHosts.contains("127.0.0.1"));
+    assertTrue("Should have targeted 127.0.0.2", targetedHosts.contains("127.0.0.2"));
+    assertTrue("Should have targeted 127.0.0.3", targetedHosts.contains("127.0.0.3"));
 
     client.close();
   }
 
   @Test
-  public void testLoadBalancingWorksWithEnhancedAsyncClient() throws URISyntaxException {
-    List<URI> nodes =
-        Arrays.asList(
-            new URI("http://node1.example.com:8000"),
-            new URI("http://node2.example.com:8000"),
-            new URI("http://node3.example.com:8000"));
+  public void testLoadBalancingWorksWithEnhancedAsyncClient()
+      throws URISyntaxException, IOException {
+    List<URI> nodes = createLocalNodes();
 
-    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(nodes, "http", 8000, "", "");
+    AlternatorLiveNodes liveNodes =
+        new AlternatorLiveNodes(nodes, "http", nodes.get(0).getPort(), "", "");
     BasicQueryPlanInterceptor interceptor = new BasicQueryPlanInterceptor(liveNodes);
 
     // Track which hosts are being targeted
@@ -235,6 +255,7 @@ public class DynamoDbEnhancedClientTest {
         ClientOverrideConfiguration.builder()
             .addExecutionInterceptor(interceptor)
             .addExecutionInterceptor(hostTracker)
+            .apiCallTimeout(Duration.ofMillis(500))
             .build();
 
     DynamoDbAsyncClient asyncClient =
@@ -272,22 +293,19 @@ public class DynamoDbEnhancedClientTest {
     // With random distribution over 30 requests across 3 nodes, we should hit all nodes
     assertEquals(
         "Random distribution should hit all 3 nodes over 30+ requests", 3, targetedHosts.size());
-    assertTrue("Should have targeted node1", targetedHosts.contains("node1.example.com"));
-    assertTrue("Should have targeted node2", targetedHosts.contains("node2.example.com"));
-    assertTrue("Should have targeted node3", targetedHosts.contains("node3.example.com"));
+    assertTrue("Should have targeted 127.0.0.1", targetedHosts.contains("127.0.0.1"));
+    assertTrue("Should have targeted 127.0.0.2", targetedHosts.contains("127.0.0.2"));
+    assertTrue("Should have targeted 127.0.0.3", targetedHosts.contains("127.0.0.3"));
 
     asyncClient.close();
   }
 
   @Test
-  public void testEnhancedClientWithQueryPlanInterceptor() throws URISyntaxException {
-    List<URI> nodes =
-        Arrays.asList(
-            new URI("http://node1.example.com:8000"),
-            new URI("http://node2.example.com:8000"),
-            new URI("http://node3.example.com:8000"));
+  public void testEnhancedClientWithQueryPlanInterceptor() throws URISyntaxException, IOException {
+    List<URI> nodes = createLocalNodes();
 
-    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(nodes, "http", 8000, "", "");
+    AlternatorLiveNodes liveNodes =
+        new AlternatorLiveNodes(nodes, "http", nodes.get(0).getPort(), "", "");
     BasicQueryPlanInterceptor interceptor = new BasicQueryPlanInterceptor(liveNodes);
 
     // Track hosts
@@ -306,6 +324,7 @@ public class DynamoDbEnhancedClientTest {
         ClientOverrideConfiguration.builder()
             .addExecutionInterceptor(interceptor)
             .addExecutionInterceptor(hostTracker)
+            .apiCallTimeout(Duration.ofMillis(500))
             .build();
 
     // Using BasicQueryPlanInterceptor for load balancing

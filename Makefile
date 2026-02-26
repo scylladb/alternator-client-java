@@ -74,18 +74,37 @@ compile-demo:
 test-unit:
 	${mvn} test
 
+.PHONY: wait-for-alternator
+wait-for-alternator:
+	@echo "Waiting for Alternator to be ready..."
+	@for i in $$(seq 1 60); do \
+		if curl -sf http://172.39.0.2:9998/ >/dev/null 2>&1; then \
+			echo "Alternator is ready (waited $${i}s)"; \
+			break; \
+		fi; \
+		if [ $$i -eq 60 ]; then \
+			echo "Timed out waiting for Alternator"; \
+			exit 1; \
+		fi; \
+		sleep 1; \
+	done
+
 .PHONY: test-integration
-test-integration: scylla-start
-	@echo "Waiting for Scylla cluster to be ready..."
-	sleep 30
+test-integration: scylla-start wait-for-alternator
 	INTEGRATION_TESTS=true ALTERNATOR_HOST=172.39.0.2 ALTERNATOR_PORT=9998 ALTERNATOR_HTTPS=false \
 		${mvn} test -Dtest=AlternatorDynamoDbClientIT,AlternatorDynamoDbAsyncClientIT,TlsConfigIT,TlsSessionResumptionIT,com.scylladb.alternator.internal.ConnectionPoolIT || (make scylla-stop && exit 1)
 	make scylla-stop
 
 .PHONY: test-demo
-test-demo: scylla-start
-	@echo "Waiting for Scylla cluster to be ready..."
-	sleep 30
+test-demo: scylla-start wait-for-alternator
+	${mvn} exec:java -Dexec.mainClass=com.scylladb.alternator.demo.Demo2 -Dexec.classpathScope=test -Dexec.args="--endpoint http://172.39.0.2:9998" || (make scylla-stop && exit 1)
+	${mvn} exec:java -Dexec.mainClass=com.scylladb.alternator.demo.Demo3 -Dexec.classpathScope=test -Dexec.args="--endpoint http://172.39.0.2:9998" || (make scylla-stop && exit 1)
+	make scylla-stop
+
+.PHONY: test-all
+test-all: scylla-start wait-for-alternator
+	INTEGRATION_TESTS=true ALTERNATOR_HOST=172.39.0.2 ALTERNATOR_PORT=9998 ALTERNATOR_HTTPS=false \
+		${mvn} test -Dtest=AlternatorDynamoDbClientIT,AlternatorDynamoDbAsyncClientIT,TlsConfigIT,TlsSessionResumptionIT,com.scylladb.alternator.internal.ConnectionPoolIT || (make scylla-stop && exit 1)
 	${mvn} exec:java -Dexec.mainClass=com.scylladb.alternator.demo.Demo2 -Dexec.classpathScope=test -Dexec.args="--endpoint http://172.39.0.2:9998" || (make scylla-stop && exit 1)
 	${mvn} exec:java -Dexec.mainClass=com.scylladb.alternator.demo.Demo3 -Dexec.classpathScope=test -Dexec.args="--endpoint http://172.39.0.2:9998" || (make scylla-stop && exit 1)
 	make scylla-stop
