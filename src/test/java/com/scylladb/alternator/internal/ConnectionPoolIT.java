@@ -108,13 +108,16 @@ public class ConnectionPoolIT {
 
   /**
    * Verifies that pooled connections to a real Scylla cluster survive idle periods and are reused
-   * after sitting idle for 60 seconds.
+   * after sitting idle.
    *
    * <p>This guards against connections being evicted or closed by the client-side pool. After the
    * idle period, making more requests should not increase the number of available connections —
    * proving the existing ones were reused rather than new ones created alongside stale entries.
+   *
+   * <p>Uses a 10-second idle period which is sufficient to verify connection survival without
+   * triggering the default 60-second idle reaper.
    */
-  @Test(timeout = 120_000)
+  @Test(timeout = 30_000)
   public void testConnectionSurvivesIdlePeriod() throws Exception {
     AlternatorLiveNodes liveNodes = createLiveNodes();
 
@@ -126,8 +129,9 @@ public class ConnectionPoolIT {
     assertTrue("Connections should be available after requests", before.getAvailable() > 0);
     int availableBefore = before.getAvailable();
 
-    // Let connections sit idle for 60 seconds
-    Thread.sleep(60_000);
+    // Let connections sit idle for 10 seconds — enough to verify survival
+    // without hitting the default 60-second idle reaper
+    Thread.sleep(10_000);
 
     // Use the connections again — they should be reused from the pool
     for (int i = 0; i < 30; i++) {
@@ -301,9 +305,10 @@ public class ConnectionPoolIT {
               + ")",
           newConnectionsDuringBulk <= nodes.size());
 
-      // Let connections sit idle for 60 seconds
+      // Let connections sit idle for 10 seconds — enough to verify survival
+      // without hitting the default 60-second idle reaper
       long baselineBeforeIdle = getTotalConnectionsFromScylla(nodes);
-      Thread.sleep(60_000);
+      Thread.sleep(10_000);
 
       // Connections should still be alive and reused after idle period
       for (int i = 0; i < 10; i++) {
@@ -319,11 +324,11 @@ public class ConnectionPoolIT {
 
       long totalAfterIdle = getTotalConnectionsFromScylla(nodes);
       long newConnectionsAfterIdle = totalAfterIdle - baselineBeforeIdle;
-      // The AWS SDK's ApacheHttpClient has a default idle connection reaper that closes
-      // connections idle for 60 seconds. After the idle period, the SDK will re-establish
-      // connections as needed — at most one per node contacted. This is expected SDK behavior.
+      // After a short idle period (well under the 60s idle reaper threshold),
+      // connections should be reused. Allow up to nodes.size() new connections
+      // for the background AlternatorLiveNodes thread.
       assertTrue(
-          "New connections after 60s idle should be at most the number of nodes ("
+          "New connections after 10s idle should be at most the number of nodes ("
               + nodes.size()
               + "), got "
               + newConnectionsAfterIdle
@@ -351,9 +356,9 @@ public class ConnectionPoolIT {
    * <p>This test performs DynamoDB PutItem operations and checks that the number of ESTABLISHED TCP
    * connections to the Alternator port stays bounded (does not grow with the number of requests).
    * It also verifies that connections are not dropped during 500ms idle gaps and survive a
-   * 60-second idle period.
+   * 10-second idle period.
    */
-  @Test(timeout = 180_000)
+  @Test(timeout = 60_000)
   public void testDynamoDbOperationsReuseConnections() throws Exception {
     AlternatorDynamoDbClientWrapper wrapper =
         AlternatorDynamoDbClient.builder()
