@@ -20,6 +20,7 @@ import software.amazon.awssdk.http.async.SdkAsyncHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClientBuilder;
+import software.amazon.awssdk.awscore.endpoints.AccountIdEndpointMode;
 import software.amazon.awssdk.services.dynamodb.endpoints.DynamoDbEndpointProvider;
 import software.amazon.awssdk.utils.AttributeMap;
 
@@ -683,6 +684,24 @@ public class AlternatorDynamoDbAsyncClient {
     public AlternatorDynamoDbAsyncClientBuilder dualstackEnabled(Boolean dualstackEnabled) {
       throw new UnsupportedOperationException(
           "AlternatorDynamoDbAsyncClient does not support dual-stack networking (AWS-specific feature).");
+    }
+
+    /**
+     * Sets the account ID endpoint mode.
+     *
+     * <p>This is an AWS-specific feature for account ID-based endpoint routing. It is not used by
+     * Alternator but is implemented to satisfy the {@link
+     * software.amazon.awssdk.services.dynamodb.DynamoDbBaseClientBuilder} interface. The value is
+     * passed through to the underlying AWS SDK builder.
+     *
+     * @param accountIdEndpointMode the account ID endpoint mode
+     * @return this builder instance
+     */
+    @Override
+    public AlternatorDynamoDbAsyncClientBuilder accountIdEndpointMode(
+        AccountIdEndpointMode accountIdEndpointMode) {
+      delegate.accountIdEndpointMode(accountIdEndpointMode);
+      return this;
     }
 
     /**
