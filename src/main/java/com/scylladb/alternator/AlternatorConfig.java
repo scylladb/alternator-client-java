@@ -59,7 +59,7 @@ public class AlternatorConfig {
   /**
    * Default value for connection pool settings, indicating that the SDK default should be used.
    *
-   * @since 2.0.1
+   * @since 2.0.2
    */
   public static final int CONNECTION_POOL_DEFAULT = 0;
 
@@ -199,9 +199,9 @@ public class AlternatorConfig {
         activeRefreshIntervalMs > 0 ? activeRefreshIntervalMs : DEFAULT_ACTIVE_REFRESH_INTERVAL_MS;
     this.idleRefreshIntervalMs =
         idleRefreshIntervalMs > 0 ? idleRefreshIntervalMs : DEFAULT_IDLE_REFRESH_INTERVAL_MS;
-    this.maxConnections = Math.max(maxConnections, 0);
-    this.connectionMaxIdleTimeMs = Math.max(connectionMaxIdleTimeMs, 0);
-    this.connectionTimeToLiveMs = Math.max(connectionTimeToLiveMs, 0);
+    this.maxConnections = maxConnections;
+    this.connectionMaxIdleTimeMs = connectionMaxIdleTimeMs;
+    this.connectionTimeToLiveMs = connectionTimeToLiveMs;
   }
 
   /**
@@ -404,7 +404,7 @@ public class AlternatorConfig {
    * <p>A value of 0 means the SDK default will be used.
    *
    * @return the maximum number of connections, or 0 for SDK default
-   * @since 2.0.1
+   * @since 2.0.2
    */
   public int getMaxConnections() {
     return maxConnections;
@@ -417,7 +417,7 @@ public class AlternatorConfig {
    * the SDK default will be used.
    *
    * @return the maximum idle time in milliseconds, or 0 for SDK default
-   * @since 2.0.1
+   * @since 2.0.2
    */
   public long getConnectionMaxIdleTimeMs() {
     return connectionMaxIdleTimeMs;
@@ -430,7 +430,7 @@ public class AlternatorConfig {
    * the SDK default will be used.
    *
    * @return the connection time-to-live in milliseconds, or 0 for SDK default
-   * @since 2.0.1
+   * @since 2.0.2
    */
   public long getConnectionTimeToLiveMs() {
     return connectionTimeToLiveMs;
@@ -948,7 +948,7 @@ public class AlternatorConfig {
      *
      * @param maxConnections the maximum number of connections, or 0 to use SDK default
      * @return this builder instance
-     * @since 2.0.1
+     * @since 2.0.2
      */
     public Builder withMaxConnections(int maxConnections) {
       this.maxConnections = maxConnections;
@@ -965,7 +965,7 @@ public class AlternatorConfig {
      *
      * @param connectionMaxIdleTimeMs the maximum idle time in milliseconds, or 0 to use SDK default
      * @return this builder instance
-     * @since 2.0.1
+     * @since 2.0.2
      */
     public Builder withConnectionMaxIdleTimeMs(long connectionMaxIdleTimeMs) {
       this.connectionMaxIdleTimeMs = connectionMaxIdleTimeMs;
@@ -983,7 +983,7 @@ public class AlternatorConfig {
      * @param connectionTimeToLiveMs the connection time-to-live in milliseconds, or 0 to use SDK
      *     default
      * @return this builder instance
-     * @since 2.0.1
+     * @since 2.0.2
      */
     public Builder withConnectionTimeToLiveMs(long connectionTimeToLiveMs) {
       this.connectionTimeToLiveMs = connectionTimeToLiveMs;
@@ -994,14 +994,28 @@ public class AlternatorConfig {
      * Builds and returns an {@link AlternatorConfig} instance with the configured settings.
      *
      * @return a new {@link AlternatorConfig} instance
-     * @throws IllegalArgumentException if minCompressionSizeBytes is negative, or if
-     *     headersWhitelist is empty or missing required headers
+     * @throws IllegalArgumentException if minCompressionSizeBytes is negative, if connection pool
+     *     settings are negative, or if headersWhitelist is empty or missing required headers
      */
     public AlternatorConfig build() {
       // Validate minCompressionSizeBytes
       if (minCompressionSizeBytes < 0) {
         throw new IllegalArgumentException(
             "minCompressionSizeBytes must be non-negative, but was: " + minCompressionSizeBytes);
+      }
+
+      // Validate connection pool settings
+      if (maxConnections < 0) {
+        throw new IllegalArgumentException(
+            "maxConnections must be non-negative, but was: " + maxConnections);
+      }
+      if (connectionMaxIdleTimeMs < 0) {
+        throw new IllegalArgumentException(
+            "connectionMaxIdleTimeMs must be non-negative, but was: " + connectionMaxIdleTimeMs);
+      }
+      if (connectionTimeToLiveMs < 0) {
+        throw new IllegalArgumentException(
+            "connectionTimeToLiveMs must be non-negative, but was: " + connectionTimeToLiveMs);
       }
 
       // Validate headersWhitelist if it was explicitly set

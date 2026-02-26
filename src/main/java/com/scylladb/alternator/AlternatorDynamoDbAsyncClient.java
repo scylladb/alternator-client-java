@@ -317,6 +317,45 @@ public class AlternatorDynamoDbAsyncClient {
     }
 
     /**
+     * Sets the maximum number of connections in the HTTP client connection pool.
+     *
+     * @param maxConnections the maximum number of connections, or 0 to use SDK default
+     * @return this builder instance
+     * @since 2.0.2
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withMaxConnections(int maxConnections) {
+      configBuilder.withMaxConnections(maxConnections);
+      return this;
+    }
+
+    /**
+     * Sets the maximum idle time for pooled connections in milliseconds.
+     *
+     * @param connectionMaxIdleTimeMs the maximum idle time in milliseconds, or 0 to use SDK default
+     * @return this builder instance
+     * @since 2.0.2
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withConnectionMaxIdleTimeMs(
+        long connectionMaxIdleTimeMs) {
+      configBuilder.withConnectionMaxIdleTimeMs(connectionMaxIdleTimeMs);
+      return this;
+    }
+
+    /**
+     * Sets the maximum lifetime for pooled connections in milliseconds.
+     *
+     * @param connectionTimeToLiveMs the connection time-to-live in milliseconds, or 0 to use SDK
+     *     default
+     * @return this builder instance
+     * @since 2.0.2
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withConnectionTimeToLiveMs(
+        long connectionTimeToLiveMs) {
+      configBuilder.withConnectionTimeToLiveMs(connectionTimeToLiveMs);
+      return this;
+    }
+
+    /**
      * Sets the complete Alternator configuration.
      *
      * <p>This method allows setting all Alternator-specific configuration options at once using a
@@ -340,6 +379,9 @@ public class AlternatorDynamoDbAsyncClient {
         configBuilder.withKeyRouteAffinity(config.getKeyRouteAffinityConfig());
         configBuilder.withActiveRefreshIntervalMs(config.getActiveRefreshIntervalMs());
         configBuilder.withIdleRefreshIntervalMs(config.getIdleRefreshIntervalMs());
+        configBuilder.withMaxConnections(config.getMaxConnections());
+        configBuilder.withConnectionMaxIdleTimeMs(config.getConnectionMaxIdleTimeMs());
+        configBuilder.withConnectionTimeToLiveMs(config.getConnectionTimeToLiveMs());
       }
       return this;
     }
