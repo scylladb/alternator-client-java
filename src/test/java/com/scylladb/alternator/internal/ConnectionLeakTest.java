@@ -130,4 +130,31 @@ public class ConnectionLeakTest {
     PoolStats stats = liveNodes.getConnectionPoolStats();
     assertEquals("Leased connections after alternating responses", 0, stats.getLeased());
   }
+
+  /**
+   * Verifies that HTTP connections are kept in the pool and reused across multiple requests, rather
+   * than being created and destroyed for each request.
+   *
+   * <p>After multiple requests to the same host, the pool should have exactly 1 available
+   * connection (since maxPerRoute=1) and 0 leased connections. This proves that the connection was
+   * returned to the pool after each request and reused for the next one, rather than being closed
+   * and recreated.
+   */
+  @Test(timeout = 5000)
+  public void testConnectionsStayInPoolAndAreReused() throws Exception {
+    responseCode = 200;
+    responseBody = "[\"127.0.0.1\"]";
+    AlternatorLiveNodes liveNodes = createLiveNodes();
+
+    // Make several requests so the connection pool has a chance to stabilize
+    for (int i = 0; i < 10; i++) {
+      liveNodes.updateLiveNodes();
+    }
+
+    PoolStats stats = liveNodes.getConnectionPoolStats();
+    assertEquals("No connections should be leased after requests complete", 0, stats.getLeased());
+    assertEquals(
+        "Connection should remain available in the pool for reuse", 1, stats.getAvailable());
+    assertEquals("Pending requests should be zero", 0, stats.getPending());
+  }
 }

@@ -57,6 +57,13 @@ public class AlternatorConfig {
   public static final long DEFAULT_IDLE_REFRESH_INTERVAL_MS = 60000;
 
   /**
+   * Default value for connection pool settings, indicating that the SDK default should be used.
+   *
+   * @since 2.0.2
+   */
+  public static final int CONNECTION_POOL_DEFAULT = 0;
+
+  /**
    * Base HTTP headers required for proper operation with Alternator.
    *
    * <p>These headers are always required regardless of configuration:
@@ -116,6 +123,9 @@ public class AlternatorConfig {
   private final KeyRouteAffinityConfig keyRouteAffinityConfig;
   private final long activeRefreshIntervalMs;
   private final long idleRefreshIntervalMs;
+  private final int maxConnections;
+  private final long connectionMaxIdleTimeMs;
+  private final long connectionTimeToLiveMs;
 
   /**
    * Package-private constructor. Use {@link AlternatorConfig#builder()} to create instances.
@@ -134,6 +144,11 @@ public class AlternatorConfig {
    * @param keyRouteAffinityConfig the key route affinity configuration
    * @param activeRefreshIntervalMs refresh interval when there are active requests
    * @param idleRefreshIntervalMs refresh interval when the client is idle
+   * @param maxConnections maximum number of connections in the HTTP client pool (0 = SDK default)
+   * @param connectionMaxIdleTimeMs maximum idle time for pooled connections in milliseconds (0 =
+   *     SDK default)
+   * @param connectionTimeToLiveMs maximum lifetime for pooled connections in milliseconds (0 = SDK
+   *     default)
    */
   protected AlternatorConfig(
       List<String> seedHosts,
@@ -149,7 +164,10 @@ public class AlternatorConfig {
       TlsConfig tlsConfig,
       KeyRouteAffinityConfig keyRouteAffinityConfig,
       long activeRefreshIntervalMs,
-      long idleRefreshIntervalMs) {
+      long idleRefreshIntervalMs,
+      int maxConnections,
+      long connectionMaxIdleTimeMs,
+      long connectionTimeToLiveMs) {
     this.seedHosts =
         seedHosts != null
             ? Collections.unmodifiableList(new ArrayList<>(seedHosts))
@@ -181,6 +199,9 @@ public class AlternatorConfig {
         activeRefreshIntervalMs > 0 ? activeRefreshIntervalMs : DEFAULT_ACTIVE_REFRESH_INTERVAL_MS;
     this.idleRefreshIntervalMs =
         idleRefreshIntervalMs > 0 ? idleRefreshIntervalMs : DEFAULT_IDLE_REFRESH_INTERVAL_MS;
+    this.maxConnections = maxConnections;
+    this.connectionMaxIdleTimeMs = connectionMaxIdleTimeMs;
+    this.connectionTimeToLiveMs = connectionTimeToLiveMs;
   }
 
   /**
@@ -378,6 +399,53 @@ public class AlternatorConfig {
   }
 
   /**
+   * Gets the maximum number of connections in the HTTP client connection pool.
+   *
+   * <p>A value of 0 means the SDK default will be used.
+   *
+   * @return the maximum number of connections, or 0 for SDK default
+   * @since 2.0.2
+   */
+  public int getMaxConnections() {
+    return maxConnections;
+  }
+
+  /**
+   * Gets the maximum idle time for pooled connections in milliseconds.
+   *
+   * <p>Connections that have been idle longer than this value will be closed. A value of 0 means
+   * the SDK default will be used.
+   *
+   * @return the maximum idle time in milliseconds, or 0 for SDK default
+   * @since 2.0.2
+   */
+  public long getConnectionMaxIdleTimeMs() {
+    return connectionMaxIdleTimeMs;
+  }
+
+  /**
+   * Gets the maximum lifetime for pooled connections in milliseconds.
+   *
+   * <p>Connections older than this value will be closed regardless of activity. A value of 0 means
+   * the SDK default will be used.
+   *
+   * @return the connection time-to-live in milliseconds, or 0 for SDK default
+   * @since 2.0.2
+   */
+  public long getConnectionTimeToLiveMs() {
+    return connectionTimeToLiveMs;
+  }
+
+  /**
+   * Checks whether any custom connection pool settings have been configured.
+   *
+   * @return true if any connection pool setting differs from the default
+   */
+  boolean hasCustomConnectionPoolSettings() {
+    return maxConnections > 0 || connectionMaxIdleTimeMs > 0 || connectionTimeToLiveMs > 0;
+  }
+
+  /**
    * Returns the set of HTTP headers required for this configuration.
    *
    * <p>This method returns the minimum set of headers needed based on the current settings
@@ -422,6 +490,9 @@ public class AlternatorConfig {
     private KeyRouteAffinityConfig keyRouteAffinityConfig = null;
     private long activeRefreshIntervalMs = DEFAULT_ACTIVE_REFRESH_INTERVAL_MS;
     private long idleRefreshIntervalMs = DEFAULT_IDLE_REFRESH_INTERVAL_MS;
+    private int maxConnections = CONNECTION_POOL_DEFAULT;
+    private long connectionMaxIdleTimeMs = CONNECTION_POOL_DEFAULT;
+    private long connectionTimeToLiveMs = CONNECTION_POOL_DEFAULT;
 
     /** Package-private constructor. Use {@link AlternatorConfig#builder()} to create instances. */
     Builder() {}
@@ -867,17 +938,84 @@ public class AlternatorConfig {
     }
 
     /**
+     * Sets the maximum number of connections in the HTTP client connection pool.
+     *
+     * <p>This controls how many simultaneous connections the SDK HTTP client can open. Increasing
+     * this value is recommended for multi-node Alternator clusters to allow concurrent requests to
+     * different nodes.
+     *
+     * <p>Default: 0 (use SDK default)
+     *
+     * @param maxConnections the maximum number of connections, or 0 to use SDK default
+     * @return this builder instance
+     * @since 2.0.2
+     */
+    public Builder withMaxConnections(int maxConnections) {
+      this.maxConnections = maxConnections;
+      return this;
+    }
+
+    /**
+     * Sets the maximum idle time for pooled connections in milliseconds.
+     *
+     * <p>Connections that have been idle longer than this value will be closed and removed from the
+     * pool. This helps reclaim resources when the cluster is underutilized.
+     *
+     * <p>Default: 0 (use SDK default)
+     *
+     * @param connectionMaxIdleTimeMs the maximum idle time in milliseconds, or 0 to use SDK default
+     * @return this builder instance
+     * @since 2.0.2
+     */
+    public Builder withConnectionMaxIdleTimeMs(long connectionMaxIdleTimeMs) {
+      this.connectionMaxIdleTimeMs = connectionMaxIdleTimeMs;
+      return this;
+    }
+
+    /**
+     * Sets the maximum lifetime for pooled connections in milliseconds.
+     *
+     * <p>Connections older than this value will be closed regardless of activity. This is useful
+     * for ensuring connections are periodically refreshed to pick up DNS or load balancer changes.
+     *
+     * <p>Default: 0 (use SDK default)
+     *
+     * @param connectionTimeToLiveMs the connection time-to-live in milliseconds, or 0 to use SDK
+     *     default
+     * @return this builder instance
+     * @since 2.0.2
+     */
+    public Builder withConnectionTimeToLiveMs(long connectionTimeToLiveMs) {
+      this.connectionTimeToLiveMs = connectionTimeToLiveMs;
+      return this;
+    }
+
+    /**
      * Builds and returns an {@link AlternatorConfig} instance with the configured settings.
      *
      * @return a new {@link AlternatorConfig} instance
-     * @throws IllegalArgumentException if minCompressionSizeBytes is negative, or if
-     *     headersWhitelist is empty or missing required headers
+     * @throws IllegalArgumentException if minCompressionSizeBytes is negative, if connection pool
+     *     settings are negative, or if headersWhitelist is empty or missing required headers
      */
     public AlternatorConfig build() {
       // Validate minCompressionSizeBytes
       if (minCompressionSizeBytes < 0) {
         throw new IllegalArgumentException(
             "minCompressionSizeBytes must be non-negative, but was: " + minCompressionSizeBytes);
+      }
+
+      // Validate connection pool settings
+      if (maxConnections < 0) {
+        throw new IllegalArgumentException(
+            "maxConnections must be non-negative, but was: " + maxConnections);
+      }
+      if (connectionMaxIdleTimeMs < 0) {
+        throw new IllegalArgumentException(
+            "connectionMaxIdleTimeMs must be non-negative, but was: " + connectionMaxIdleTimeMs);
+      }
+      if (connectionTimeToLiveMs < 0) {
+        throw new IllegalArgumentException(
+            "connectionTimeToLiveMs must be non-negative, but was: " + connectionTimeToLiveMs);
       }
 
       // Validate headersWhitelist if it was explicitly set
@@ -942,7 +1080,10 @@ public class AlternatorConfig {
           effectiveTlsConfig,
           keyRouteAffinityConfig,
           activeRefreshIntervalMs,
-          idleRefreshIntervalMs);
+          idleRefreshIntervalMs,
+          maxConnections,
+          connectionMaxIdleTimeMs,
+          connectionTimeToLiveMs);
     }
   }
 }

@@ -7,6 +7,7 @@ import com.scylladb.alternator.queryplan.AffinityQueryPlanInterceptor;
 import com.scylladb.alternator.queryplan.BasicQueryPlanInterceptor;
 import com.scylladb.alternator.routing.RoutingScope;
 import java.net.URI;
+import java.time.Duration;
 import java.util.Collection;
 import java.util.function.Consumer;
 import software.amazon.awssdk.auth.credentials.AnonymousCredentialsProvider;
@@ -316,6 +317,45 @@ public class AlternatorDynamoDbAsyncClient {
     }
 
     /**
+     * Sets the maximum number of connections in the HTTP client connection pool.
+     *
+     * @param maxConnections the maximum number of connections, or 0 to use SDK default
+     * @return this builder instance
+     * @since 2.0.2
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withMaxConnections(int maxConnections) {
+      configBuilder.withMaxConnections(maxConnections);
+      return this;
+    }
+
+    /**
+     * Sets the maximum idle time for pooled connections in milliseconds.
+     *
+     * @param connectionMaxIdleTimeMs the maximum idle time in milliseconds, or 0 to use SDK default
+     * @return this builder instance
+     * @since 2.0.2
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withConnectionMaxIdleTimeMs(
+        long connectionMaxIdleTimeMs) {
+      configBuilder.withConnectionMaxIdleTimeMs(connectionMaxIdleTimeMs);
+      return this;
+    }
+
+    /**
+     * Sets the maximum lifetime for pooled connections in milliseconds.
+     *
+     * @param connectionTimeToLiveMs the connection time-to-live in milliseconds, or 0 to use SDK
+     *     default
+     * @return this builder instance
+     * @since 2.0.2
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withConnectionTimeToLiveMs(
+        long connectionTimeToLiveMs) {
+      configBuilder.withConnectionTimeToLiveMs(connectionTimeToLiveMs);
+      return this;
+    }
+
+    /**
      * Sets the complete Alternator configuration.
      *
      * <p>This method allows setting all Alternator-specific configuration options at once using a
@@ -339,6 +379,9 @@ public class AlternatorDynamoDbAsyncClient {
         configBuilder.withKeyRouteAffinity(config.getKeyRouteAffinityConfig());
         configBuilder.withActiveRefreshIntervalMs(config.getActiveRefreshIntervalMs());
         configBuilder.withIdleRefreshIntervalMs(config.getIdleRefreshIntervalMs());
+        configBuilder.withMaxConnections(config.getMaxConnections());
+        configBuilder.withConnectionMaxIdleTimeMs(config.getConnectionMaxIdleTimeMs());
+        configBuilder.withConnectionTimeToLiveMs(config.getConnectionTimeToLiveMs());
       }
       return this;
     }
@@ -734,29 +777,43 @@ public class AlternatorDynamoDbAsyncClient {
       // Determine if we need custom SSL configuration for the SDK HTTP client
       TlsConfig tlsConfig = alternatorConfig.getTlsConfig();
       boolean needsTrustAll = tlsConfig.isTrustAllCertificates();
+      boolean optimizeHeaders = alternatorConfig.isOptimizeHeaders();
+      boolean needsCustomPool = alternatorConfig.hasCustomConnectionPoolSettings();
 
-      // Configure async HTTP client with optional certificate checking and header filtering
-      if (httpClientSet && (needsTrustAll || alternatorConfig.isOptimizeHeaders())) {
+      // Configure async HTTP client with optional certificate checking, header filtering,
+      // and connection pool settings
+      if (httpClientSet && (needsTrustAll || optimizeHeaders || needsCustomPool)) {
         throw new IllegalStateException(
-            "Cannot use custom HTTP client with trustAllCertificates or optimizeHeaders. "
+            "Cannot use custom HTTP client with trustAllCertificates, optimizeHeaders, "
+                + "or connection pool settings. "
                 + "These options require configuring the HTTP client internally.");
       }
-      if (!httpClientSet && (needsTrustAll || alternatorConfig.isOptimizeHeaders())) {
-        // Build the base async HTTP client
-        SdkAsyncHttpClient baseHttpClient;
+      if (!httpClientSet && (needsTrustAll || optimizeHeaders || needsCustomPool)) {
+        // Build the attribute map with optional pool settings
+        AttributeMap.Builder attrs = AttributeMap.builder();
         if (needsTrustAll) {
-          baseHttpClient =
-              new DefaultSdkAsyncHttpClientBuilder()
-                  .buildWithDefaults(
-                      AttributeMap.builder()
-                          .put(SdkHttpConfigurationOption.TRUST_ALL_CERTIFICATES, true)
-                          .build());
-        } else {
-          baseHttpClient = new DefaultSdkAsyncHttpClientBuilder().build();
+          attrs.put(SdkHttpConfigurationOption.TRUST_ALL_CERTIFICATES, true);
+        }
+        if (alternatorConfig.getMaxConnections() > 0) {
+          attrs.put(
+              SdkHttpConfigurationOption.MAX_CONNECTIONS, alternatorConfig.getMaxConnections());
+        }
+        if (alternatorConfig.getConnectionMaxIdleTimeMs() > 0) {
+          attrs.put(
+              SdkHttpConfigurationOption.CONNECTION_MAX_IDLE_TIMEOUT,
+              Duration.ofMillis(alternatorConfig.getConnectionMaxIdleTimeMs()));
+        }
+        if (alternatorConfig.getConnectionTimeToLiveMs() > 0) {
+          attrs.put(
+              SdkHttpConfigurationOption.CONNECTION_TIME_TO_LIVE,
+              Duration.ofMillis(alternatorConfig.getConnectionTimeToLiveMs()));
         }
 
+        SdkAsyncHttpClient baseHttpClient =
+            new DefaultSdkAsyncHttpClientBuilder().buildWithDefaults(attrs.build());
+
         // Wrap with header filtering if enabled
-        if (alternatorConfig.isOptimizeHeaders()) {
+        if (optimizeHeaders) {
           delegate.httpClient(
               new HeadersFilteringSdkAsyncHttpClient(
                   baseHttpClient, alternatorConfig.getHeadersWhitelist()));
