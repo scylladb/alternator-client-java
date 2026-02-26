@@ -51,6 +51,7 @@ verify:
 
 lint:
 	${mvn} com.spotify.fmt:fmt-maven-plugin:check
+	${mvn} checkstyle:check
 	${mvn} compile test-compile
 	$(MAKE) lint-docs
 

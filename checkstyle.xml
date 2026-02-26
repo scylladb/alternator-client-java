@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<!DOCTYPE module PUBLIC
+    "-//Checkstyle//DTD Checkstyle Configuration 1.3//EN"
+    "https://checkstyle.org/dtds/configuration_1_3.dtd">
+
+<module name="Checker">
+    <property name="charset" value="UTF-8"/>
+
+    <!-- Catch fully-qualified class names used inline instead of imports.
+         Matches lines containing patterns like org.apache.http.pool.PoolStats
+         but excludes import/package declarations and comments. -->
+    <module name="RegexpMultiline">
+        <property name="format"
+            value="^(?!\s*(import |package |\*|//|/\*)).*\b(org|com|java|javax|net|software)\.\w+(\.\w+){2,}\b"/>
+        <property name="message"
+            value="Avoid fully-qualified class names inline; use an import instead."/>
+        <property name="fileExtensions" value="java"/>
+    </module>
+</module>
