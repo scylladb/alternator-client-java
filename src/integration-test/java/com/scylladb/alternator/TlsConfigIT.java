@@ -7,7 +7,6 @@ import com.scylladb.alternator.internal.TlsContextFactory;
 import com.scylladb.alternator.routing.ClusterScope;
 import java.io.IOException;
 import java.net.URI;
-import java.net.URISyntaxException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.cert.X509Certificate;
@@ -21,10 +20,7 @@ import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 import org.junit.After;
 import org.junit.Before;
-import org.junit.BeforeClass;
 import org.junit.Test;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.ListTablesRequest;
@@ -57,45 +53,17 @@ import software.amazon.awssdk.services.dynamodb.model.ListTablesRequest;
  */
 public class TlsConfigIT {
 
-  private static String host;
-  private static int httpsPort;
-  private static URI seedUri;
-  private static boolean integrationTestsEnabled;
-  private static StaticCredentialsProvider credentialsProvider;
-  private static Path customCaCertPath;
+  private static final URI seedUri = IntegrationTestConfig.HTTPS_SEED_URI;
+  private static final Path customCaCertPath = IntegrationTestConfig.CA_CERT_PATH;
 
   private AlternatorDynamoDbClientWrapper syncWrapper;
   private AlternatorDynamoDbAsyncClientWrapper asyncWrapper;
-
-  @BeforeClass
-  public static void setUpClass() {
-    host = System.getenv().getOrDefault("ALTERNATOR_HOST", "172.39.0.2");
-    httpsPort = Integer.parseInt(System.getenv().getOrDefault("ALTERNATOR_HTTPS_PORT", "9999"));
-
-    try {
-      seedUri = new URI("https://" + host + ":" + httpsPort);
-    } catch (URISyntaxException e) {
-      throw new RuntimeException(e);
-    }
-
-    credentialsProvider =
-        StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test"));
-
-    integrationTestsEnabled =
-        Boolean.parseBoolean(System.getenv().getOrDefault("INTEGRATION_TESTS", "false"));
-
-    // Optional custom CA cert path from environment
-    String caCertEnv = System.getenv("ALTERNATOR_CA_CERT_PATH");
-    if (caCertEnv != null && !caCertEnv.isEmpty()) {
-      customCaCertPath = Path.of(caCertEnv);
-    }
-  }
 
   @Before
   public void setUp() {
     assumeTrue(
         "Integration tests disabled. Set INTEGRATION_TESTS=true to enable.",
-        integrationTestsEnabled);
+        IntegrationTestConfig.ENABLED);
   }
 
   @After
@@ -129,7 +97,7 @@ public class TlsConfigIT {
     syncWrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .withTlsConfig(tlsConfig)
             .buildWithAlternatorAPI();
 
@@ -152,7 +120,7 @@ public class TlsConfigIT {
     asyncWrapper =
         AlternatorDynamoDbAsyncClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .withTlsConfig(tlsConfig)
             .buildWithAlternatorAPI();
 
@@ -180,7 +148,7 @@ public class TlsConfigIT {
     syncWrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .withTlsConfig(TlsConfig.trustAll())
             .buildWithAlternatorAPI();
 
@@ -215,7 +183,7 @@ public class TlsConfigIT {
       syncWrapper =
           AlternatorDynamoDbClient.builder()
               .endpointOverride(seedUri)
-              .credentialsProvider(credentialsProvider)
+              .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
               .withTlsConfig(tlsConfig)
               .buildWithAlternatorAPI();
 
@@ -261,7 +229,7 @@ public class TlsConfigIT {
     syncWrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .withTlsConfig(tlsConfig)
             .buildWithAlternatorAPI();
 
@@ -288,7 +256,7 @@ public class TlsConfigIT {
     asyncWrapper =
         AlternatorDynamoDbAsyncClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .withTlsConfig(tlsConfig)
             .buildWithAlternatorAPI();
 
@@ -313,7 +281,7 @@ public class TlsConfigIT {
     syncWrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .withTlsConfig(tlsConfig)
             .buildWithAlternatorAPI();
 
@@ -338,7 +306,7 @@ public class TlsConfigIT {
       syncWrapper =
           AlternatorDynamoDbClient.builder()
               .endpointOverride(seedUri)
-              .credentialsProvider(credentialsProvider)
+              .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
               .withTlsConfig(tlsConfig)
               .buildWithAlternatorAPI();
       fail("Should fail with invalid CA certificate path");
@@ -363,7 +331,7 @@ public class TlsConfigIT {
         syncWrapper =
             AlternatorDynamoDbClient.builder()
                 .endpointOverride(seedUri)
-                .credentialsProvider(credentialsProvider)
+                .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
                 .withTlsConfig(tlsConfig)
                 .buildWithAlternatorAPI();
         fail("Should fail with invalid CA certificate content");
@@ -401,7 +369,7 @@ public class TlsConfigIT {
       syncWrapper =
           AlternatorDynamoDbClient.builder()
               .endpointOverride(seedUri)
-              .credentialsProvider(credentialsProvider)
+              .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
               .withTlsConfig(tlsConfig)
               .buildWithAlternatorAPI();
 
@@ -429,7 +397,7 @@ public class TlsConfigIT {
     syncWrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .withTlsConfig(tlsConfig)
             .buildWithAlternatorAPI();
 
@@ -463,7 +431,7 @@ public class TlsConfigIT {
     syncWrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .withTlsConfig(tlsConfig)
             .buildWithAlternatorAPI();
 
@@ -487,7 +455,7 @@ public class TlsConfigIT {
     syncWrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .withTlsConfig(tlsConfig)
             .buildWithAlternatorAPI();
 
@@ -510,7 +478,7 @@ public class TlsConfigIT {
     syncWrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .withTlsConfig(tlsConfig)
             .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
             .withMinCompressionSizeBytes(512)
@@ -532,7 +500,7 @@ public class TlsConfigIT {
     syncWrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .withTlsConfig(tlsConfig)
             .withOptimizeHeaders(true)
             .buildWithAlternatorAPI();
@@ -552,7 +520,7 @@ public class TlsConfigIT {
     syncWrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .withTlsConfig(tlsConfig)
             .withRoutingScope(ClusterScope.create())
             .buildWithAlternatorAPI();
@@ -576,7 +544,7 @@ public class TlsConfigIT {
     syncWrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .withAlternatorConfig(alternatorConfig)
             .buildWithAlternatorAPI();
 
@@ -610,7 +578,7 @@ public class TlsConfigIT {
     syncWrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .withAlternatorConfig(alternatorConfig)
             .buildWithAlternatorAPI();
 
@@ -633,7 +601,7 @@ public class TlsConfigIT {
 
     SSLSocket socket = null;
     try {
-      socket = (SSLSocket) socketFactory.createSocket(host, httpsPort);
+      socket = (SSLSocket) socketFactory.createSocket(IntegrationTestConfig.HOST, IntegrationTestConfig.HTTPS_PORT);
       socket.startHandshake();
 
       SSLSession session = socket.getSession();
@@ -659,7 +627,7 @@ public class TlsConfigIT {
 
     SSLSocket socket = null;
     try {
-      socket = (SSLSocket) socketFactory.createSocket(host, httpsPort);
+      socket = (SSLSocket) socketFactory.createSocket(IntegrationTestConfig.HOST, IntegrationTestConfig.HTTPS_PORT);
       socket.startHandshake();
 
       // If we get here, the certificate is trusted by system CAs
@@ -692,7 +660,7 @@ public class TlsConfigIT {
 
     SSLSocket socket = null;
     try {
-      socket = (SSLSocket) socketFactory.createSocket(host, httpsPort);
+      socket = (SSLSocket) socketFactory.createSocket(IntegrationTestConfig.HOST, IntegrationTestConfig.HTTPS_PORT);
       socket.startHandshake();
 
       SSLSession session = socket.getSession();
@@ -749,7 +717,7 @@ public class TlsConfigIT {
     syncWrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .withTlsSessionCacheConfig(sessionConfig)
             .buildWithAlternatorAPI();
 
@@ -767,7 +735,7 @@ public class TlsConfigIT {
     syncWrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .buildWithAlternatorAPI();
 
     List<URI> nodes = syncWrapper.getLiveNodes();
@@ -785,7 +753,7 @@ public class TlsConfigIT {
     syncWrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .withDisableCertificateChecks()
             .buildWithAlternatorAPI();
 

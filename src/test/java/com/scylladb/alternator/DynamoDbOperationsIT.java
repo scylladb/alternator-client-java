@@ -4,15 +4,15 @@ import static org.junit.Assert.*;
 import static org.junit.Assume.*;
 
 import java.net.URI;
-import java.net.URISyntaxException;
+import java.util.Collection;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import org.junit.Before;
-import org.junit.BeforeClass;
 import org.junit.Test;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
+import org.junit.runners.Parameterized.Parameters;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.*;
@@ -24,44 +24,34 @@ import software.amazon.awssdk.services.dynamodb.model.*;
  * DeleteItem, DeleteTable) work correctly when requests are distributed across multiple Alternator
  * nodes via the load balancer.
  *
- * <p>Set environment variables to configure: - ALTERNATOR_HOST: Host address (default: 172.39.0.2)
- * - ALTERNATOR_PORT: Port number (default: 9998) - ALTERNATOR_HTTPS: Use HTTPS (default: false) -
- * INTEGRATION_TESTS: Set to "true" to enable these tests
+ * <p>Tests run against both HTTP and HTTPS endpoints. Set environment variables to configure:
+ *
+ * <ul>
+ *   <li>ALTERNATOR_HOST: Host address (default: 172.39.0.2)
+ *   <li>ALTERNATOR_PORT: HTTP port number (default: 9998)
+ *   <li>ALTERNATOR_HTTPS_PORT: HTTPS port number (default: 9999)
+ *   <li>INTEGRATION_TESTS: Set to "true" to enable these tests
+ * </ul>
  */
+@RunWith(Parameterized.class)
 public class DynamoDbOperationsIT {
 
-  private static String host;
-  private static int port;
-  private static boolean useHttps;
-  private static URI seedUri;
-  private static boolean integrationTestsEnabled;
-  private static StaticCredentialsProvider credentialsProvider;
+  private final URI seedUri;
 
-  @BeforeClass
-  public static void setUpClass() {
-    host = System.getenv().getOrDefault("ALTERNATOR_HOST", "172.39.0.2");
-    port = Integer.parseInt(System.getenv().getOrDefault("ALTERNATOR_PORT", "9998"));
-    useHttps = Boolean.parseBoolean(System.getenv().getOrDefault("ALTERNATOR_HTTPS", "false"));
+  public DynamoDbOperationsIT(String scheme, URI seedUri) {
+    this.seedUri = seedUri;
+  }
 
-    String scheme = useHttps ? "https" : "http";
-    try {
-      seedUri = new URI(scheme + "://" + host + ":" + port);
-    } catch (URISyntaxException e) {
-      throw new RuntimeException(e);
-    }
-
-    credentialsProvider =
-        StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test"));
-
-    integrationTestsEnabled =
-        Boolean.parseBoolean(System.getenv().getOrDefault("INTEGRATION_TESTS", "false"));
+  @Parameters(name = "{0}")
+  public static Collection<Object[]> data() {
+    return IntegrationTestConfig.httpAndHttpsEndpoints();
   }
 
   @Before
   public void setUp() {
     assumeTrue(
         "Integration tests disabled. Set INTEGRATION_TESTS=true to enable.",
-        integrationTestsEnabled);
+        IntegrationTestConfig.ENABLED);
   }
 
   private static String uniqueTableName(String prefix) {
@@ -105,7 +95,7 @@ public class DynamoDbOperationsIT {
     AlternatorDynamoDbClientWrapper wrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .buildWithAlternatorAPI();
 
     DynamoDbClient client = wrapper.getClient();
@@ -177,7 +167,7 @@ public class DynamoDbOperationsIT {
     AlternatorDynamoDbAsyncClientWrapper wrapper =
         AlternatorDynamoDbAsyncClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .buildWithAlternatorAPI();
 
     DynamoDbAsyncClient client = wrapper.getClient();
@@ -259,7 +249,7 @@ public class DynamoDbOperationsIT {
     AlternatorDynamoDbClientWrapper wrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .buildWithAlternatorAPI();
 
     DynamoDbClient client = wrapper.getClient();

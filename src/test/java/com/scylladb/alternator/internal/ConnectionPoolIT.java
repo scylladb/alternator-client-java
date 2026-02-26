@@ -6,19 +6,21 @@ import static org.junit.Assume.*;
 import com.scylladb.alternator.AlternatorConfig;
 import com.scylladb.alternator.AlternatorDynamoDbClient;
 import com.scylladb.alternator.AlternatorDynamoDbClientWrapper;
+import com.scylladb.alternator.IntegrationTestConfig;
+import com.scylladb.alternator.TlsConfig;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.net.URI;
-import java.net.URISyntaxException;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import org.apache.http.pool.PoolStats;
 import org.junit.Before;
-import org.junit.BeforeClass;
 import org.junit.Test;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
+import org.junit.runners.Parameterized.Parameters;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.*;
 
@@ -27,62 +29,49 @@ import software.amazon.awssdk.services.dynamodb.model.*;
  * reused across multiple {@code /localnodes} requests, rather than being created and destroyed for
  * each request.
  *
- * <p>Requires a running ScyllaDB cluster with Alternator enabled. Set environment variables:
+ * <p>Tests run against both HTTP and HTTPS endpoints. Requires a running ScyllaDB cluster with
+ * Alternator enabled. Set environment variables:
  *
  * <ul>
  *   <li>INTEGRATION_TESTS=true - Enable integration tests
  *   <li>ALTERNATOR_HOST - Host address (default: 172.39.0.2)
- *   <li>ALTERNATOR_PORT - Port number (default: 9998)
- *   <li>ALTERNATOR_HTTPS - Use HTTPS (default: false)
+ *   <li>ALTERNATOR_PORT - HTTP port number (default: 9998)
+ *   <li>ALTERNATOR_HTTPS_PORT - HTTPS port number (default: 9999)
  * </ul>
  */
+@RunWith(Parameterized.class)
 public class ConnectionPoolIT {
 
-  private static String host;
-  private static int port;
-  private static boolean useHttps;
-  private static URI seedUri;
-  private static boolean integrationTestsEnabled;
-  private static StaticCredentialsProvider credentialsProvider;
+  private final URI seedUri;
 
-  @BeforeClass
-  public static void setUpClass() {
-    host = System.getenv().getOrDefault("ALTERNATOR_HOST", "172.39.0.2");
-    port = Integer.parseInt(System.getenv().getOrDefault("ALTERNATOR_PORT", "9998"));
-    useHttps = Boolean.parseBoolean(System.getenv().getOrDefault("ALTERNATOR_HTTPS", "false"));
+  public ConnectionPoolIT(String scheme, URI seedUri) {
+    this.seedUri = seedUri;
+  }
 
-    String scheme = useHttps ? "https" : "http";
-    try {
-      seedUri = new URI(scheme + "://" + host + ":" + port);
-    } catch (URISyntaxException e) {
-      throw new RuntimeException(e);
-    }
-
-    credentialsProvider =
-        StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test"));
-
-    integrationTestsEnabled =
-        Boolean.parseBoolean(System.getenv().getOrDefault("INTEGRATION_TESTS", "false"));
+  @Parameters(name = "{0}")
+  public static Collection<Object[]> data() {
+    return IntegrationTestConfig.httpAndHttpsEndpoints();
   }
 
   @Before
   public void setUp() {
     assumeTrue(
         "Integration tests disabled. Set INTEGRATION_TESTS=true to enable.",
-        integrationTestsEnabled);
+        IntegrationTestConfig.ENABLED);
   }
 
   private AlternatorLiveNodes createLiveNodes() {
-    AlternatorConfig config = AlternatorConfig.builder().withSeedNode(seedUri).build();
-    return new AlternatorLiveNodes(config);
+    AlternatorConfig.Builder builder = AlternatorConfig.builder().withSeedNode(seedUri);
+    if ("https".equals(seedUri.getScheme())) {
+      builder.withTlsConfig(TlsConfig.trustAll());
+    }
+    return new AlternatorLiveNodes(builder.build());
   }
 
   /**
-   * Verifies that connections to a real Scylla cluster are pooled and reused. After many {@code
-   * updateLiveNodes()} calls, the number of available connections should equal the number of
-   * distinct nodes contacted (one per route, since maxPerRoute=1), and none should be leased. This
-   * proves connections are returned to the pool and reused rather than created and destroyed each
-   * time.
+   * Verifies that connections are pooled and reused. After many {@code updateLiveNodes()} calls,
+   * the number of available connections should equal the number of distinct nodes contacted (one
+   * per route, since maxPerRoute=1), and none should be leased.
    */
   @Test
   public void testConnectionsArePooledAndReused() throws Exception {
@@ -182,7 +171,7 @@ public class ConnectionPoolIT {
    * Builds the list of node URIs to query for metrics from the wrapper's live nodes. Falls back to
    * seed URI if no nodes discovered yet.
    */
-  private static List<URI> getNodeUris(AlternatorDynamoDbClientWrapper wrapper) {
+  private List<URI> getNodeUris(AlternatorDynamoDbClientWrapper wrapper) {
     List<URI> nodes = wrapper.getLiveNodes();
     if (nodes == null || nodes.isEmpty()) {
       nodes = new ArrayList<>();
@@ -349,6 +338,29 @@ public class ConnectionPoolIT {
     }
   }
 
+  private AlternatorDynamoDbClientWrapper buildDynamoWrapper() {
+    AlternatorDynamoDbClient.AlternatorDynamoDbClientBuilder builder =
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(seedUri)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS);
+    if ("https".equals(seedUri.getScheme())) {
+      builder.withTlsConfig(TlsConfig.trustAll());
+    }
+    return builder.buildWithAlternatorAPI();
+  }
+
+  private AlternatorDynamoDbClientWrapper buildDynamoWrapperWithHeaders() {
+    AlternatorDynamoDbClient.AlternatorDynamoDbClientBuilder builder =
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(seedUri)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
+            .withOptimizeHeaders(true);
+    if ("https".equals(seedUri.getScheme())) {
+      builder.withTlsConfig(TlsConfig.trustAll());
+    }
+    return builder.buildWithAlternatorAPI();
+  }
+
   /**
    * Verifies that DynamoDB SDK operations reuse pooled TCP connections rather than creating a new
    * connection for every request.
@@ -360,34 +372,15 @@ public class ConnectionPoolIT {
    */
   @Test(timeout = 60_000)
   public void testDynamoDbOperationsReuseConnections() throws Exception {
-    AlternatorDynamoDbClientWrapper wrapper =
-        AlternatorDynamoDbClient.builder()
-            .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
-            .buildWithAlternatorAPI();
-
-    runDynamoDbConnectionReuseTest(wrapper, "conn_pool_it_default");
+    runDynamoDbConnectionReuseTest(buildDynamoWrapper(), "conn_pool_it_default");
   }
 
   /**
    * Verifies that DynamoDB SDK operations reuse pooled TCP connections when headers optimization is
    * enabled.
-   *
-   * <p>Headers optimization wraps the SDK HTTP client with {@link
-   * com.scylladb.alternator.HeadersFilteringSdkHttpClient}, which filters outgoing headers through
-   * a whitelist. This test ensures that the wrapper does not interfere with HTTP connection pooling
-   * — connections must still be kept alive and reused across requests, including after 500ms idle
-   * gaps and a 60-second idle period.
    */
   @Test(timeout = 180_000)
   public void testDynamoDbOperationsReuseConnectionsWithHeadersOptimization() throws Exception {
-    AlternatorDynamoDbClientWrapper wrapper =
-        AlternatorDynamoDbClient.builder()
-            .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
-            .withOptimizeHeaders(true)
-            .buildWithAlternatorAPI();
-
-    runDynamoDbConnectionReuseTest(wrapper, "conn_pool_it_headers_opt");
+    runDynamoDbConnectionReuseTest(buildDynamoWrapperWithHeaders(), "conn_pool_it_headers_opt");
   }
 }

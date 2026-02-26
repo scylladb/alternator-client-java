@@ -6,7 +6,6 @@ import static org.junit.Assume.*;
 import com.scylladb.alternator.internal.TlsContextFactory;
 import com.scylladb.alternator.routing.ClusterScope;
 import java.net.URI;
-import java.net.URISyntaxException;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -15,10 +14,7 @@ import javax.net.ssl.SSLSession;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 import org.junit.Before;
-import org.junit.BeforeClass;
 import org.junit.Test;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.ListTablesRequest;
 
@@ -38,38 +34,13 @@ import software.amazon.awssdk.services.dynamodb.model.ListTablesRequest;
  */
 public class TlsSessionResumptionIT {
 
-  private static String host;
-  private static int httpsPort;
-  private static URI seedUri;
-  private static boolean integrationTestsEnabled;
-  private static boolean httpsEnabled;
-  private static StaticCredentialsProvider credentialsProvider;
-
-  @BeforeClass
-  public static void setUpClass() {
-    host = System.getenv().getOrDefault("ALTERNATOR_HOST", "172.39.0.2");
-    httpsPort = Integer.parseInt(System.getenv().getOrDefault("ALTERNATOR_HTTPS_PORT", "9999"));
-    httpsEnabled = Boolean.parseBoolean(System.getenv().getOrDefault("ALTERNATOR_HTTPS", "false"));
-
-    try {
-      seedUri = new URI("https://" + host + ":" + httpsPort);
-    } catch (URISyntaxException e) {
-      throw new RuntimeException(e);
-    }
-
-    credentialsProvider =
-        StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test"));
-
-    integrationTestsEnabled =
-        Boolean.parseBoolean(System.getenv().getOrDefault("INTEGRATION_TESTS", "false"));
-  }
+  private static final URI seedUri = IntegrationTestConfig.HTTPS_SEED_URI;
 
   @Before
   public void setUp() {
     assumeTrue(
         "Integration tests disabled. Set INTEGRATION_TESTS=true to enable.",
-        integrationTestsEnabled);
-    assumeTrue("HTTPS tests require ALTERNATOR_HTTPS=true", httpsEnabled);
+        IntegrationTestConfig.ENABLED);
   }
 
   @Test
@@ -78,7 +49,7 @@ public class TlsSessionResumptionIT {
     AlternatorDynamoDbClientWrapper wrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .buildWithAlternatorAPI();
 
     // Verify client is functional over HTTPS
@@ -107,7 +78,7 @@ public class TlsSessionResumptionIT {
     AlternatorDynamoDbClientWrapper wrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .withTlsSessionCacheConfig(tlsConfig)
             .buildWithAlternatorAPI();
 
@@ -129,7 +100,7 @@ public class TlsSessionResumptionIT {
     AlternatorDynamoDbClientWrapper wrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .withTlsSessionCacheConfig(TlsSessionCacheConfig.disabled())
             .buildWithAlternatorAPI();
 
@@ -151,7 +122,7 @@ public class TlsSessionResumptionIT {
     AlternatorDynamoDbClientWrapper wrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .withTlsSessionCacheConfig(TlsSessionCacheConfig.getDefault())
             .buildWithAlternatorAPI();
 
@@ -188,7 +159,7 @@ public class TlsSessionResumptionIT {
     AlternatorDynamoDbClientWrapper wrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .withTlsSessionCacheConfig(tlsConfig)
             .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
             .withMinCompressionSizeBytes(512)
@@ -212,7 +183,7 @@ public class TlsSessionResumptionIT {
     AlternatorDynamoDbClientWrapper wrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .withTlsSessionCacheConfig(TlsSessionCacheConfig.getDefault())
             .withOptimizeHeaders(true)
             .buildWithAlternatorAPI();
@@ -235,7 +206,7 @@ public class TlsSessionResumptionIT {
     AlternatorDynamoDbClientWrapper wrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .withTlsSessionCacheConfig(TlsSessionCacheConfig.getDefault())
             .withRoutingScope(ClusterScope.create())
             .buildWithAlternatorAPI();
@@ -267,7 +238,7 @@ public class TlsSessionResumptionIT {
     AlternatorDynamoDbClientWrapper wrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .withAlternatorConfig(config)
             .buildWithAlternatorAPI();
 
@@ -324,7 +295,7 @@ public class TlsSessionResumptionIT {
     for (int i = 0; i < 5; i++) {
       SSLSocket socket = null;
       try {
-        socket = (SSLSocket) socketFactory.createSocket(host, httpsPort);
+        socket = (SSLSocket) socketFactory.createSocket(IntegrationTestConfig.HOST, IntegrationTestConfig.HTTPS_PORT);
         socket.startHandshake();
 
         SSLSession session = socket.getSession();
@@ -376,7 +347,7 @@ public class TlsSessionResumptionIT {
     for (int i = 0; i < 3; i++) {
       SSLSocket socket = null;
       try {
-        socket = (SSLSocket) socketFactory.createSocket(host, httpsPort);
+        socket = (SSLSocket) socketFactory.createSocket(IntegrationTestConfig.HOST, IntegrationTestConfig.HTTPS_PORT);
         socket.startHandshake();
 
         SSLSession session = socket.getSession();
