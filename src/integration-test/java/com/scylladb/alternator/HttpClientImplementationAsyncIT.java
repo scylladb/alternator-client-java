@@ -63,18 +63,13 @@ public class HttpClientImplementationAsyncIT {
 
   @Test
   public void testNettyClientWithConfigPropagation() throws Exception {
-    AlternatorConfig config =
-        AlternatorConfig.builder()
-            .withMaxConnections(50)
-            .withConnectionMaxIdleTimeMs(30000)
-            .withConnectionTimeToLiveMs(60000)
-            .build();
-
     AlternatorDynamoDbAsyncClientWrapper wrapper =
         AlternatorDynamoDbAsyncClient.builder()
             .endpointOverride(IntegrationTestConfig.HTTP_SEED_URI)
             .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
-            .withAlternatorConfig(config)
+            .withMaxConnections(50)
+            .withConnectionMaxIdleTimeMs(30000)
+            .withConnectionTimeToLiveMs(60000)
             .withNettyHttpClientCustomizer(builder -> {})
             .buildWithAlternatorAPI();
 
@@ -219,17 +214,12 @@ public class HttpClientImplementationAsyncIT {
 
   @Test
   public void testCrtAsyncClientWithConfigPropagation() throws Exception {
-    AlternatorConfig config =
-        AlternatorConfig.builder()
-            .withMaxConnections(50)
-            .withConnectionMaxIdleTimeMs(30000)
-            .build();
-
     AlternatorDynamoDbAsyncClientWrapper wrapper =
         AlternatorDynamoDbAsyncClient.builder()
             .endpointOverride(IntegrationTestConfig.HTTP_SEED_URI)
             .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
-            .withAlternatorConfig(config)
+            .withMaxConnections(50)
+            .withConnectionMaxIdleTimeMs(30000)
             .withCrtAsyncHttpClientCustomizer(builder -> {})
             .buildWithAlternatorAPI();
 

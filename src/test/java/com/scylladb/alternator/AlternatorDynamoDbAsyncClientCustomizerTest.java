@@ -88,33 +88,23 @@ public class AlternatorDynamoDbAsyncClientCustomizerTest {
 
   @Test
   public void testNettyCustomizerWithConfig() {
-    AlternatorConfig config =
-        AlternatorConfig.builder()
-            .withMaxConnections(100)
-            .withConnectionMaxIdleTimeMs(30000)
-            .withConnectionTimeToLiveMs(60000)
-            .build();
-
     AlternatorDynamoDbAsyncClient.AlternatorDynamoDbAsyncClientBuilder builder =
         AlternatorDynamoDbAsyncClient.builder()
             .endpointOverride(SEED_URI)
-            .withAlternatorConfig(config)
+            .withMaxConnections(100)
+            .withConnectionMaxIdleTimeMs(30000)
+            .withConnectionTimeToLiveMs(60000)
             .withNettyHttpClientCustomizer(b -> b.maxConcurrency(200));
     assertNotNull("Builder with config and Netty customizer should be valid", builder);
   }
 
   @Test
   public void testCrtCustomizerWithConfig() {
-    AlternatorConfig config =
-        AlternatorConfig.builder()
-            .withMaxConnections(100)
-            .withConnectionMaxIdleTimeMs(30000)
-            .build();
-
     AlternatorDynamoDbAsyncClient.AlternatorDynamoDbAsyncClientBuilder builder =
         AlternatorDynamoDbAsyncClient.builder()
             .endpointOverride(SEED_URI)
-            .withAlternatorConfig(config)
+            .withMaxConnections(100)
+            .withConnectionMaxIdleTimeMs(30000)
             .withCrtAsyncHttpClientCustomizer(b -> b.maxConcurrency(200));
     assertNotNull("Builder with config and CRT customizer should be valid", builder);
   }

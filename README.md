@@ -158,22 +158,18 @@ final builder state.
 If you provide a fully custom HTTP client via those methods, customizers cannot be used
 (and the library will not apply its optimized defaults to your client).
 
-### Connection pool tuning via AlternatorConfig
+### Connection pool tuning
 
 For common pool settings that apply regardless of which HTTP client implementation is
-used, you can configure them via `AlternatorConfig`:
+used, you can configure them directly on the builder:
 
 ```java
-AlternatorConfig config = AlternatorConfig.builder()
-    .withMaxConnections(100)
-    .withConnectionMaxIdleTimeMs(30000)
-    .withConnectionTimeToLiveMs(60000)  // Apache and Netty only; ignored by CRT
-    .build();
-
 DynamoDbClient client = AlternatorDynamoDbClient.builder()
     .endpointOverride(URI.create("http://localhost:8043"))
     .credentialsProvider(myCredentials)
-    .withAlternatorConfig(config)
+    .withMaxConnections(100)
+    .withConnectionMaxIdleTimeMs(30000)
+    .withConnectionTimeToLiveMs(60000)  // Apache and Netty only; ignored by CRT
     .build();
 ```
 
@@ -406,21 +402,16 @@ that works with any DynamoDB/Alternator operation.
 
 #### Enabling compression
 
-To enable request compression, configure `AlternatorConfig` with a compression algorithm:
+To enable request compression, configure the builder with a compression algorithm:
 
 ```java
-import com.scylladb.alternator.AlternatorConfig;
 import com.scylladb.alternator.AlternatorDynamoDbClient;
 import com.scylladb.alternator.RequestCompressionAlgorithm;
-
-AlternatorConfig config = AlternatorConfig.builder()
-    .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
-    .build();
 
 DynamoDbClient client = AlternatorDynamoDbClient.builder()
     .endpointOverride(URI.create("https://127.0.0.1:8043"))
     .credentialsProvider(myCredentials)
-    .withAlternatorConfig(config)
+    .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
     .build();
 ```
 
@@ -431,7 +422,9 @@ the overhead of compressing small payloads that may not benefit from compression
 You can customize this threshold:
 
 ```java
-AlternatorConfig config = AlternatorConfig.builder()
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://127.0.0.1:8043"))
+    .credentialsProvider(myCredentials)
     .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
     .withMinCompressionSizeBytes(2048)  // Only compress requests >= 2KB
     .build();
@@ -457,20 +450,15 @@ outgoing traffic by up to 56% depending on workload and encryption.
 
 #### Enabling headers optimization
 
-To enable headers optimization, configure `AlternatorConfig` with `withOptimizeHeaders(true)`:
+To enable headers optimization, use `withOptimizeHeaders(true)` on the builder:
 
 ```java
-import com.scylladb.alternator.AlternatorConfig;
 import com.scylladb.alternator.AlternatorDynamoDbClient;
-
-AlternatorConfig config = AlternatorConfig.builder()
-    .withOptimizeHeaders(true)
-    .build();
 
 DynamoDbClient client = AlternatorDynamoDbClient.builder()
     .endpointOverride(URI.create("https://127.0.0.1:8043"))
     .credentialsProvider(myCredentials)
-    .withAlternatorConfig(config)
+    .withOptimizeHeaders(true)
     .build();
 ```
 
@@ -495,17 +483,13 @@ You can provide your own custom headers whitelist if needed:
 ```java
 import java.util.Arrays;
 
-AlternatorConfig config = AlternatorConfig.builder()
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://127.0.0.1:8043"))
+    .credentialsProvider(myCredentials)
     .withOptimizeHeaders(true)
     .withHeadersWhitelist(Arrays.asList(
         "Host", "X-Amz-Target", "Content-Type", "Content-Length",
         "Authorization", "X-Amz-Date", "X-Custom-Header"))
-    .build();
-
-DynamoDbClient client = AlternatorDynamoDbClient.builder()
-    .endpointOverride(URI.create("https://127.0.0.1:8043"))
-    .credentialsProvider(myCredentials)
-    .withAlternatorConfig(config)
     .build();
 ```
 
@@ -518,7 +502,9 @@ authentication (`Authorization`, `X-Amz-Date`) and operation (`Host`, `X-Amz-Tar
 Headers optimization can be combined with request compression for maximum bandwidth savings:
 
 ```java
-AlternatorConfig config = AlternatorConfig.builder()
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://127.0.0.1:8043"))
+    .credentialsProvider(myCredentials)
     .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
     .withOptimizeHeaders(true)
     .build();
@@ -599,23 +585,18 @@ RoutingScope scope = DatacenterScope.of("dc1", ClusterScope.create());
 RoutingScope scope = DatacenterScope.of("dc1", null);
 ```
 
-#### Using with AlternatorConfig
+#### Combining with other features
 
-You can also configure routing scope via `AlternatorConfig`:
+Routing scope can be combined with other builder options:
 
 ```java
-import com.scylladb.alternator.AlternatorConfig;
-
-AlternatorConfig config = AlternatorConfig.builder()
-    .withSeedHosts(Arrays.asList("192.168.1.100", "192.168.1.101"))
-    .withScheme("https")
-    .withPort(8043)
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://192.168.1.100:8043"))
+    .credentialsProvider(myCredentials)
     .withRoutingScope(DatacenterScope.of("dc1", ClusterScope.create()))
     .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
     .withOptimizeHeaders(true)
     .build();
-
-AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config);
 ```
 
 ### TLS Session Tickets
@@ -669,25 +650,20 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
     .build();
 ```
 
-#### Using with AlternatorConfig
+#### Combining with other features
 
-TLS session cache can also be configured via `AlternatorConfig`:
+TLS session cache can be combined with other builder options:
 
 ```java
-AlternatorConfig config = AlternatorConfig.builder()
-    .withSeedNode(URI.create("https://localhost:8043"))
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://localhost:8043"))
+    .credentialsProvider(credentialsProvider)
     .withTlsSessionCacheConfig(TlsSessionCacheConfig.builder()
         .withSessionCacheSize(150)
         .withSessionTimeoutSeconds(7200)
         .build())
     .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
     .withOptimizeHeaders(true)
-    .build();
-
-DynamoDbClient client = AlternatorDynamoDbClient.builder()
-    .endpointOverride(URI.create("https://localhost:8043"))
-    .credentialsProvider(credentialsProvider)
-    .withAlternatorConfig(config)
     .build();
 ```
 

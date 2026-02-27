@@ -531,21 +531,13 @@ public class TlsConfigIT {
 
   @Test
   public void testTlsConfigWithRefreshIntervals() throws Exception {
-    TlsConfig tlsConfig = TlsConfig.trustAll();
-
-    AlternatorConfig alternatorConfig =
-        AlternatorConfig.builder()
-            .withSeedNode(seedUri)
-            .withTlsConfig(tlsConfig)
-            .withActiveRefreshIntervalMs(500)
-            .withIdleRefreshIntervalMs(30000)
-            .build();
-
     syncWrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(seedUri)
             .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
-            .withAlternatorConfig(alternatorConfig)
+            .withTlsConfig(TlsConfig.trustAll())
+            .withActiveRefreshIntervalMs(500)
+            .withIdleRefreshIntervalMs(30000)
             .buildWithAlternatorAPI();
 
     List<URI> nodes = syncWrapper.getLiveNodes();
@@ -557,7 +549,7 @@ public class TlsConfigIT {
   }
 
   @Test
-  public void testTlsConfigViaAlternatorConfig() throws Exception {
+  public void testTlsConfigViaDirectBuilderMethods() throws Exception {
     TlsConfig tlsConfig =
         TlsConfig.builder()
             .withTrustAllCertificates(true)
@@ -568,18 +560,12 @@ public class TlsConfigIT {
                     .build())
             .build();
 
-    AlternatorConfig alternatorConfig =
-        AlternatorConfig.builder()
-            .withSeedNode(seedUri)
-            .withRoutingScope(ClusterScope.create())
-            .withTlsConfig(tlsConfig)
-            .build();
-
     syncWrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(seedUri)
             .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
-            .withAlternatorConfig(alternatorConfig)
+            .withRoutingScope(ClusterScope.create())
+            .withTlsConfig(tlsConfig)
             .buildWithAlternatorAPI();
 
     AlternatorConfig appliedConfig = syncWrapper.getAlternatorConfig();
