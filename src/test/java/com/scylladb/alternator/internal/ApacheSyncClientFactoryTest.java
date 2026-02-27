@@ -4,6 +4,8 @@ import static org.junit.Assert.*;
 
 import com.scylladb.alternator.AlternatorConfig;
 import com.scylladb.alternator.TlsConfig;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.Test;
 import software.amazon.awssdk.http.SdkHttpClient;
@@ -137,6 +139,48 @@ public class ApacheSyncClientFactoryTest {
   public void testCreatePollingClientWithSystemDefaultTls() {
     SdkHttpClient client = ApacheSyncClientFactory.createPollingClient(TlsConfig.systemDefault());
     assertNotNull("Should create polling client with system-default TLS", client);
+    client.close();
+  }
+
+  @Test(expected = RuntimeException.class)
+  public void testCreateWithInvalidCaCertPathThrows() {
+    TlsConfig tlsConfig =
+        TlsConfig.builder()
+            .withCaCertPath(Path.of("/non/existent/ca.pem"))
+            .withTrustSystemCaCerts(false)
+            .build();
+    ApacheSyncClientFactory.create(null, null, tlsConfig);
+  }
+
+  @Test(expected = RuntimeException.class)
+  public void testCreateWithInvalidCaCertContentThrows() throws Exception {
+    Path tempFile = Files.createTempFile("invalid-ca-", ".pem");
+    try {
+      Files.writeString(tempFile, "This is not a valid certificate");
+      TlsConfig tlsConfig =
+          TlsConfig.builder().withCaCertPath(tempFile).withTrustSystemCaCerts(false).build();
+      ApacheSyncClientFactory.create(null, null, tlsConfig);
+    } finally {
+      Files.deleteIfExists(tempFile);
+    }
+  }
+
+  @Test(expected = RuntimeException.class)
+  public void testCreatePollingClientWithInvalidCaCertPathThrows() {
+    TlsConfig tlsConfig =
+        TlsConfig.builder()
+            .withCaCertPath(Path.of("/non/existent/ca.pem"))
+            .withTrustSystemCaCerts(false)
+            .build();
+    ApacheSyncClientFactory.createPollingClient(tlsConfig);
+  }
+
+  @Test
+  public void testCreateWithCustomCaCertAndSystemCAs() throws Exception {
+    // With only system CAs (no custom cert path), should create successfully
+    TlsConfig tlsConfig = TlsConfig.builder().withTrustSystemCaCerts(true).build();
+    SdkHttpClient client = ApacheSyncClientFactory.create(null, null, tlsConfig);
+    assertNotNull("Should create client with system CAs", client);
     client.close();
   }
 }

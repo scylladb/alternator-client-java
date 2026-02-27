@@ -4,6 +4,8 @@ import static org.junit.Assert.*;
 
 import com.scylladb.alternator.AlternatorConfig;
 import com.scylladb.alternator.TlsConfig;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.Test;
 import software.amazon.awssdk.http.async.SdkAsyncHttpClient;
@@ -116,5 +118,28 @@ public class NettyAsyncClientFactoryTest {
     assertTrue("Customizer should be called with all params present", customizerCalled.get());
     assertNotNull(client);
     client.close();
+  }
+
+  @Test(expected = RuntimeException.class)
+  public void testCreateWithInvalidCaCertPathThrows() {
+    TlsConfig tlsConfig =
+        TlsConfig.builder()
+            .withCaCertPath(Path.of("/non/existent/ca.pem"))
+            .withTrustSystemCaCerts(false)
+            .build();
+    NettyAsyncClientFactory.create(null, null, tlsConfig);
+  }
+
+  @Test(expected = RuntimeException.class)
+  public void testCreateWithInvalidCaCertContentThrows() throws Exception {
+    Path tempFile = Files.createTempFile("invalid-ca-", ".pem");
+    try {
+      Files.writeString(tempFile, "This is not a valid certificate");
+      TlsConfig tlsConfig =
+          TlsConfig.builder().withCaCertPath(tempFile).withTrustSystemCaCerts(false).build();
+      NettyAsyncClientFactory.create(null, null, tlsConfig);
+    } finally {
+      Files.deleteIfExists(tempFile);
+    }
   }
 }
