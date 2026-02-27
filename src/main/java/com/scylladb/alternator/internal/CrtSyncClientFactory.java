@@ -48,14 +48,8 @@ public final class CrtSyncClientFactory {
       customizer.accept(builder);
     }
 
-    // Build with TLS settings
-    if (tlsConfig != null && tlsConfig.isTrustAllCertificates()) {
-      return builder.buildWithDefaults(
-          AttributeMap.builder()
-              .put(SdkHttpConfigurationOption.TRUST_ALL_CERTIFICATES, true)
-              .build());
-    }
-    return builder.build();
+    // Apply TLS settings
+    return buildWithTls(builder, tlsConfig);
   }
 
   /**
@@ -68,11 +62,21 @@ public final class CrtSyncClientFactory {
     AwsCrtHttpClient.Builder builder = AwsCrtHttpClient.builder();
     builder.maxConcurrency(4);
 
-    if (tlsConfig != null && tlsConfig.isTrustAllCertificates()) {
-      return builder.buildWithDefaults(
-          AttributeMap.builder()
-              .put(SdkHttpConfigurationOption.TRUST_ALL_CERTIFICATES, true)
-              .build());
+    return buildWithTls(builder, tlsConfig);
+  }
+
+  private static SdkHttpClient buildWithTls(AwsCrtHttpClient.Builder builder, TlsConfig tlsConfig) {
+    if (tlsConfig != null) {
+      // Validate custom TLS config eagerly to fail fast on invalid certs
+      if (!tlsConfig.getCustomCaCertPaths().isEmpty()) {
+        TlsContextFactory.createTrustManagers(tlsConfig);
+      }
+      if (tlsConfig.isTrustAllCertificates()) {
+        return builder.buildWithDefaults(
+            AttributeMap.builder()
+                .put(SdkHttpConfigurationOption.TRUST_ALL_CERTIFICATES, true)
+                .build());
+      }
     }
     return builder.build();
   }

@@ -5,9 +5,7 @@ import com.scylladb.alternator.TlsConfig;
 import java.time.Duration;
 import java.util.function.Consumer;
 import software.amazon.awssdk.http.SdkHttpClient;
-import software.amazon.awssdk.http.SdkHttpConfigurationOption;
 import software.amazon.awssdk.http.apache.ApacheHttpClient;
-import software.amazon.awssdk.utils.AttributeMap;
 
 /**
  * Factory for creating sync HTTP clients using Apache HttpClient.
@@ -51,13 +49,8 @@ public final class ApacheSyncClientFactory {
       customizer.accept(builder);
     }
 
-    // Build with TLS settings
-    if (tlsConfig != null && tlsConfig.isTrustAllCertificates()) {
-      return builder.buildWithDefaults(
-          AttributeMap.builder()
-              .put(SdkHttpConfigurationOption.TRUST_ALL_CERTIFICATES, true)
-              .build());
-    }
+    // Apply TLS settings
+    applyTlsConfig(builder, tlsConfig);
     return builder.build();
   }
 
@@ -71,12 +64,21 @@ public final class ApacheSyncClientFactory {
     ApacheHttpClient.Builder builder = ApacheHttpClient.builder();
     builder.maxConnections(4);
 
-    if (tlsConfig != null && tlsConfig.isTrustAllCertificates()) {
-      return builder.buildWithDefaults(
-          AttributeMap.builder()
-              .put(SdkHttpConfigurationOption.TRUST_ALL_CERTIFICATES, true)
-              .build());
-    }
+    applyTlsConfig(builder, tlsConfig);
     return builder.build();
+  }
+
+  private static void applyTlsConfig(ApacheHttpClient.Builder builder, TlsConfig tlsConfig) {
+    if (tlsConfig == null) {
+      return;
+    }
+    if (tlsConfig.isTrustAllCertificates()) {
+      builder.tlsTrustManagersProvider(() -> TlsContextFactory.createTrustAllManagers());
+    } else if (!tlsConfig.getCustomCaCertPaths().isEmpty() || !tlsConfig.isTrustSystemCaCerts()) {
+      // Eagerly validate to fail fast on invalid cert paths
+      javax.net.ssl.TrustManager[] trustManagers =
+          TlsContextFactory.createTrustManagers(tlsConfig);
+      builder.tlsTrustManagersProvider(() -> trustManagers);
+    }
   }
 }

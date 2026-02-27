@@ -50,12 +50,18 @@ public final class CrtAsyncClientFactory {
       customizer.accept(builder);
     }
 
-    // Build with TLS settings
-    if (tlsConfig != null && tlsConfig.isTrustAllCertificates()) {
-      return builder.buildWithDefaults(
-          AttributeMap.builder()
-              .put(SdkHttpConfigurationOption.TRUST_ALL_CERTIFICATES, true)
-              .build());
+    // Apply TLS settings
+    if (tlsConfig != null) {
+      // Validate custom TLS config eagerly to fail fast on invalid certs
+      if (!tlsConfig.getCustomCaCertPaths().isEmpty()) {
+        TlsContextFactory.createTrustManagers(tlsConfig);
+      }
+      if (tlsConfig.isTrustAllCertificates()) {
+        return builder.buildWithDefaults(
+            AttributeMap.builder()
+                .put(SdkHttpConfigurationOption.TRUST_ALL_CERTIFICATES, true)
+                .build());
+      }
     }
     return builder.build();
   }

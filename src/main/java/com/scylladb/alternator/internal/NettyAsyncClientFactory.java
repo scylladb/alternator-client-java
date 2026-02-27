@@ -4,10 +4,8 @@ import com.scylladb.alternator.AlternatorConfig;
 import com.scylladb.alternator.TlsConfig;
 import java.time.Duration;
 import java.util.function.Consumer;
-import software.amazon.awssdk.http.SdkHttpConfigurationOption;
 import software.amazon.awssdk.http.async.SdkAsyncHttpClient;
 import software.amazon.awssdk.http.nio.netty.NettyNioAsyncHttpClient;
-import software.amazon.awssdk.utils.AttributeMap;
 
 /**
  * Factory for creating async HTTP clients using Netty NIO.
@@ -53,12 +51,17 @@ public final class NettyAsyncClientFactory {
       customizer.accept(builder);
     }
 
-    // Build with TLS settings
-    if (tlsConfig != null && tlsConfig.isTrustAllCertificates()) {
-      return builder.buildWithDefaults(
-          AttributeMap.builder()
-              .put(SdkHttpConfigurationOption.TRUST_ALL_CERTIFICATES, true)
-              .build());
+    // Apply TLS settings
+    if (tlsConfig != null) {
+      if (tlsConfig.isTrustAllCertificates()) {
+        builder.tlsTrustManagersProvider(() -> TlsContextFactory.createTrustAllManagers());
+      } else if (!tlsConfig.getCustomCaCertPaths().isEmpty()
+          || !tlsConfig.isTrustSystemCaCerts()) {
+        // Eagerly validate to fail fast on invalid cert paths
+        javax.net.ssl.TrustManager[] trustManagers =
+            TlsContextFactory.createTrustManagers(tlsConfig);
+        builder.tlsTrustManagersProvider(() -> trustManagers);
+      }
     }
     return builder.build();
   }
