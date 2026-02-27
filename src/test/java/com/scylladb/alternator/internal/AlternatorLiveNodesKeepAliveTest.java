@@ -105,4 +105,55 @@ public class AlternatorLiveNodesKeepAliveTest {
           connectionValues.stream().anyMatch(v -> v.equalsIgnoreCase("keep-alive")));
     }
   }
+
+  @Test
+  public void testPollingRequestIncludesConnectionKeepAliveHeaderForHttps() throws Exception {
+    CapturingHttpClient capturingClient = new CapturingHttpClient();
+    AlternatorConfig config =
+        AlternatorConfig.builder().withSeedNode(URI.create("https://127.0.0.1:8043")).build();
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, capturingClient);
+
+    // Trigger a polling cycle
+    liveNodes.updateLiveNodes();
+
+    assertFalse(
+        "Should have captured at least one request", capturingClient.capturedRequests.isEmpty());
+
+    for (SdkHttpRequest req : capturingClient.capturedRequests) {
+      assertEquals("Request should use HTTPS scheme", "https", req.protocol());
+      List<String> connectionValues = req.headers().get("Connection");
+      assertNotNull(
+          "Connection header should be present on HTTPS polling request to " + req.encodedPath(),
+          connectionValues);
+      assertTrue(
+          "Connection header should contain 'keep-alive' for HTTPS, got: " + connectionValues,
+          connectionValues.stream().anyMatch(v -> v.equalsIgnoreCase("keep-alive")));
+    }
+  }
+
+  @Test
+  public void testMultipleHttpsPollingRequestsAllIncludeKeepAlive() throws Exception {
+    CapturingHttpClient capturingClient = new CapturingHttpClient();
+    AlternatorConfig config =
+        AlternatorConfig.builder().withSeedNode(URI.create("https://127.0.0.1:8043")).build();
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, capturingClient);
+
+    // Multiple polling cycles
+    for (int i = 0; i < 5; i++) {
+      liveNodes.updateLiveNodes();
+    }
+
+    assertTrue(
+        "Should have captured multiple requests", capturingClient.capturedRequests.size() >= 5);
+
+    for (SdkHttpRequest req : capturingClient.capturedRequests) {
+      assertEquals("Request should use HTTPS scheme", "https", req.protocol());
+      List<String> connectionValues = req.headers().get("Connection");
+      assertNotNull(
+          "Connection header should be present on every HTTPS polling request", connectionValues);
+      assertTrue(
+          "Connection header should contain 'keep-alive' on every HTTPS polling request",
+          connectionValues.stream().anyMatch(v -> v.equalsIgnoreCase("keep-alive")));
+    }
+  }
 }
