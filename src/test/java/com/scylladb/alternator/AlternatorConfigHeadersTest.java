@@ -151,7 +151,8 @@ public class AlternatorConfigHeadersTest {
     assertTrue(headers.contains("Content-Encoding"));
     assertTrue(headers.contains("Authorization"));
     assertTrue(headers.contains("X-Amz-Date"));
-    assertEquals(8, headers.size());
+    assertTrue(headers.contains("Connection"));
+    assertEquals(9, headers.size());
   }
 
   @Test
@@ -235,7 +236,8 @@ public class AlternatorConfigHeadersTest {
     assertTrue(noAuthHeaders.contains("Content-Encoding"));
     assertFalse(noAuthHeaders.contains("Authorization"));
     assertFalse(noAuthHeaders.contains("X-Amz-Date"));
-    assertEquals(6, noAuthHeaders.size());
+    assertTrue(noAuthHeaders.contains("Connection"));
+    assertEquals(7, noAuthHeaders.size());
   }
 
   @Test
@@ -246,7 +248,7 @@ public class AlternatorConfigHeadersTest {
             .withCompressionAlgorithm(RequestCompressionAlgorithm.NONE)
             .authenticationEnabled(false)
             .build();
-    assertEquals(5, noCompressionNoAuth.getRequiredHeaders().size());
+    assertEquals(6, noCompressionNoAuth.getRequiredHeaders().size());
     assertFalse(noCompressionNoAuth.getRequiredHeaders().contains("Content-Encoding"));
     assertFalse(noCompressionNoAuth.getRequiredHeaders().contains("Authorization"));
 
@@ -255,7 +257,7 @@ public class AlternatorConfigHeadersTest {
             .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
             .authenticationEnabled(false)
             .build();
-    assertEquals(6, withCompressionNoAuth.getRequiredHeaders().size());
+    assertEquals(7, withCompressionNoAuth.getRequiredHeaders().size());
     assertTrue(withCompressionNoAuth.getRequiredHeaders().contains("Content-Encoding"));
     assertFalse(withCompressionNoAuth.getRequiredHeaders().contains("Authorization"));
 
@@ -264,7 +266,7 @@ public class AlternatorConfigHeadersTest {
             .withCompressionAlgorithm(RequestCompressionAlgorithm.NONE)
             .authenticationEnabled(true)
             .build();
-    assertEquals(7, noCompressionWithAuth.getRequiredHeaders().size());
+    assertEquals(8, noCompressionWithAuth.getRequiredHeaders().size());
     assertFalse(noCompressionWithAuth.getRequiredHeaders().contains("Content-Encoding"));
     assertTrue(noCompressionWithAuth.getRequiredHeaders().contains("Authorization"));
 
@@ -273,7 +275,7 @@ public class AlternatorConfigHeadersTest {
             .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
             .authenticationEnabled(true)
             .build();
-    assertEquals(8, withCompressionWithAuth.getRequiredHeaders().size());
+    assertEquals(9, withCompressionWithAuth.getRequiredHeaders().size());
     assertTrue(withCompressionWithAuth.getRequiredHeaders().contains("Content-Encoding"));
     assertTrue(withCompressionWithAuth.getRequiredHeaders().contains("Authorization"));
   }
@@ -284,20 +286,20 @@ public class AlternatorConfigHeadersTest {
     AlternatorConfig.Builder builder = AlternatorConfig.builder();
     Set<String> defaultRequired = builder.getRequiredHeaders();
     // Default is no compression, with auth
-    assertEquals(7, defaultRequired.size());
+    assertEquals(8, defaultRequired.size());
     assertFalse(defaultRequired.contains("Content-Encoding"));
     assertTrue(defaultRequired.contains("Authorization"));
 
     // Enable compression
     builder.withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP);
     Set<String> withCompression = builder.getRequiredHeaders();
-    assertEquals(8, withCompression.size());
+    assertEquals(9, withCompression.size());
     assertTrue(withCompression.contains("Content-Encoding"));
 
     // Disable auth
     builder.authenticationEnabled(false);
     Set<String> noAuth = builder.getRequiredHeaders();
-    assertEquals(6, noAuth.size());
+    assertEquals(7, noAuth.size());
     assertTrue(noAuth.contains("Content-Encoding"));
     assertFalse(noAuth.contains("Authorization"));
   }
@@ -311,7 +313,7 @@ public class AlternatorConfigHeadersTest {
             .build();
 
     Set<String> required = config.getRequiredHeaders();
-    assertEquals(8, required.size());
+    assertEquals(9, required.size());
     assertTrue(required.contains("Content-Encoding"));
     assertTrue(required.contains("Authorization"));
   }

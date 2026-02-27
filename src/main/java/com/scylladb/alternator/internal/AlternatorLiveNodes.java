@@ -1,7 +1,6 @@
 package com.scylladb.alternator.internal;
 
 import com.scylladb.alternator.AlternatorConfig;
-import com.scylladb.alternator.TlsConfig;
 import com.scylladb.alternator.routing.ClusterScope;
 import com.scylladb.alternator.routing.DatacenterScope;
 import com.scylladb.alternator.routing.RackScope;
@@ -20,22 +19,13 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
-import javax.net.ssl.HostnameVerifier;
-import javax.net.ssl.SSLContext;
-import org.apache.http.HttpEntity;
-import org.apache.http.client.methods.CloseableHttpResponse;
-import org.apache.http.client.methods.HttpGet;
-import org.apache.http.config.RegistryBuilder;
-import org.apache.http.conn.socket.ConnectionSocketFactory;
-import org.apache.http.conn.socket.PlainConnectionSocketFactory;
-import org.apache.http.conn.ssl.DefaultHostnameVerifier;
-import org.apache.http.conn.ssl.NoopHostnameVerifier;
-import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.HttpClients;
-import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
-import org.apache.http.pool.PoolStats;
-import org.apache.http.util.EntityUtils;
+import software.amazon.awssdk.http.AbortableInputStream;
+import software.amazon.awssdk.http.ExecutableHttpRequest;
+import software.amazon.awssdk.http.HttpExecuteRequest;
+import software.amazon.awssdk.http.HttpExecuteResponse;
+import software.amazon.awssdk.http.SdkHttpClient;
+import software.amazon.awssdk.http.SdkHttpMethod;
+import software.amazon.awssdk.http.SdkHttpRequest;
 
 /**
  * Maintains and automatically updates a list of known live Alternator nodes. Live Alternator nodes
@@ -54,8 +44,8 @@ public class AlternatorLiveNodes extends Thread {
   private final AtomicInteger nextLiveNodeIndex;
   private final AlternatorConfig config;
   private final AtomicBoolean running = new AtomicBoolean(false);
-  private final CloseableHttpClient httpClient;
-  private final PoolingHttpClientConnectionManager httpConnectionManager;
+  private final SdkHttpClient pollingHttpClient;
+  private final boolean ownsPollingClient;
   private final AtomicLong lastActivityTime = new AtomicLong(0);
 
   private static Logger logger = Logger.getLogger(AlternatorLiveNodes.class.getName());
@@ -79,17 +69,15 @@ public class AlternatorLiveNodes extends Thread {
         }
       }
     } finally {
-      closeHttpClient();
+      closePollingClient();
       logger.log(Level.INFO, "AlternatorLiveNodes thread stopped");
     }
   }
 
-  /** Closes the internal HTTP client and releases its connection pool resources. */
-  private void closeHttpClient() {
-    try {
-      httpClient.close();
-    } catch (IOException e) {
-      logger.log(Level.WARNING, "Failed to close HTTP client", e);
+  /** Closes the polling HTTP client if this instance owns it. */
+  private void closePollingClient() {
+    if (ownsPollingClient && pollingHttpClient != null) {
+      pollingHttpClient.close();
     }
   }
 
@@ -126,7 +114,7 @@ public class AlternatorLiveNodes extends Thread {
    * @param liveNode a {@link java.net.URI} object
    * @param datacenter a {@link java.lang.String} object
    * @param rack a {@link java.lang.String} object
-   * @deprecated Use {@link #AlternatorLiveNodes(AlternatorConfig)} instead.
+   * @deprecated Use {@link #AlternatorLiveNodes(AlternatorConfig, SdkHttpClient)} instead.
    */
   @Deprecated
   public AlternatorLiveNodes(URI liveNode, String datacenter, String rack) {
@@ -143,7 +131,7 @@ public class AlternatorLiveNodes extends Thread {
    * @param liveNode a {@link java.net.URI} object
    * @param routingScope the routing scope for node targeting
    * @since 2.0.0
-   * @deprecated Use {@link #AlternatorLiveNodes(AlternatorConfig)} instead.
+   * @deprecated Use {@link #AlternatorLiveNodes(AlternatorConfig, SdkHttpClient)} instead.
    */
   @Deprecated
   public AlternatorLiveNodes(URI liveNode, RoutingScope routingScope) {
@@ -156,8 +144,8 @@ public class AlternatorLiveNodes extends Thread {
    * @param seedUri the seed URI for the initial node
    * @param config the Alternator configuration containing routing scope and other settings
    * @since 2.0.0
-   * @deprecated Use {@link #AlternatorLiveNodes(AlternatorConfig)} with config containing seed
-   *     node.
+   * @deprecated Use {@link #AlternatorLiveNodes(AlternatorConfig, SdkHttpClient)} with config
+   *     containing seed node.
    */
   @Deprecated
   public AlternatorLiveNodes(URI seedUri, AlternatorConfig config) {
@@ -183,7 +171,7 @@ public class AlternatorLiveNodes extends Thread {
    * @param datacenter a {@link java.lang.String} object
    * @param rack a {@link java.lang.String} object
    * @since 1.0.1
-   * @deprecated Use {@link #AlternatorLiveNodes(AlternatorConfig)} instead.
+   * @deprecated Use {@link #AlternatorLiveNodes(AlternatorConfig, SdkHttpClient)} instead.
    */
   @Deprecated
   public AlternatorLiveNodes(
@@ -205,7 +193,7 @@ public class AlternatorLiveNodes extends Thread {
    * @param port a int (ignored, extracted from URIs)
    * @param routingScope the routing scope for node targeting
    * @since 2.0.0
-   * @deprecated Use {@link #AlternatorLiveNodes(AlternatorConfig)} instead.
+   * @deprecated Use {@link #AlternatorLiveNodes(AlternatorConfig, SdkHttpClient)} instead.
    */
   @Deprecated
   public AlternatorLiveNodes(
@@ -249,18 +237,40 @@ public class AlternatorLiveNodes extends Thread {
   /**
    * Constructor for AlternatorLiveNodes with AlternatorConfig.
    *
-   * <p>The config must contain seed hosts (via {@link AlternatorConfig.Builder#withSeedHost},
-   * {@link AlternatorConfig.Builder#withSeedHosts}, or {@link
-   * AlternatorConfig.Builder#withSeedNode}). The scheme and port must also be configured.
+   * <p>Creates an internal polling HTTP client using the detected sync implementation on the
+   * classpath.
    *
-   * @param config the Alternator configuration containing seed hosts, scheme, port, routing scope,
-   *     and other settings
+   * @param config the Alternator configuration
    * @throws RuntimeException if config is null or contains no seed hosts
    * @since 2.0.0
    */
   public AlternatorLiveNodes(AlternatorConfig config) {
+    this(config, createDefaultPollingClient(config), true);
+  }
+
+  /**
+   * Constructor for AlternatorLiveNodes with AlternatorConfig and an externally-provided polling
+   * HTTP client.
+   *
+   * <p>The provided polling client will NOT be closed by this instance; the caller is responsible
+   * for its lifecycle.
+   *
+   * @param config the Alternator configuration
+   * @param pollingHttpClient the SdkHttpClient to use for polling /localnodes
+   * @throws RuntimeException if config is null or contains no seed hosts
+   * @since 2.1.0
+   */
+  public AlternatorLiveNodes(AlternatorConfig config, SdkHttpClient pollingHttpClient) {
+    this(config, pollingHttpClient, false);
+  }
+
+  private AlternatorLiveNodes(
+      AlternatorConfig config, SdkHttpClient pollingHttpClient, boolean ownsPollingClient) {
     if (config == null) {
       throw new RuntimeException("config cannot be null");
+    }
+    if (pollingHttpClient == null) {
+      throw new RuntimeException("pollingHttpClient cannot be null");
     }
     List<String> seedHosts = config.getSeedHosts();
     if (seedHosts == null || seedHosts.isEmpty()) {
@@ -281,37 +291,26 @@ public class AlternatorLiveNodes extends Thread {
     this.liveNodes = new AtomicReference<>();
     this.nextLiveNodeIndex = new AtomicInteger(0);
     this.config = config;
+    this.pollingHttpClient = pollingHttpClient;
+    this.ownsPollingClient = ownsPollingClient;
     try {
       this.validate();
     } catch (ValidationError e) {
       throw new RuntimeException(e);
     }
     this.liveNodes.set(initialNodes);
-    this.httpConnectionManager = createConnectionManager(config.getTlsConfig());
-    this.httpClient = HttpClients.custom().setConnectionManager(httpConnectionManager).build();
   }
 
   /**
-   * Derives a RoutingScope from legacy datacenter/rack configuration.
+   * Creates a default polling client by detecting which sync HTTP client is on the classpath.
    *
-   * @param datacenter the datacenter name
-   * @param rack the rack name
-   * @return the derived routing scope, or ClusterScope if neither is set
+   * @param config the Alternator configuration
+   * @return a small SdkHttpClient for polling
    */
-  private static RoutingScope deriveRoutingScopeFromLegacy(String datacenter, String rack) {
-    String dc = datacenter != null ? datacenter : "";
-    String r = rack != null ? rack : "";
-    if (dc.isEmpty() && r.isEmpty()) {
-      return ClusterScope.create();
-    }
-    if (dc.isEmpty()) {
-      // Rack without datacenter is not valid, treat as cluster-wide
-      return ClusterScope.create();
-    }
-    if (r.isEmpty()) {
-      return DatacenterScope.of(dc, ClusterScope.create());
-    }
-    return RackScope.of(dc, r, DatacenterScope.of(dc, ClusterScope.create()));
+  private static SdkHttpClient createDefaultPollingClient(AlternatorConfig config) {
+    SyncClientDetector.SyncClientType type = SyncClientDetector.detect();
+    return SyncClientDetector.createPollingClient(
+        type, config != null ? config.getTlsConfig() : null);
   }
 
   /** {@inheritDoc} */
@@ -425,11 +424,7 @@ public class AlternatorLiveNodes extends Thread {
 
   // Utility function for reading the entire contents of an input stream
   // (which we assume will be fairly short)
-  private static String streamToString(HttpEntity body) throws IOException {
-    if (body == null) {
-      return "";
-    }
-    InputStream stream = body.getContent();
+  private static String streamToString(InputStream stream) throws IOException {
     if (stream == null) {
       return "";
     }
@@ -467,16 +462,39 @@ public class AlternatorLiveNodes extends Thread {
   }
 
   private List<URI> getNodes(URI uri) throws IOException {
-    try (CloseableHttpResponse httpResponse = httpClient.execute(new HttpGet(uri))) {
-      if (httpResponse.getStatusLine().getStatusCode() != HttpURLConnection.HTTP_OK) {
-        EntityUtils.consume(httpResponse.getEntity());
+    SdkHttpRequest sdkRequest =
+        SdkHttpRequest.builder()
+            .uri(uri)
+            .method(SdkHttpMethod.GET)
+            .putHeader("Host", uri.getHost() + ":" + uri.getPort())
+            .putHeader("Connection", "keep-alive")
+            .build();
+    HttpExecuteRequest executeRequest = HttpExecuteRequest.builder().request(sdkRequest).build();
+    ExecutableHttpRequest preparedRequest = pollingHttpClient.prepareRequest(executeRequest);
+    HttpExecuteResponse response = preparedRequest.call();
+
+    try {
+      int statusCode = response.httpResponse().statusCode();
+      if (statusCode != HttpURLConnection.HTTP_OK) {
+        // Consume and close the response body to release the connection
+        response.responseBody().ifPresent(this::consumeAndClose);
         return Collections.emptyList();
       }
-      String response = streamToString(httpResponse.getEntity());
+
+      Optional<AbortableInputStream> bodyOpt = response.responseBody();
+      if (!bodyOpt.isPresent()) {
+        return Collections.emptyList();
+      }
+
+      String responseStr;
+      try (AbortableInputStream body = bodyOpt.get()) {
+        responseStr = streamToString(body);
+      }
+
       // response looks like: ["127.0.0.2","127.0.0.3","127.0.0.1"]
-      response = response.trim();
-      response = response.substring(1, response.length() - 1);
-      String[] list = response.split(",");
+      responseStr = responseStr.trim();
+      responseStr = responseStr.substring(1, responseStr.length() - 1);
+      String[] list = responseStr.split(",");
       List<URI> newHosts = new ArrayList<>();
       for (String host : list) {
         if (host.isEmpty()) {
@@ -491,47 +509,41 @@ public class AlternatorLiveNodes extends Thread {
         }
       }
       return newHosts;
+    } catch (IOException e) {
+      // Ensure the response body is consumed on error
+      response.responseBody().ifPresent(this::consumeAndClose);
+      throw e;
     }
   }
 
   /**
-   * Creates a connection manager configured with TLS settings from the provided configuration.
-   *
-   * @param tlsConfig the TLS configuration
-   * @return a configured connection manager
+   * Consumes and closes an AbortableInputStream to release the underlying connection back to the
+   * pool.
    */
-  private static PoolingHttpClientConnectionManager createConnectionManager(TlsConfig tlsConfig) {
-    RegistryBuilder<ConnectionSocketFactory> socketFactoryRegistryBuilder =
-        RegistryBuilder.<ConnectionSocketFactory>create()
-            .register("http", PlainConnectionSocketFactory.getSocketFactory())
-            .register("https", SSLConnectionSocketFactory.getSocketFactory());
-
-    // Use TlsContextFactory to create SSLContext with the configured settings
-    SSLContext sslContext = TlsContextFactory.createSslContext(tlsConfig);
-
-    // Choose hostname verifier based on config
-    HostnameVerifier hostnameVerifier =
-        (tlsConfig != null && tlsConfig.isVerifyHostname())
-            ? new DefaultHostnameVerifier()
-            : NoopHostnameVerifier.INSTANCE;
-
-    socketFactoryRegistryBuilder.register(
-        "https", new SSLConnectionSocketFactory(sslContext, hostnameVerifier));
-
-    PoolingHttpClientConnectionManager connectionManager =
-        new PoolingHttpClientConnectionManager(socketFactoryRegistryBuilder.build());
-    connectionManager.setMaxTotal(200);
-    connectionManager.setDefaultMaxPerRoute(1);
-    return connectionManager;
+  private void consumeAndClose(AbortableInputStream stream) {
+    try {
+      // Read remaining bytes to ensure the connection can be reused
+      byte[] buf = new byte[1024];
+      while (stream.read(buf) != -1) {
+        // discard
+      }
+      stream.close();
+    } catch (IOException e) {
+      try {
+        stream.abort();
+      } catch (Exception abortEx) {
+        // ignore
+      }
+    }
   }
 
   /**
-   * Returns the connection pool stats. Intended for testing only.
+   * Returns the polling HTTP client. Intended for testing only.
    *
-   * @return the pool stats from the underlying connection manager
+   * @return the polling SdkHttpClient
    */
-  PoolStats getConnectionPoolStats() {
-    return httpConnectionManager.getTotalStats();
+  SdkHttpClient getPollingHttpClient() {
+    return pollingHttpClient;
   }
 
   /** Exception thrown when a check operation cannot be completed. */

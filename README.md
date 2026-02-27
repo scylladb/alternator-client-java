@@ -45,6 +45,139 @@ mvn package
 ```
 Which creates `target/load-balancing-2.0.1-SNAPSHOT.jar`.
 
+## HTTP Client Configuration
+
+The AWS SDK for Java v2 separates HTTP client implementations from the core SDK.
+This library works with any of the supported implementations — you choose which
+one to include in your project based on your needs.
+
+### Available implementations
+
+| Implementation | Maven Artifact | Sync | Async | Best for |
+|---|---|:---:|:---:|---|
+| **Apache HttpClient** | `apache-client` | Yes | — | Sync workloads, familiar API, mature ecosystem |
+| **Netty NIO** | `netty-nio-client` | — | Yes | Async workloads, high concurrency, non-blocking I/O |
+| **AWS CRT** | `aws-crt-client` | Yes | Yes | Both sync and async, native performance via C libraries |
+
+**Apache** and **Netty** are the most common choices. Apache is the SDK's traditional
+sync client, and Netty is its traditional async client. **AWS CRT** is a newer alternative
+that supports both sync and async through native bindings — it can replace either Apache
+or Netty (or both), but requires platform-specific native libraries.
+
+### Adding an HTTP client dependency
+
+Add **at least one** HTTP client dependency to your project. Which one depends on whether
+you use the sync API, the async API, or both:
+
+**Sync API only** — choose Apache (recommended) or CRT:
+```xml
+<dependency>
+  <groupId>software.amazon.awssdk</groupId>
+  <artifactId>apache-client</artifactId>
+</dependency>
+```
+
+**Async API only** — choose Netty (recommended) or CRT:
+```xml
+<dependency>
+  <groupId>software.amazon.awssdk</groupId>
+  <artifactId>netty-nio-client</artifactId>
+</dependency>
+```
+
+**Both sync and async** — add one sync and one async implementation, or use CRT for both:
+```xml
+<!-- Option A: Apache (sync) + Netty (async) -->
+<dependency>
+  <groupId>software.amazon.awssdk</groupId>
+  <artifactId>apache-client</artifactId>
+</dependency>
+<dependency>
+  <groupId>software.amazon.awssdk</groupId>
+  <artifactId>netty-nio-client</artifactId>
+</dependency>
+
+<!-- Option B: CRT handles both -->
+<dependency>
+  <groupId>software.amazon.awssdk</groupId>
+  <artifactId>aws-crt-client</artifactId>
+</dependency>
+```
+
+When multiple implementations are on the classpath, the library auto-detects and
+prefers Apache for sync and Netty for async (falling back to CRT if those are absent).
+
+### Customizing the HTTP client
+
+The library creates HTTP clients internally with Alternator-optimized defaults
+(connection pool size, idle timeouts, keep-alive). To customize these settings,
+use the implementation-specific customizer callbacks:
+
+```java
+// Customize the Apache HTTP client (sync)
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("http://localhost:8043"))
+    .credentialsProvider(myCredentials)
+    .withApacheHttpClientCustomizer(builder -> builder
+        .maxConnections(200)
+        .connectionTimeout(Duration.ofSeconds(5)))
+    .build();
+
+// Customize the CRT HTTP client (sync)
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("http://localhost:8043"))
+    .credentialsProvider(myCredentials)
+    .withCrtHttpClientCustomizer(builder -> builder
+        .maxConcurrency(200))
+    .build();
+
+// Customize the Netty HTTP client (async)
+DynamoDbAsyncClient client = AlternatorDynamoDbAsyncClient.builder()
+    .endpointOverride(URI.create("http://localhost:8043"))
+    .credentialsProvider(myCredentials)
+    .withNettyHttpClientCustomizer(builder -> builder
+        .maxConcurrency(200)
+        .connectionTimeout(Duration.ofSeconds(5)))
+    .build();
+
+// Customize the CRT HTTP client (async)
+DynamoDbAsyncClient client = AlternatorDynamoDbAsyncClient.builder()
+    .endpointOverride(URI.create("http://localhost:8043"))
+    .credentialsProvider(myCredentials)
+    .withCrtAsyncHttpClientCustomizer(builder -> builder
+        .maxConcurrency(200))
+    .build();
+```
+
+The customizer receives the builder **after** Alternator defaults have been applied,
+so you only need to override the settings you want to change.
+
+**Note:** Customizers are mutually exclusive with `httpClient()` / `httpClientBuilder()`.
+If you provide a fully custom HTTP client via those methods, customizers cannot be used
+(and the library will not apply its optimized defaults to your client).
+
+### Connection pool tuning via AlternatorConfig
+
+For common pool settings that apply regardless of which HTTP client implementation is
+used, you can configure them via `AlternatorConfig`:
+
+```java
+AlternatorConfig config = AlternatorConfig.builder()
+    .withMaxConnections(100)
+    .withConnectionMaxIdleTimeMs(30000)
+    .withConnectionTimeToLiveMs(60000)  // Apache and Netty only; ignored by CRT
+    .build();
+
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("http://localhost:8043"))
+    .credentialsProvider(myCredentials)
+    .withAlternatorConfig(config)
+    .build();
+```
+
+These settings are applied as defaults before any customizer callback runs, so the
+customizer can override them if needed.
+
 ## Usage
 
 As explained above, this package does not _replace_ the AWS SDK for Java, but

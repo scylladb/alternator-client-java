@@ -1,0 +1,120 @@
+package com.scylladb.alternator.internal;
+
+import static org.junit.Assert.*;
+
+import com.scylladb.alternator.AlternatorConfig;
+import com.scylladb.alternator.TlsConfig;
+import java.util.concurrent.atomic.AtomicBoolean;
+import org.junit.Test;
+import software.amazon.awssdk.http.async.SdkAsyncHttpClient;
+
+/**
+ * Unit tests for {@link NettyAsyncClientFactory}.
+ *
+ * <p>Verifies that the factory properly creates Netty NIO async HTTP clients with config defaults,
+ * user customizers, and TLS settings.
+ */
+public class NettyAsyncClientFactoryTest {
+
+  @Test
+  public void testCreateWithNullConfigAndNullCustomizer() {
+    SdkAsyncHttpClient client = NettyAsyncClientFactory.create(null, null, null);
+    assertNotNull("Should create client with null config and customizer", client);
+    client.close();
+  }
+
+  @Test
+  public void testCreateWithDefaultConfig() {
+    AlternatorConfig config = AlternatorConfig.builder().build();
+    SdkAsyncHttpClient client = NettyAsyncClientFactory.create(null, config, null);
+    assertNotNull("Should create client with default config", client);
+    client.close();
+  }
+
+  @Test
+  public void testCreateWithCustomConnectionPoolSettings() {
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withMaxConnections(100)
+            .withConnectionMaxIdleTimeMs(30000)
+            .withConnectionTimeToLiveMs(60000)
+            .build();
+    SdkAsyncHttpClient client = NettyAsyncClientFactory.create(null, config, null);
+    assertNotNull("Should create client with custom pool settings", client);
+    client.close();
+  }
+
+  @Test
+  public void testCustomizerIsInvoked() {
+    AtomicBoolean customizerCalled = new AtomicBoolean(false);
+    SdkAsyncHttpClient client =
+        NettyAsyncClientFactory.create(
+            builder -> {
+              customizerCalled.set(true);
+              builder.maxConcurrency(50);
+            },
+            null,
+            null);
+    assertTrue("Customizer should have been called", customizerCalled.get());
+    assertNotNull(client);
+    client.close();
+  }
+
+  @Test
+  public void testCustomizerOverridesConfigDefaults() {
+    AtomicBoolean customizerCalled = new AtomicBoolean(false);
+    AlternatorConfig config = AlternatorConfig.builder().withMaxConnections(100).build();
+    SdkAsyncHttpClient client =
+        NettyAsyncClientFactory.create(
+            builder -> {
+              customizerCalled.set(true);
+              builder.maxConcurrency(200);
+            },
+            config,
+            null);
+    assertTrue("Customizer should have been called", customizerCalled.get());
+    assertNotNull(client);
+    client.close();
+  }
+
+  @Test
+  public void testCreateWithTrustAllTls() {
+    TlsConfig tlsConfig = TlsConfig.trustAll();
+    SdkAsyncHttpClient client = NettyAsyncClientFactory.create(null, null, tlsConfig);
+    assertNotNull("Should create client with trust-all TLS", client);
+    client.close();
+  }
+
+  @Test
+  public void testCreateWithSystemDefaultTls() {
+    TlsConfig tlsConfig = TlsConfig.systemDefault();
+    SdkAsyncHttpClient client = NettyAsyncClientFactory.create(null, null, tlsConfig);
+    assertNotNull("Should create client with system-default TLS", client);
+    client.close();
+  }
+
+  @Test
+  public void testCreateWithConfigAndTls() {
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withMaxConnections(50)
+            .withConnectionMaxIdleTimeMs(10000)
+            .build();
+    TlsConfig tlsConfig = TlsConfig.trustAll();
+    SdkAsyncHttpClient client = NettyAsyncClientFactory.create(null, config, tlsConfig);
+    assertNotNull("Should create client with config and TLS", client);
+    client.close();
+  }
+
+  @Test
+  public void testCreateWithConfigCustomizerAndTls() {
+    AtomicBoolean customizerCalled = new AtomicBoolean(false);
+    AlternatorConfig config = AlternatorConfig.builder().withMaxConnections(50).build();
+    TlsConfig tlsConfig = TlsConfig.trustAll();
+    SdkAsyncHttpClient client =
+        NettyAsyncClientFactory.create(builder -> customizerCalled.set(true), config, tlsConfig);
+    assertTrue("Customizer should be called with all params present", customizerCalled.get());
+    assertNotNull(client);
+    client.close();
+  }
+}

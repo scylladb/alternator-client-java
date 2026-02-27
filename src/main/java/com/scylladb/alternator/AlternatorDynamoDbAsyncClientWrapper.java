@@ -3,6 +3,7 @@ package com.scylladb.alternator;
 import com.scylladb.alternator.internal.AlternatorLiveNodes;
 import java.net.URI;
 import java.util.List;
+import software.amazon.awssdk.http.SdkHttpClient;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 
 /**
@@ -37,6 +38,7 @@ public class AlternatorDynamoDbAsyncClientWrapper implements AutoCloseable {
   private final DynamoDbAsyncClient client;
   private final AlternatorLiveNodes liveNodes;
   private final AlternatorConfig config;
+  private final SdkHttpClient pollingHttpClient;
 
   /**
    * Creates a new wrapper with the given client and live nodes.
@@ -46,7 +48,7 @@ public class AlternatorDynamoDbAsyncClientWrapper implements AutoCloseable {
    */
   public AlternatorDynamoDbAsyncClientWrapper(
       DynamoDbAsyncClient client, AlternatorLiveNodes liveNodes) {
-    this(client, liveNodes, null);
+    this(client, liveNodes, null, null);
   }
 
   /**
@@ -58,9 +60,27 @@ public class AlternatorDynamoDbAsyncClientWrapper implements AutoCloseable {
    */
   public AlternatorDynamoDbAsyncClientWrapper(
       DynamoDbAsyncClient client, AlternatorLiveNodes liveNodes, AlternatorConfig config) {
+    this(client, liveNodes, config, null);
+  }
+
+  /**
+   * Creates a new wrapper with the given client, live nodes, config, and polling client.
+   *
+   * @param client the underlying DynamoDbAsyncClient
+   * @param liveNodes the AlternatorLiveNodes instance managing node discovery
+   * @param config the AlternatorConfig used for this client
+   * @param pollingHttpClient the SdkHttpClient used for LiveNodes polling (may be null)
+   * @since 2.1.0
+   */
+  public AlternatorDynamoDbAsyncClientWrapper(
+      DynamoDbAsyncClient client,
+      AlternatorLiveNodes liveNodes,
+      AlternatorConfig config,
+      SdkHttpClient pollingHttpClient) {
     this.client = client;
     this.liveNodes = liveNodes;
     this.config = config;
+    this.pollingHttpClient = pollingHttpClient;
   }
 
   /**
@@ -113,18 +133,31 @@ public class AlternatorDynamoDbAsyncClientWrapper implements AutoCloseable {
   /**
    * Returns the AlternatorConfig used to create this client.
    *
-   * <p>The config contains all settings including TLS session cache configuration, compression
-   * settings, header optimization, and routing scope.
-   *
    * @return the {@link AlternatorConfig} instance, or null if not available
    */
   public AlternatorConfig getAlternatorConfig() {
     return config;
   }
 
-  /** Closes the underlying DynamoDbAsyncClient. */
+  /**
+   * Closes the underlying DynamoDbAsyncClient and releases associated resources.
+   *
+   * <p>This includes:
+   *
+   * <ul>
+   *   <li>Interrupting the LiveNodes background thread
+   *   <li>Closing the polling HTTP client
+   *   <li>Closing the underlying async DynamoDB client
+   * </ul>
+   */
   @Override
   public void close() {
+    // Interrupt the LiveNodes thread to stop polling
+    liveNodes.interrupt();
+    // Close the polling HTTP client
+    if (pollingHttpClient != null) {
+      pollingHttpClient.close();
+    }
     client.close();
   }
 }
