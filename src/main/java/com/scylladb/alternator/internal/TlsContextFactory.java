@@ -95,7 +95,7 @@ public final class TlsContextFactory {
    * @param config the TLS configuration
    * @return an array of TrustManagers
    */
-  private static TrustManager[] createTrustManagers(TlsConfig config) {
+  static TrustManager[] createTrustManagers(TlsConfig config) {
     try {
       List<TrustManager> allTrustManagers = new ArrayList<>();
 
@@ -219,7 +219,7 @@ public final class TlsContextFactory {
    *
    * @return an array containing a trust-all X509TrustManager
    */
-  private static TrustManager[] createTrustAllManagers() {
+  static TrustManager[] createTrustAllManagers() {
     return new TrustManager[] {
       new X509TrustManager() {
         @Override

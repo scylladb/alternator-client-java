@@ -493,6 +493,7 @@ public class AlternatorDynamoDbAsyncClientIT {
                 "Accept-Encoding", // Required header
                 "Authorization",
                 "X-Amz-Date",
+                "Connection",
                 "User-Agent" // Include User-Agent in custom whitelist
                 ));
 

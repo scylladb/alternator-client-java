@@ -74,6 +74,7 @@ public class AlternatorConfig {
    *   <li>{@code Content-Type} - MIME type for DynamoDB API (application/x-amz-json-1.0)
    *   <li>{@code Content-Length} - Required for request body
    *   <li>{@code Accept-Encoding} - For response compression negotiation
+   *   <li>{@code Connection} - HTTP keep-alive for connection reuse
    * </ul>
    *
    * @since 2.0.0
@@ -82,7 +83,12 @@ public class AlternatorConfig {
       Collections.unmodifiableSet(
           new HashSet<>(
               Arrays.asList(
-                  "Host", "X-Amz-Target", "Content-Type", "Content-Length", "Accept-Encoding")));
+                  "Host",
+                  "X-Amz-Target",
+                  "Content-Type",
+                  "Content-Length",
+                  "Accept-Encoding",
+                  "Connection")));
 
   /**
    * HTTP headers required when compression is enabled.

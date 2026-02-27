@@ -4,6 +4,7 @@ import com.scylladb.alternator.internal.AlternatorLiveNodes;
 import com.scylladb.alternator.queryplan.AffinityQueryPlanInterceptor;
 import java.net.URI;
 import java.util.List;
+import software.amazon.awssdk.http.SdkHttpClient;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 
 /**
@@ -39,6 +40,7 @@ public class AlternatorDynamoDbClientWrapper implements AutoCloseable {
   private final AlternatorLiveNodes liveNodes;
   private final AlternatorConfig config;
   private final AffinityQueryPlanInterceptor affinityInterceptor;
+  private final SdkHttpClient pollingHttpClient;
 
   /**
    * Creates a new wrapper with the given client and live nodes.
@@ -47,7 +49,7 @@ public class AlternatorDynamoDbClientWrapper implements AutoCloseable {
    * @param liveNodes the AlternatorLiveNodes instance managing node discovery
    */
   public AlternatorDynamoDbClientWrapper(DynamoDbClient client, AlternatorLiveNodes liveNodes) {
-    this(client, liveNodes, null, null);
+    this(client, liveNodes, null, null, null);
   }
 
   /**
@@ -59,7 +61,7 @@ public class AlternatorDynamoDbClientWrapper implements AutoCloseable {
    */
   public AlternatorDynamoDbClientWrapper(
       DynamoDbClient client, AlternatorLiveNodes liveNodes, AlternatorConfig config) {
-    this(client, liveNodes, config, null);
+    this(client, liveNodes, config, null, null);
   }
 
   /**
@@ -75,10 +77,31 @@ public class AlternatorDynamoDbClientWrapper implements AutoCloseable {
       AlternatorLiveNodes liveNodes,
       AlternatorConfig config,
       AffinityQueryPlanInterceptor affinityInterceptor) {
+    this(client, liveNodes, config, affinityInterceptor, null);
+  }
+
+  /**
+   * Creates a new wrapper with the given client, live nodes, config, interceptor, and polling
+   * client.
+   *
+   * @param client the underlying DynamoDbClient
+   * @param liveNodes the AlternatorLiveNodes instance managing node discovery
+   * @param config the AlternatorConfig used for this client
+   * @param affinityInterceptor the AffinityQueryPlanInterceptor (may be null)
+   * @param pollingHttpClient the SdkHttpClient used for LiveNodes polling (may be null)
+   * @since 2.1.0
+   */
+  public AlternatorDynamoDbClientWrapper(
+      DynamoDbClient client,
+      AlternatorLiveNodes liveNodes,
+      AlternatorConfig config,
+      AffinityQueryPlanInterceptor affinityInterceptor,
+      SdkHttpClient pollingHttpClient) {
     this.client = client;
     this.liveNodes = liveNodes;
     this.config = config;
     this.affinityInterceptor = affinityInterceptor;
+    this.pollingHttpClient = pollingHttpClient;
 
     // Enable auto-discovery by providing the built client to the interceptor
     if (affinityInterceptor != null) {
@@ -136,9 +159,6 @@ public class AlternatorDynamoDbClientWrapper implements AutoCloseable {
   /**
    * Returns the AlternatorConfig used to create this client.
    *
-   * <p>The config contains all settings including TLS session cache configuration, compression
-   * settings, header optimization, and routing scope.
-   *
    * @return the {@link AlternatorConfig} instance, or null if not available
    */
   public AlternatorConfig getAlternatorConfig() {
@@ -148,13 +168,26 @@ public class AlternatorDynamoDbClientWrapper implements AutoCloseable {
   /**
    * Closes the underlying DynamoDbClient and releases associated resources.
    *
-   * <p>This includes shutting down the partition key resolver's discovery executor if key route
-   * affinity is enabled.
+   * <p>This includes:
+   *
+   * <ul>
+   *   <li>Shutting down the partition key resolver's discovery executor if key route affinity is
+   *       enabled
+   *   <li>Interrupting the LiveNodes background thread
+   *   <li>Closing the polling HTTP client
+   *   <li>Closing the underlying DynamoDB client
+   * </ul>
    */
   @Override
   public void close() {
     if (affinityInterceptor != null) {
       affinityInterceptor.getPartitionKeyResolver().shutdown();
+    }
+    // Interrupt the LiveNodes thread to stop polling
+    liveNodes.interrupt();
+    // Close the polling HTTP client
+    if (pollingHttpClient != null) {
+      pollingHttpClient.close();
     }
     client.close();
   }

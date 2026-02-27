@@ -64,6 +64,7 @@ public class BasicQueryPlanInterceptor implements ExecutionInterceptor {
         .protocol(targetUri.getScheme())
         .host(targetUri.getHost())
         .port(targetUri.getPort())
+        .putHeader("Connection", "keep-alive")
         .build();
   }
 

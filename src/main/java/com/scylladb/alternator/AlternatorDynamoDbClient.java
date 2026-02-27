@@ -1,13 +1,15 @@
 package com.scylladb.alternator;
 
 import com.scylladb.alternator.internal.AlternatorLiveNodes;
+import com.scylladb.alternator.internal.ApacheSyncClientFactory;
+import com.scylladb.alternator.internal.CrtSyncClientFactory;
+import com.scylladb.alternator.internal.SyncClientDetector;
 import com.scylladb.alternator.keyrouting.KeyRouteAffinity;
 import com.scylladb.alternator.keyrouting.KeyRouteAffinityConfig;
 import com.scylladb.alternator.queryplan.AffinityQueryPlanInterceptor;
 import com.scylladb.alternator.queryplan.BasicQueryPlanInterceptor;
 import com.scylladb.alternator.routing.RoutingScope;
 import java.net.URI;
-import java.time.Duration;
 import java.util.Collection;
 import java.util.function.Consumer;
 import software.amazon.awssdk.auth.credentials.AnonymousCredentialsProvider;
@@ -15,13 +17,12 @@ import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
 import software.amazon.awssdk.awscore.endpoints.AccountIdEndpointMode;
 import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
 import software.amazon.awssdk.http.SdkHttpClient;
-import software.amazon.awssdk.http.SdkHttpConfigurationOption;
 import software.amazon.awssdk.http.apache.ApacheHttpClient;
+import software.amazon.awssdk.http.crt.AwsCrtHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClientBuilder;
 import software.amazon.awssdk.services.dynamodb.endpoints.DynamoDbEndpointProvider;
-import software.amazon.awssdk.utils.AttributeMap;
 
 /**
  * Factory class for creating DynamoDB clients with Alternator load balancing support.
@@ -93,6 +94,8 @@ public class AlternatorDynamoDbClient {
     private boolean disableCertificateChecks = false;
     private boolean httpClientSet = false;
     private boolean credentialsProviderSet = false;
+    private Consumer<ApacheHttpClient.Builder> apacheCustomizer;
+    private Consumer<AwsCrtHttpClient.Builder> crtCustomizer;
 
     private AlternatorDynamoDbClientBuilder() {
       this.delegate = DynamoDbClient.builder();
@@ -192,27 +195,6 @@ public class AlternatorDynamoDbClient {
      * <p>Default: {@link TlsSessionCacheConfig#getDefault()} (enabled with 1024 sessions, 24h
      * timeout)
      *
-     * <p>Example:
-     *
-     * <pre>{@code
-     * // Custom TLS session cache configuration
-     * DynamoDbClient client = AlternatorDynamoDbClient.builder()
-     *     .endpointOverride(URI.create("https://localhost:8043"))
-     *     .credentialsProvider(credentialsProvider)
-     *     .withTlsSessionCacheConfig(TlsSessionCacheConfig.builder()
-     *         .withSessionCacheSize(200)
-     *         .withSessionTimeoutSeconds(3600)
-     *         .build())
-     *     .build();
-     *
-     * // Disable TLS session caching
-     * DynamoDbClient client = AlternatorDynamoDbClient.builder()
-     *     .endpointOverride(URI.create("https://localhost:8043"))
-     *     .credentialsProvider(credentialsProvider)
-     *     .withTlsSessionCacheConfig(TlsSessionCacheConfig.disabled())
-     *     .build();
-     * }</pre>
-     *
      * @param tlsSessionCacheConfig the TLS session cache configuration, or null to use default
      * @return this builder instance
      * @since 2.0.0
@@ -231,34 +213,6 @@ public class AlternatorDynamoDbClient {
      * <p>The TLS configuration controls certificate validation, custom CA certificates, hostname
      * verification, and session caching settings.
      *
-     * <p>Example:
-     *
-     * <pre>{@code
-     * // Use system CA certificates (recommended for production)
-     * DynamoDbClient client = AlternatorDynamoDbClient.builder()
-     *     .endpointOverride(URI.create("https://localhost:8043"))
-     *     .credentialsProvider(credentialsProvider)
-     *     .withTlsConfig(TlsConfig.systemDefault())
-     *     .build();
-     *
-     * // Use custom CA certificate
-     * DynamoDbClient client = AlternatorDynamoDbClient.builder()
-     *     .endpointOverride(URI.create("https://localhost:8043"))
-     *     .credentialsProvider(credentialsProvider)
-     *     .withTlsConfig(TlsConfig.builder()
-     *         .withCaCertPath(Paths.get("/path/to/ca.pem"))
-     *         .withTrustSystemCaCerts(false)
-     *         .build())
-     *     .build();
-     *
-     * // Trust all certificates (development/testing only)
-     * DynamoDbClient client = AlternatorDynamoDbClient.builder()
-     *     .endpointOverride(URI.create("https://localhost:8043"))
-     *     .credentialsProvider(credentialsProvider)
-     *     .withTlsConfig(TlsConfig.trustAll())
-     *     .build();
-     * }</pre>
-     *
      * @param tlsConfig the TLS configuration, or null to use default (trust-all)
      * @return this builder instance
      * @since 1.0.9
@@ -270,10 +224,6 @@ public class AlternatorDynamoDbClient {
 
     /**
      * Sets the key route affinity configuration.
-     *
-     * <p>Key route affinity ensures that all requests for the same partition key are routed to the
-     * same Alternator node, which improves performance for Lightweight Transactions (LWT) that use
-     * Paxos consensus.
      *
      * @param keyRouteAffinityConfig the key route affinity configuration
      * @return this builder instance
@@ -288,10 +238,6 @@ public class AlternatorDynamoDbClient {
     /**
      * Sets the key route affinity type with no pre-configured PK info.
      *
-     * <p>This is a convenience method for configuring key route affinity without providing
-     * pre-configured partition key information. Partition key names will be auto-discovered via
-     * DescribeTable API on first access to each table.
-     *
      * @param type the key route affinity type
      * @return this builder instance
      * @since 1.0.7
@@ -303,9 +249,6 @@ public class AlternatorDynamoDbClient {
 
     /**
      * Sets the refresh interval for updating the node list when there are active requests.
-     *
-     * <p>When requests are being made to the cluster, the node list is refreshed at this interval
-     * to quickly detect topology changes.
      *
      * <p>Default: {@link AlternatorConfig#DEFAULT_ACTIVE_REFRESH_INTERVAL_MS} (1000ms / 1 second)
      *
@@ -320,10 +263,6 @@ public class AlternatorDynamoDbClient {
 
     /**
      * Sets the refresh interval for updating the node list when the client is idle.
-     *
-     * <p>When no requests have been made recently, the node list is refreshed at this longer
-     * interval to reduce unnecessary network traffic while still keeping the node list reasonably
-     * up-to-date.
      *
      * <p>Default: {@link AlternatorConfig#DEFAULT_IDLE_REFRESH_INTERVAL_MS} (60000ms / 1 minute)
      *
@@ -377,28 +316,6 @@ public class AlternatorDynamoDbClient {
     /**
      * Sets the complete Alternator configuration.
      *
-     * <p>This method allows setting all Alternator-specific configuration options at once using a
-     * pre-built {@link AlternatorConfig} instance. Any settings specified via individual builder
-     * methods (like {@link #withRoutingScope}, {@link #withCompressionAlgorithm}, etc.) will be
-     * overwritten by the config.
-     *
-     * <p>Example:
-     *
-     * <pre>{@code
-     * AlternatorConfig config = AlternatorConfig.builder()
-     *     .withSeedNode(URI.create("https://localhost:8043"))
-     *     .withRoutingScope(DatacenterScope.of("dc1", ClusterScope.create()))
-     *     .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
-     *     .withTlsSessionCacheConfig(TlsSessionCacheConfig.getDefault())
-     *     .build();
-     *
-     * DynamoDbClient client = AlternatorDynamoDbClient.builder()
-     *     .endpointOverride(URI.create("https://localhost:8043"))
-     *     .credentialsProvider(credentialsProvider)
-     *     .withAlternatorConfig(config)
-     *     .build();
-     * }</pre>
-     *
      * @param config the Alternator configuration
      * @return this builder instance
      * @since 2.0.0
@@ -429,12 +346,7 @@ public class AlternatorDynamoDbClient {
      * Disables SSL certificate validation for testing purposes.
      *
      * <p><strong>WARNING:</strong> This should only be used for testing with self-signed
-     * certificates. Never use this in production as it makes connections vulnerable to
-     * man-in-the-middle attacks.
-     *
-     * <p>This method configures the HTTP client to trust all certificates. If you've already set a
-     * custom HTTP client via {@link #httpClient(SdkHttpClient)} or {@link
-     * #httpClientBuilder(SdkHttpClient.Builder)}, this method will have no effect.
+     * certificates. Never use this in production.
      *
      * @return this builder instance
      */
@@ -444,15 +356,51 @@ public class AlternatorDynamoDbClient {
     }
 
     /**
-     * Sets the AWS region. This method matches {@link DynamoDbClientBuilder#region(Region)}.
+     * Sets a customizer for the Apache HTTP client builder.
      *
-     * <p>Note: The region is not used by Alternator for routing (the endpoint provider handles
-     * that), but it is required by the AWS SDK and may appear in logs, traces, or metrics. If not
-     * specified, a default "fake-aws-region" will be used.
+     * <p>The customizer is called after Alternator-optimized defaults are applied, allowing users
+     * to override specific settings. This is mutually exclusive with {@link
+     * #withCrtHttpClientCustomizer} and {@link #httpClient(SdkHttpClient)}.
      *
-     * @param region the AWS region
+     * <p>Example:
+     *
+     * <pre>{@code
+     * DynamoDbClient client = AlternatorDynamoDbClient.builder()
+     *     .endpointOverride(URI.create("https://localhost:8043"))
+     *     .withApacheHttpClientCustomizer(builder -> builder
+     *         .maxConnections(200)
+     *         .connectionTimeout(Duration.ofSeconds(5)))
+     *     .build();
+     * }</pre>
+     *
+     * @param customizer a consumer that customizes the Apache HTTP client builder
      * @return this builder instance
+     * @since 2.1.0
      */
+    public AlternatorDynamoDbClientBuilder withApacheHttpClientCustomizer(
+        Consumer<ApacheHttpClient.Builder> customizer) {
+      this.apacheCustomizer = customizer;
+      return this;
+    }
+
+    /**
+     * Sets a customizer for the AWS CRT HTTP client builder.
+     *
+     * <p>The customizer is called after Alternator-optimized defaults are applied, allowing users
+     * to override specific settings. This is mutually exclusive with {@link
+     * #withApacheHttpClientCustomizer} and {@link #httpClient(SdkHttpClient)}.
+     *
+     * @param customizer a consumer that customizes the CRT HTTP client builder
+     * @return this builder instance
+     * @since 2.1.0
+     */
+    public AlternatorDynamoDbClientBuilder withCrtHttpClientCustomizer(
+        Consumer<AwsCrtHttpClient.Builder> customizer) {
+      this.crtCustomizer = customizer;
+      return this;
+    }
+
+    /** {@inheritDoc} */
     @Override
     public AlternatorDynamoDbClientBuilder region(Region region) {
       this.region = region;
@@ -460,25 +408,7 @@ public class AlternatorDynamoDbClient {
       return this;
     }
 
-    /**
-     * Sets the AWS credentials provider. This method matches {@link
-     * DynamoDbClientBuilder#credentialsProvider(AwsCredentialsProvider)}.
-     *
-     * <p>The credentials are used for authentication with Alternator. Common providers include:
-     *
-     * <ul>
-     *   <li>{@link software.amazon.awssdk.auth.credentials.StaticCredentialsProvider} for hardcoded
-     *       credentials
-     *   <li>{@link software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider} for
-     *       environment-based credentials
-     * </ul>
-     *
-     * <p>If no credentials provider is set, the client will automatically use anonymous credentials
-     * and exclude authentication headers when header optimization is enabled.
-     *
-     * @param credentialsProvider the AWS credentials provider
-     * @return this builder instance
-     */
+    /** {@inheritDoc} */
     @Override
     public AlternatorDynamoDbClientBuilder credentialsProvider(
         AwsCredentialsProvider credentialsProvider) {
@@ -490,41 +420,14 @@ public class AlternatorDynamoDbClient {
       return this;
     }
 
-    /**
-     * Sets the endpoint override (seed URI) for Alternator cluster discovery.
-     *
-     * <p>This is the initial Alternator node that will be contacted to discover all other nodes in
-     * the cluster via the {@code /localnodes} API. Once the cluster topology is discovered,
-     * requests will be distributed across all discovered nodes using round-robin load balancing.
-     *
-     * <p>The endpoint should be a complete URI including protocol and port, for example:
-     *
-     * <ul>
-     *   <li>{@code https://localhost:8043} for HTTPS
-     *   <li>{@code http://192.168.1.100:8000} for HTTP
-     * </ul>
-     *
-     * <p>This method is required - the build will fail if no endpoint is specified.
-     *
-     * @param endpointOverride the seed URI for Alternator cluster discovery
-     * @return this builder instance
-     */
+    /** {@inheritDoc} */
     @Override
     public AlternatorDynamoDbClientBuilder endpointOverride(URI endpointOverride) {
       this.seedUri = endpointOverride;
       return this;
     }
 
-    /**
-     * Sets a custom HTTP client. This method matches {@link
-     * DynamoDbClientBuilder#httpClient(SdkHttpClient)}.
-     *
-     * <p>Use this to configure custom HTTP client settings such as connection pooling, timeouts, or
-     * proxy settings. If not specified, the AWS SDK will create a default HTTP client.
-     *
-     * @param httpClient the HTTP client to use
-     * @return this builder instance
-     */
+    /** {@inheritDoc} */
     @Override
     public AlternatorDynamoDbClientBuilder httpClient(SdkHttpClient httpClient) {
       this.httpClientSet = true;
@@ -532,17 +435,7 @@ public class AlternatorDynamoDbClient {
       return this;
     }
 
-    /**
-     * Sets a custom HTTP client builder. This method matches {@link
-     * DynamoDbClientBuilder#httpClientBuilder(SdkHttpClient.Builder)}.
-     *
-     * <p>Use this to configure HTTP client settings using a builder pattern. This is an alternative
-     * to {@link #httpClient(SdkHttpClient)} when you want to customize the HTTP client
-     * configuration without creating the client instance directly.
-     *
-     * @param httpClientBuilder the HTTP client builder to use
-     * @return this builder instance
-     */
+    /** {@inheritDoc} */
     @Override
     public AlternatorDynamoDbClientBuilder httpClientBuilder(
         SdkHttpClient.Builder httpClientBuilder) {
@@ -551,32 +444,13 @@ public class AlternatorDynamoDbClient {
       return this;
     }
 
-    /**
-     * Returns the current client override configuration.
-     *
-     * @return the current {@link ClientOverrideConfiguration}, or null if not set
-     */
+    /** {@inheritDoc} */
     @Override
     public ClientOverrideConfiguration overrideConfiguration() {
       return delegate.overrideConfiguration();
     }
 
-    /**
-     * Sets client override configuration. This method matches {@link
-     * DynamoDbClientBuilder#overrideConfiguration(ClientOverrideConfiguration)}.
-     *
-     * <p>Use this to configure advanced client settings such as:
-     *
-     * <ul>
-     *   <li>Retry policies
-     *   <li>Request timeout settings
-     *   <li>Additional request headers
-     *   <li>Metric publishers
-     * </ul>
-     *
-     * @param overrideConfiguration the client override configuration
-     * @return this builder instance
-     */
+    /** {@inheritDoc} */
     @Override
     public AlternatorDynamoDbClientBuilder overrideConfiguration(
         ClientOverrideConfiguration overrideConfiguration) {
@@ -584,25 +458,7 @@ public class AlternatorDynamoDbClient {
       return this;
     }
 
-    /**
-     * Sets client override configuration using a builder consumer. This method matches {@link
-     * DynamoDbClientBuilder#overrideConfiguration(Consumer)}.
-     *
-     * <p>This is a convenience method that allows configuring the override settings inline without
-     * creating a separate {@link ClientOverrideConfiguration} instance.
-     *
-     * <p>Example:
-     *
-     * <pre>{@code
-     * builder.overrideConfiguration(c -> c
-     *     .apiCallTimeout(Duration.ofSeconds(10))
-     *     .retryPolicy(RetryPolicy.builder().numRetries(3).build())
-     * )
-     * }</pre>
-     *
-     * @param builderConsumer a consumer that configures the override configuration builder
-     * @return this builder instance
-     */
+    /** {@inheritDoc} */
     @Override
     public AlternatorDynamoDbClientBuilder overrideConfiguration(
         Consumer<ClientOverrideConfiguration.Builder> builderConsumer) {
@@ -610,16 +466,7 @@ public class AlternatorDynamoDbClient {
       return this;
     }
 
-    /**
-     * This method is not supported by AlternatorDynamoDbClient.
-     *
-     * <p>The endpoint routing is automatically handled by query plan interceptors for load
-     * balancing. Use {@link #endpointOverride(URI)} to specify the seed endpoint instead.
-     *
-     * @param endpointProvider ignored
-     * @return never returns
-     * @throws UnsupportedOperationException always thrown
-     */
+    /** {@inheritDoc} */
     @Override
     public AlternatorDynamoDbClientBuilder endpointProvider(
         DynamoDbEndpointProvider endpointProvider) {
@@ -628,16 +475,7 @@ public class AlternatorDynamoDbClient {
               + "Use endpointOverride(URI) to specify the seed endpoint instead.");
     }
 
-    /**
-     * This method is not supported by AlternatorDynamoDbClient.
-     *
-     * <p>Alternator uses its own node discovery mechanism via the {@code /localnodes} API, which is
-     * incompatible with AWS endpoint discovery.
-     *
-     * @param endpointDiscoveryEnabled ignored
-     * @return never returns
-     * @throws UnsupportedOperationException always thrown
-     */
+    /** {@inheritDoc} */
     @Override
     public AlternatorDynamoDbClientBuilder endpointDiscoveryEnabled(
         boolean endpointDiscoveryEnabled) {
@@ -646,15 +484,7 @@ public class AlternatorDynamoDbClient {
               + "Node discovery is handled automatically via the /localnodes API.");
     }
 
-    /**
-     * This method is not supported by AlternatorDynamoDbClient.
-     *
-     * <p>Alternator uses its own node discovery mechanism via the {@code /localnodes} API, which is
-     * incompatible with AWS endpoint discovery.
-     *
-     * @return never returns
-     * @throws UnsupportedOperationException always thrown
-     */
+    /** {@inheritDoc} */
     @Override
     public AlternatorDynamoDbClientBuilder enableEndpointDiscovery() {
       throw new UnsupportedOperationException(
@@ -662,49 +492,22 @@ public class AlternatorDynamoDbClient {
               + "Node discovery is handled automatically via the /localnodes API.");
     }
 
-    /**
-     * This method is not supported by AlternatorDynamoDbClient.
-     *
-     * <p>FIPS (Federal Information Processing Standards) mode is an AWS-specific feature that is
-     * not applicable to Alternator.
-     *
-     * @param fipsEnabled ignored
-     * @return never returns
-     * @throws UnsupportedOperationException always thrown
-     */
+    /** {@inheritDoc} */
     @Override
     public AlternatorDynamoDbClientBuilder fipsEnabled(Boolean fipsEnabled) {
       throw new UnsupportedOperationException(
           "AlternatorDynamoDbClient does not support FIPS mode (AWS-specific feature).");
     }
 
-    /**
-     * This method is not supported by AlternatorDynamoDbClient.
-     *
-     * <p>Dual-stack networking (IPv4/IPv6) is an AWS-specific feature that is not applicable to
-     * Alternator.
-     *
-     * @param dualstackEnabled ignored
-     * @return never returns
-     * @throws UnsupportedOperationException always thrown
-     */
+    /** {@inheritDoc} */
     @Override
     public AlternatorDynamoDbClientBuilder dualstackEnabled(Boolean dualstackEnabled) {
       throw new UnsupportedOperationException(
-          "AlternatorDynamoDbClient does not support dual-stack networking (AWS-specific feature).");
+          "AlternatorDynamoDbClient does not support dual-stack networking "
+              + "(AWS-specific feature).");
     }
 
-    /**
-     * Sets the account ID endpoint mode.
-     *
-     * <p>This is an AWS-specific feature for account ID-based endpoint routing. It is not used by
-     * Alternator but is implemented to satisfy the {@link
-     * software.amazon.awssdk.services.dynamodb.DynamoDbBaseClientBuilder} interface. The value is
-     * passed through to the underlying AWS SDK builder.
-     *
-     * @param accountIdEndpointMode the account ID endpoint mode
-     * @return this builder instance
-     */
+    /** {@inheritDoc} */
     @Override
     public AlternatorDynamoDbClientBuilder accountIdEndpointMode(
         AccountIdEndpointMode accountIdEndpointMode) {
@@ -712,34 +515,7 @@ public class AlternatorDynamoDbClient {
       return this;
     }
 
-    /**
-     * Builds and returns a DynamoDB client with Alternator load balancing configured.
-     *
-     * <p>This method performs the following steps:
-     *
-     * <ol>
-     *   <li>Validates that {@link #endpointOverride(URI)} was called (required)
-     *   <li>Initializes {@link AlternatorConfig} with default values if not configured
-     *   <li>Creates a query plan interceptor with the seed URI and routing scope
-     *   <li>Sets a default region ("fake-aws-region") if none was specified
-     *   <li>Builds the underlying {@link DynamoDbClient} with all configurations applied
-     * </ol>
-     *
-     * <p>The returned client will automatically:
-     *
-     * <ul>
-     *   <li>Discover all nodes in the Alternator cluster via the {@code /localnodes} API
-     *   <li>Distribute requests across discovered nodes using load balancing
-     *   <li>Periodically refresh the node list (every 5 seconds) to handle topology changes
-     *   <li>Filter nodes by routing scope if configured via {@link #withRoutingScope}
-     * </ul>
-     *
-     * <p>If you need access to Alternator-specific APIs (such as {@code getLiveNodes()} or {@code
-     * nextAsURI()}), use {@link #buildWithAlternatorAPI()} instead.
-     *
-     * @return a {@link DynamoDbClient} instance configured with Alternator load balancing
-     * @throws IllegalStateException if {@link #endpointOverride(URI)} was not called
-     */
+    /** {@inheritDoc} */
     @Override
     public DynamoDbClient build() {
       return buildWithAlternatorAPI().getClient();
@@ -749,22 +525,9 @@ public class AlternatorDynamoDbClient {
      * Builds and returns a DynamoDB client wrapper with Alternator load balancing and access to
      * Alternator-specific APIs.
      *
-     * <p>This method is similar to {@link #build()}, but returns an {@link
-     * AlternatorDynamoDbClientWrapper} that provides additional methods for accessing
-     * Alternator-specific functionality:
-     *
-     * <ul>
-     *   <li>{@link AlternatorDynamoDbClientWrapper#getLiveNodes()} - Get current live nodes
-     *   <li>{@link AlternatorDynamoDbClientWrapper#nextAsURI()} - Get next node in round-robin
-     *   <li>{@link AlternatorDynamoDbClientWrapper#checkIfRackDatacenterFeatureIsSupported()} -
-     *       Check server capabilities
-     *   <li>{@link AlternatorDynamoDbClientWrapper#getAlternatorLiveNodes()} - Access the live
-     *       nodes manager
-     * </ul>
-     *
-     * @return an {@link AlternatorDynamoDbClientWrapper} instance configured with Alternator load
-     *     balancing
-     * @throws IllegalStateException if {@link #endpointOverride(URI)} was not called
+     * @return an {@link AlternatorDynamoDbClientWrapper} instance
+     * @throws IllegalStateException if {@link #endpointOverride(URI)} was not called, or if
+     *     conflicting HTTP client options are set
      */
     public AlternatorDynamoDbClientWrapper buildWithAlternatorAPI() {
       if (seedUri == null) {
@@ -772,6 +535,9 @@ public class AlternatorDynamoDbClient {
             "endpointOverride must be set when using AlternatorDynamoDbClientBuilder. "
                 + "Call endpointOverride(URI) with the seed Alternator node URI.");
       }
+
+      // Validate mutually exclusive options
+      validateHttpClientOptions();
 
       // Use anonymous credentials if no credentials were provided
       if (!credentialsProviderSet) {
@@ -801,63 +567,40 @@ public class AlternatorDynamoDbClient {
         delegate.overrideConfiguration(overrideBuilder.build());
       }
 
-      // Determine if we need custom SSL configuration for the SDK HTTP client
       TlsConfig tlsConfig = alternatorConfig.getTlsConfig();
-      boolean needsTrustAll = tlsConfig.isTrustAllCertificates();
       boolean optimizeHeaders = alternatorConfig.isOptimizeHeaders();
-      boolean needsCustomPool = alternatorConfig.hasCustomConnectionPoolSettings();
 
-      // Configure HTTP client with optional certificate checking, header filtering,
-      // and connection pool settings
-      if (httpClientSet && (needsTrustAll || optimizeHeaders || needsCustomPool)) {
-        throw new IllegalStateException(
-            "Cannot use custom HTTP client with trustAllCertificates, optimizeHeaders, "
-                + "or connection pool settings. "
-                + "These options require configuring the HTTP client internally.");
-      }
-      if (!httpClientSet && (needsTrustAll || optimizeHeaders || needsCustomPool)) {
-        // Build the Apache HTTP client with optional pool settings
-        ApacheHttpClient.Builder apacheBuilder = ApacheHttpClient.builder();
-        if (alternatorConfig.getMaxConnections() > 0) {
-          apacheBuilder.maxConnections(alternatorConfig.getMaxConnections());
-        }
-        if (alternatorConfig.getConnectionMaxIdleTimeMs() > 0) {
-          apacheBuilder.connectionMaxIdleTime(
-              Duration.ofMillis(alternatorConfig.getConnectionMaxIdleTimeMs()));
-        }
-        if (alternatorConfig.getConnectionTimeToLiveMs() > 0) {
-          apacheBuilder.connectionTimeToLive(
-              Duration.ofMillis(alternatorConfig.getConnectionTimeToLiveMs()));
-        }
+      // Create the HTTP client for the SDK
+      SdkHttpClient pollingClient = null;
+      if (!httpClientSet) {
+        // Determine which sync implementation to use
+        SyncClientDetector.SyncClientType clientType = detectSyncClientType();
 
-        SdkHttpClient baseHttpClient;
-        if (needsTrustAll) {
-          baseHttpClient =
-              apacheBuilder.buildWithDefaults(
-                  AttributeMap.builder()
-                      .put(SdkHttpConfigurationOption.TRUST_ALL_CERTIFICATES, true)
-                      .build());
-        } else {
-          baseHttpClient = apacheBuilder.build();
-        }
+        // Create the main SDK HTTP client via factory
+        SdkHttpClient mainClient = createMainSyncClient(clientType, alternatorConfig, tlsConfig);
 
         // Wrap with header filtering if enabled
         if (optimizeHeaders) {
           delegate.httpClient(
               new HeadersFilteringSdkHttpClient(
-                  baseHttpClient, alternatorConfig.getHeadersWhitelist()));
+                  mainClient, alternatorConfig.getHeadersWhitelist()));
         } else {
-          delegate.httpClient(baseHttpClient);
+          delegate.httpClient(mainClient);
         }
+
+        // Create polling client for LiveNodes
+        pollingClient = SyncClientDetector.createPollingClient(clientType, tlsConfig);
+      } else {
+        // User provided custom HTTP client - still need a polling client for LiveNodes
+        SyncClientDetector.SyncClientType clientType = SyncClientDetector.detect();
+        pollingClient = SyncClientDetector.createPollingClient(clientType, tlsConfig);
       }
 
       // Create AlternatorLiveNodes and start node discovery
-      // Fallback is handled automatically at runtime based on the routing scope's fallback chain
-      AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(alternatorConfig);
+      AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(alternatorConfig, pollingClient);
       liveNodes.start();
 
-      // Add query plan interceptor - use affinity interceptor if configured, otherwise basic
-      // The interceptor handles all routing via modifyHttpRequest()
+      // Add query plan interceptor
       ClientOverrideConfiguration.Builder overrideBuilder =
           delegate.overrideConfiguration() != null
               ? delegate.overrideConfiguration().toBuilder()
@@ -878,15 +621,56 @@ public class AlternatorDynamoDbClient {
       // Use seed URI as base endpoint - interceptor will override with actual target node
       delegate.endpointOverride(seedUri);
 
-      // Set default region if not specified (required by AWS SDK but not used by Alternator)
+      // Set default region if not specified
       if (region == null) {
         delegate.region(Region.of("fake-aws-region"));
       }
 
-      // Build the underlying client and wrap it with Alternator metadata
+      // Build the underlying client and wrap it
       DynamoDbClient client = delegate.build();
       return new AlternatorDynamoDbClientWrapper(
-          client, liveNodes, alternatorConfig, affinityInterceptor);
+          client, liveNodes, alternatorConfig, affinityInterceptor, pollingClient);
+    }
+
+    private void validateHttpClientOptions() {
+      boolean hasCustomizer = apacheCustomizer != null || crtCustomizer != null;
+      if (httpClientSet && hasCustomizer) {
+        throw new IllegalStateException(
+            "Cannot use httpClient()/httpClientBuilder() together with "
+                + "withApacheHttpClientCustomizer()/withCrtHttpClientCustomizer(). "
+                + "Use one approach or the other.");
+      }
+      if (apacheCustomizer != null && crtCustomizer != null) {
+        throw new IllegalStateException(
+            "Cannot set both withApacheHttpClientCustomizer() and "
+                + "withCrtHttpClientCustomizer(). Choose one HTTP client implementation.");
+      }
+    }
+
+    private SyncClientDetector.SyncClientType detectSyncClientType() {
+      // If a customizer was set, use the corresponding type
+      if (apacheCustomizer != null) {
+        return SyncClientDetector.SyncClientType.APACHE;
+      }
+      if (crtCustomizer != null) {
+        return SyncClientDetector.SyncClientType.CRT;
+      }
+      // Auto-detect from classpath
+      return SyncClientDetector.detect();
+    }
+
+    private SdkHttpClient createMainSyncClient(
+        SyncClientDetector.SyncClientType clientType,
+        AlternatorConfig config,
+        TlsConfig tlsConfig) {
+      switch (clientType) {
+        case APACHE:
+          return ApacheSyncClientFactory.create(apacheCustomizer, config, tlsConfig);
+        case CRT:
+          return CrtSyncClientFactory.create(crtCustomizer, config, tlsConfig);
+        default:
+          throw new IllegalStateException("Unknown sync client type: " + clientType);
+      }
     }
   }
 }
