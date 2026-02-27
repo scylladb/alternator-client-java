@@ -7,6 +7,7 @@ import java.util.function.Consumer;
 import software.amazon.awssdk.http.SdkHttpClient;
 import software.amazon.awssdk.http.SdkHttpConfigurationOption;
 import software.amazon.awssdk.http.crt.AwsCrtHttpClient;
+import software.amazon.awssdk.http.crt.TcpKeepAliveConfiguration;
 import software.amazon.awssdk.utils.AttributeMap;
 
 /**
@@ -32,6 +33,11 @@ public final class CrtSyncClientFactory {
   public static SdkHttpClient create(
       Consumer<AwsCrtHttpClient.Builder> customizer, AlternatorConfig config, TlsConfig tlsConfig) {
     AwsCrtHttpClient.Builder builder = AwsCrtHttpClient.builder();
+    builder.tcpKeepAliveConfiguration(
+        TcpKeepAliveConfiguration.builder()
+            .keepAliveInterval(Duration.ofSeconds(30))
+            .keepAliveTimeout(Duration.ofSeconds(30))
+            .build());
 
     // Apply Alternator-optimized defaults from config
     if (config != null) {
@@ -65,6 +71,11 @@ public final class CrtSyncClientFactory {
               + "Use Apache or Netty HTTP client instead, or use TlsConfig.trustAll() for testing.");
     }
     AwsCrtHttpClient.Builder builder = AwsCrtHttpClient.builder();
+    builder.tcpKeepAliveConfiguration(
+        TcpKeepAliveConfiguration.builder()
+            .keepAliveInterval(Duration.ofSeconds(30))
+            .keepAliveTimeout(Duration.ofSeconds(30))
+            .build());
     builder.maxConcurrency(4);
 
     return buildWithTls(builder, tlsConfig);

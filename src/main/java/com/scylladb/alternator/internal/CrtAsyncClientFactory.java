@@ -7,6 +7,7 @@ import java.util.function.Consumer;
 import software.amazon.awssdk.http.SdkHttpConfigurationOption;
 import software.amazon.awssdk.http.async.SdkAsyncHttpClient;
 import software.amazon.awssdk.http.crt.AwsCrtAsyncHttpClient;
+import software.amazon.awssdk.http.crt.TcpKeepAliveConfiguration;
 import software.amazon.awssdk.utils.AttributeMap;
 
 /**
@@ -34,6 +35,11 @@ public final class CrtAsyncClientFactory {
       AlternatorConfig config,
       TlsConfig tlsConfig) {
     AwsCrtAsyncHttpClient.Builder builder = AwsCrtAsyncHttpClient.builder();
+    builder.tcpKeepAliveConfiguration(
+        TcpKeepAliveConfiguration.builder()
+            .keepAliveInterval(Duration.ofSeconds(30))
+            .keepAliveTimeout(Duration.ofSeconds(30))
+            .build());
 
     // Apply Alternator-optimized defaults from config
     if (config != null) {

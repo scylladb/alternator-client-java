@@ -35,6 +35,7 @@ public final class NettyAsyncClientFactory {
       AlternatorConfig config,
       TlsConfig tlsConfig) {
     NettyNioAsyncHttpClient.Builder builder = NettyNioAsyncHttpClient.builder();
+    builder.tcpKeepAlive(true);
 
     // Apply Alternator-optimized defaults from config
     if (config != null) {

@@ -33,6 +33,7 @@ public final class ApacheSyncClientFactory {
   public static SdkHttpClient create(
       Consumer<ApacheHttpClient.Builder> customizer, AlternatorConfig config, TlsConfig tlsConfig) {
     ApacheHttpClient.Builder builder = ApacheHttpClient.builder();
+    builder.tcpKeepAlive(true);
 
     // Apply Alternator-optimized defaults from config
     if (config != null) {
@@ -63,6 +64,7 @@ public final class ApacheSyncClientFactory {
    */
   public static SdkHttpClient createPollingClient(TlsConfig tlsConfig) {
     ApacheHttpClient.Builder builder = ApacheHttpClient.builder();
+    builder.tcpKeepAlive(true);
     builder.maxConnections(4);
 
     return buildWithTls(builder, tlsConfig);
