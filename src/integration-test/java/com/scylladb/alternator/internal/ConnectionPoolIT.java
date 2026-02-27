@@ -210,17 +210,17 @@ public class ConnectionPoolIT {
                         "data", AttributeValue.builder().s("value").build()))
                 .build());
       }
-      // Allow the background node-discovery thread to stabilize its connections
-      Thread.sleep(2000);
-
-      // Take baseline: count currently established TCP connections from this JVM.
-      // Note: ss gives a point-in-time snapshot. The count may fluctuate due to
-      // background thread activity, server-side timeouts, pool housekeeping,
-      // or cleanup of connections left by previous tests (reuseForks=true means
-      // this JVM may have run other test classes before us). We use a generous
-      // tolerance (67% drop allowed) to accommodate this churn while still
-      // catching catastrophic connection loss or unbounded growth.
+      // Wait for stale connections from previous tests (reuseForks=true) to drain
+      // and for the background node-discovery thread to stabilize. Poll until the
+      // connection count stops dropping, so the baseline reflects only this test's
+      // active connections.
       long baseline = countEstablishedConnections(port);
+      for (int attempt = 0; attempt < 10; attempt++) {
+        Thread.sleep(1000);
+        long current = countEstablishedConnections(port);
+        if (current >= baseline) break;
+        baseline = current;
+      }
       assertTrue("Should have at least 1 established connection after warmup", baseline >= 1);
       long minAcceptable = Math.max(1, baseline / 3);
 
@@ -430,10 +430,17 @@ public class ConnectionPoolIT {
                     .build())
             .get(10, TimeUnit.SECONDS);
       }
-      // Allow the background node-discovery thread to stabilize its connections
-      Thread.sleep(1000);
-
+      // Wait for stale connections from previous tests (reuseForks=true) to drain
+      // and for the background node-discovery thread to stabilize. Poll until the
+      // connection count stops dropping, so the baseline reflects only this test's
+      // active connections.
       long baseline = countEstablishedConnections(port);
+      for (int attempt = 0; attempt < 10; attempt++) {
+        Thread.sleep(1000);
+        long current = countEstablishedConnections(port);
+        if (current >= baseline) break;
+        baseline = current;
+      }
       assertTrue("Should have at least 1 established connection after warmup", baseline >= 1);
       long minAcceptable = Math.max(1, baseline / 3);
 
@@ -572,10 +579,15 @@ public class ConnectionPoolIT {
     }
     assertTrue(
         "Should have discovered at least one node", liveNodes.getLiveNodes().size() > 0);
-    // Let the polling client's connection pool stabilize
-    Thread.sleep(1000);
-
+    // Wait for stale connections from previous tests (reuseForks=true) to drain
+    // and for the polling client's connection pool to stabilize.
     long baseline = countEstablishedConnections(port);
+    for (int attempt = 0; attempt < 10; attempt++) {
+      Thread.sleep(1000);
+      long current = countEstablishedConnections(port);
+      if (current >= baseline) break;
+      baseline = current;
+    }
     assertTrue("Should have at least 1 established connection after warmup", baseline >= 1);
 
     // Perform many more polling cycles — connection count should stay bounded
