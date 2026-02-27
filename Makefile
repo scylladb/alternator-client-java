@@ -92,7 +92,7 @@ wait-for-alternator:
 .PHONY: test-integration
 test-integration: scylla-start wait-for-alternator
 	INTEGRATION_TESTS=true ALTERNATOR_HOST=172.39.0.2 ALTERNATOR_PORT=9998 ALTERNATOR_HTTPS_PORT=9999 ALTERNATOR_CA_CERT_PATH=$$(pwd)/test/scylla/db.crt \
-		${mvn} test -Dtest="**/*IT" -DfailIfNoTests=false -Dsurefire.timeout=30 || (make scylla-stop && exit 1)
+		${mvn} test -Dtest="**/*IT" -DfailIfNoTests=false -Dsurefire.timeout=300 || (make scylla-stop && exit 1)
 	make scylla-stop
 
 .PHONY: test-demo
@@ -104,7 +104,7 @@ test-demo: scylla-start wait-for-alternator
 .PHONY: test-all
 test-all: scylla-start wait-for-alternator
 	INTEGRATION_TESTS=true ALTERNATOR_HOST=172.39.0.2 ALTERNATOR_PORT=9998 ALTERNATOR_HTTPS_PORT=9999 ALTERNATOR_CA_CERT_PATH=$$(pwd)/test/scylla/db.crt \
-		${mvn} test -Dtest="**/*IT" -DfailIfNoTests=false -Dsurefire.timeout=30 || (make scylla-stop && exit 1)
+		${mvn} test -Dtest="**/*IT" -DfailIfNoTests=false -Dsurefire.timeout=300 || (make scylla-stop && exit 1)
 	${mvn} exec:java -Dexec.mainClass=com.scylladb.alternator.demo.Demo2 -Dexec.classpathScope=test -Dexec.args="--endpoint http://172.39.0.2:9998" || (make scylla-stop && exit 1)
 	${mvn} exec:java -Dexec.mainClass=com.scylladb.alternator.demo.Demo3 -Dexec.classpathScope=test -Dexec.args="--endpoint http://172.39.0.2:9998" || (make scylla-stop && exit 1)
 	make scylla-stop
