@@ -50,24 +50,25 @@ public final class NettyAsyncClientFactory {
       }
     }
 
-    // Apply user customizer
+    // Apply TLS trust manager settings (not buildWithDefaults — that happens at build time)
+    if (tlsConfig != null
+        && !tlsConfig.isTrustAllCertificates()
+        && (!tlsConfig.getCustomCaCertPaths().isEmpty() || !tlsConfig.isTrustSystemCaCerts())) {
+      TrustManager[] trustManagers = TlsContextFactory.createTrustManagers(tlsConfig);
+      builder.tlsTrustManagersProvider(() -> trustManagers);
+    }
+
+    // Apply user customizer last — allows overriding any defaults including TLS
     if (customizer != null) {
       customizer.accept(builder);
     }
 
-    // Apply TLS settings
-    if (tlsConfig != null) {
-      if (tlsConfig.isTrustAllCertificates()) {
-        return builder.buildWithDefaults(
-            AttributeMap.builder()
-                .put(SdkHttpConfigurationOption.TRUST_ALL_CERTIFICATES, true)
-                .build());
-      }
-      if (!tlsConfig.getCustomCaCertPaths().isEmpty() || !tlsConfig.isTrustSystemCaCerts()) {
-        // Eagerly validate to fail fast on invalid cert paths
-        TrustManager[] trustManagers = TlsContextFactory.createTrustManagers(tlsConfig);
-        builder.tlsTrustManagersProvider(() -> trustManagers);
-      }
+    // Build with trust-all if configured, otherwise normal build
+    if (tlsConfig != null && tlsConfig.isTrustAllCertificates()) {
+      return builder.buildWithDefaults(
+          AttributeMap.builder()
+              .put(SdkHttpConfigurationOption.TRUST_ALL_CERTIFICATES, true)
+              .build());
     }
     return builder.build();
   }

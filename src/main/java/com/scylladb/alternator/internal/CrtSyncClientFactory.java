@@ -49,12 +49,18 @@ public final class CrtSyncClientFactory {
       }
     }
 
-    // Apply user customizer
+    // Validate CRT limitations before customizer
+    if (tlsConfig != null && !tlsConfig.getCustomCaCertPaths().isEmpty()) {
+      throw new UnsupportedOperationException(
+          "Custom CA certificates are not supported with the CRT HTTP client. "
+              + "Use Apache or Netty HTTP client instead, or use TlsConfig.trustAll() for testing.");
+    }
+
+    // Apply user customizer last — allows overriding any defaults
     if (customizer != null) {
       customizer.accept(builder);
     }
 
-    // Apply TLS settings
     return buildWithTls(builder, tlsConfig);
   }
 

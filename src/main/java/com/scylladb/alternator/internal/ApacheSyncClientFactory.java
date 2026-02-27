@@ -48,12 +48,26 @@ public final class ApacheSyncClientFactory {
       }
     }
 
-    // Apply user customizer
+    // Apply TLS trust manager settings
+    if (tlsConfig != null
+        && !tlsConfig.isTrustAllCertificates()
+        && (!tlsConfig.getCustomCaCertPaths().isEmpty() || !tlsConfig.isTrustSystemCaCerts())) {
+      TrustManager[] trustManagers = TlsContextFactory.createTrustManagers(tlsConfig);
+      builder.tlsTrustManagersProvider(() -> trustManagers);
+    }
+
+    // Apply user customizer last — allows overriding any defaults including TLS
     if (customizer != null) {
       customizer.accept(builder);
     }
 
-    return buildWithTls(builder, tlsConfig);
+    if (tlsConfig != null && tlsConfig.isTrustAllCertificates()) {
+      return builder.buildWithDefaults(
+          AttributeMap.builder()
+              .put(SdkHttpConfigurationOption.TRUST_ALL_CERTIFICATES, true)
+              .build());
+    }
+    return builder.build();
   }
 
   /**
