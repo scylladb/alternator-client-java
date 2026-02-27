@@ -91,8 +91,8 @@ wait-for-alternator:
 
 .PHONY: test-integration
 test-integration: scylla-start wait-for-alternator
-	INTEGRATION_TESTS=true ALTERNATOR_HOST=172.39.0.2 ALTERNATOR_PORT=9998 ALTERNATOR_HTTPS=false \
-		${mvn} test -Dtest=AlternatorDynamoDbClientIT,AlternatorDynamoDbAsyncClientIT,TlsConfigIT,TlsSessionResumptionIT,com.scylladb.alternator.internal.ConnectionPoolIT || (make scylla-stop && exit 1)
+	INTEGRATION_TESTS=true ALTERNATOR_HOST=172.39.0.2 ALTERNATOR_PORT=9998 ALTERNATOR_HTTPS_PORT=9999 \
+		${mvn} test -Dtest=AlternatorDynamoDbClientIT,AlternatorDynamoDbAsyncClientIT,TlsConfigIT,TlsSessionResumptionIT,com.scylladb.alternator.internal.ConnectionPoolIT,com.scylladb.alternator.HttpConnectionReuseIT || (make scylla-stop && exit 1)
 	make scylla-stop
 
 .PHONY: test-demo

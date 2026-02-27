@@ -377,6 +377,7 @@ public class AlternatorDynamoDbAsyncClient {
         configBuilder.withOptimizeHeaders(config.isOptimizeHeaders());
         configBuilder.withHeadersWhitelist(config.getHeadersWhitelist());
         configBuilder.withTlsConfig(config.getTlsConfig());
+        configBuilder.withTlsSessionCacheConfig(config.getTlsSessionCacheConfig());
         configBuilder.withKeyRouteAffinity(config.getKeyRouteAffinityConfig());
         configBuilder.withActiveRefreshIntervalMs(config.getActiveRefreshIntervalMs());
         configBuilder.withIdleRefreshIntervalMs(config.getIdleRefreshIntervalMs());

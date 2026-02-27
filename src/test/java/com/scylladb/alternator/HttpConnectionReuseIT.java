@@ -4,8 +4,8 @@ import static org.junit.Assert.*;
 import static org.junit.Assume.*;
 
 import java.net.URI;
-import java.net.URISyntaxException;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -13,10 +13,10 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import org.junit.Before;
-import org.junit.BeforeClass;
 import org.junit.Test;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
+import org.junit.runners.Parameterized.Parameters;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.ListTablesRequest;
@@ -28,54 +28,61 @@ import software.amazon.awssdk.services.dynamodb.model.ListTablesResponse;
  * <p>These tests verify that rapid sequential and parallel requests succeed without connection
  * errors, which implicitly validates that HTTP connection reuse and pooling work correctly.
  *
- * <p>Set environment variables to configure: - ALTERNATOR_HOST: Host address (default: 172.39.0.2)
- * - ALTERNATOR_PORT: Port number (default: 9998) - ALTERNATOR_HTTPS: Use HTTPS (default: false) -
- * INTEGRATION_TESTS: Set to "true" to enable these tests
+ * <p>Tests run against both HTTP and HTTPS endpoints. Set environment variables to configure:
+ *
+ * <ul>
+ *   <li>ALTERNATOR_HOST: Host address (default: 172.39.0.2)
+ *   <li>ALTERNATOR_PORT: HTTP port number (default: 9998)
+ *   <li>ALTERNATOR_HTTPS_PORT: HTTPS port number (default: 9999)
+ *   <li>INTEGRATION_TESTS: Set to "true" to enable these tests
+ * </ul>
  */
+@RunWith(Parameterized.class)
 public class HttpConnectionReuseIT {
 
-  private static String host;
-  private static int port;
-  private static boolean useHttps;
-  private static URI seedUri;
-  private static boolean integrationTestsEnabled;
-  private static StaticCredentialsProvider credentialsProvider;
+  private final URI seedUri;
 
-  @BeforeClass
-  public static void setUpClass() {
-    host = System.getenv().getOrDefault("ALTERNATOR_HOST", "172.39.0.2");
-    port = Integer.parseInt(System.getenv().getOrDefault("ALTERNATOR_PORT", "9998"));
-    useHttps = Boolean.parseBoolean(System.getenv().getOrDefault("ALTERNATOR_HTTPS", "false"));
+  public HttpConnectionReuseIT(String scheme, URI seedUri) {
+    this.seedUri = seedUri;
+  }
 
-    String scheme = useHttps ? "https" : "http";
-    try {
-      seedUri = new URI(scheme + "://" + host + ":" + port);
-    } catch (URISyntaxException e) {
-      throw new RuntimeException(e);
-    }
-
-    credentialsProvider =
-        StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test"));
-
-    integrationTestsEnabled =
-        Boolean.parseBoolean(System.getenv().getOrDefault("INTEGRATION_TESTS", "false"));
+  @Parameters(name = "{0}")
+  public static Collection<Object[]> data() {
+    return IntegrationTestConfig.httpAndHttpsEndpoints();
   }
 
   @Before
   public void setUp() {
     assumeTrue(
         "Integration tests disabled. Set INTEGRATION_TESTS=true to enable.",
-        integrationTestsEnabled);
+        IntegrationTestConfig.ENABLED);
+  }
+
+  private AlternatorDynamoDbClientWrapper buildSyncWrapper() {
+    AlternatorDynamoDbClient.AlternatorDynamoDbClientBuilder builder =
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(seedUri)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS);
+    if ("https".equals(seedUri.getScheme())) {
+      builder.withTlsConfig(TlsConfig.trustAll());
+    }
+    return builder.buildWithAlternatorAPI();
+  }
+
+  private AlternatorDynamoDbAsyncClientWrapper buildAsyncWrapper() {
+    AlternatorDynamoDbAsyncClient.AlternatorDynamoDbAsyncClientBuilder builder =
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(seedUri)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS);
+    if ("https".equals(seedUri.getScheme())) {
+      builder.withTlsConfig(TlsConfig.trustAll());
+    }
+    return builder.buildWithAlternatorAPI();
   }
 
   @Test
   public void testSerialRequestsSucceed() throws Exception {
-    AlternatorDynamoDbClientWrapper wrapper =
-        AlternatorDynamoDbClient.builder()
-            .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
-            .buildWithAlternatorAPI();
-
+    AlternatorDynamoDbClientWrapper wrapper = buildSyncWrapper();
     DynamoDbClient client = wrapper.getClient();
 
     try {
@@ -99,12 +106,7 @@ public class HttpConnectionReuseIT {
 
   @Test
   public void testParallelRequestsSucceed() throws Exception {
-    AlternatorDynamoDbClientWrapper wrapper =
-        AlternatorDynamoDbClient.builder()
-            .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
-            .buildWithAlternatorAPI();
-
+    AlternatorDynamoDbClientWrapper wrapper = buildSyncWrapper();
     DynamoDbClient client = wrapper.getClient();
     ExecutorService executor = Executors.newFixedThreadPool(10);
 
@@ -136,12 +138,7 @@ public class HttpConnectionReuseIT {
 
   @Test
   public void testAsyncSerialRequestsSucceed() throws Exception {
-    AlternatorDynamoDbAsyncClientWrapper wrapper =
-        AlternatorDynamoDbAsyncClient.builder()
-            .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
-            .buildWithAlternatorAPI();
-
+    AlternatorDynamoDbAsyncClientWrapper wrapper = buildAsyncWrapper();
     DynamoDbAsyncClient client = wrapper.getClient();
 
     try {
@@ -166,12 +163,7 @@ public class HttpConnectionReuseIT {
 
   @Test
   public void testAsyncParallelRequestsSucceed() throws Exception {
-    AlternatorDynamoDbAsyncClientWrapper wrapper =
-        AlternatorDynamoDbAsyncClient.builder()
-            .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
-            .buildWithAlternatorAPI();
-
+    AlternatorDynamoDbAsyncClientWrapper wrapper = buildAsyncWrapper();
     DynamoDbAsyncClient client = wrapper.getClient();
 
     try {

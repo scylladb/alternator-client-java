@@ -9,16 +9,16 @@ import com.scylladb.alternator.routing.DatacenterScope;
 import com.scylladb.alternator.routing.RackScope;
 import com.scylladb.alternator.routing.RoutingScope;
 import java.net.URI;
-import java.net.URISyntaxException;
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.Before;
-import org.junit.BeforeClass;
 import org.junit.Test;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
+import org.junit.runners.Parameterized.Parameters;
 import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
 import software.amazon.awssdk.core.interceptor.Context;
 import software.amazon.awssdk.core.interceptor.ExecutionAttributes;
@@ -30,57 +30,42 @@ import software.amazon.awssdk.services.dynamodb.model.*;
  * Integration tests for AlternatorDynamoDbAsyncClient. These tests require a running ScyllaDB
  * cluster with Alternator enabled.
  *
- * <p>Set environment variables to configure: - ALTERNATOR_HOST: Host address (default: 172.39.0.2)
- * - ALTERNATOR_PORT: Port number (default: 8000) - ALTERNATOR_HTTPS: Use HTTPS (default: false) -
- * ALTERNATOR_DATACENTER: Datacenter name (default: datacenter1) - ALTERNATOR_RACK: Rack name
- * (default: rack1)
+ * <p>Tests run against both HTTP and HTTPS endpoints. Set environment variables to configure:
+ *
+ * <ul>
+ *   <li>ALTERNATOR_HOST: Host address (default: 172.39.0.2)
+ *   <li>ALTERNATOR_PORT: HTTP port number (default: 9998)
+ *   <li>ALTERNATOR_HTTPS_PORT: HTTPS port number (default: 9999)
+ *   <li>ALTERNATOR_DATACENTER: Datacenter name (default: datacenter1)
+ *   <li>ALTERNATOR_RACK: Rack name (default: rack1)
+ * </ul>
  */
+@RunWith(Parameterized.class)
 public class AlternatorDynamoDbAsyncClientIT {
 
-  private static String host;
-  private static int port;
-  private static boolean useHttps;
-  private static String datacenter;
-  private static String rack;
-  private static URI seedUri;
-  private static boolean integrationTestsEnabled;
-  private static StaticCredentialsProvider credentialsProvider;
+  private final URI seedUri;
 
-  @BeforeClass
-  public static void setUpClass() {
-    host = System.getenv().getOrDefault("ALTERNATOR_HOST", "172.39.0.2");
-    port = Integer.parseInt(System.getenv().getOrDefault("ALTERNATOR_PORT", "9998"));
-    useHttps = Boolean.parseBoolean(System.getenv().getOrDefault("ALTERNATOR_HTTPS", "false"));
-    datacenter = System.getenv().getOrDefault("ALTERNATOR_DATACENTER", "datacenter1");
-    rack = System.getenv().getOrDefault("ALTERNATOR_RACK", "rack1");
+  public AlternatorDynamoDbAsyncClientIT(String scheme, URI seedUri) {
+    this.seedUri = seedUri;
+  }
 
-    String scheme = useHttps ? "https" : "http";
-    try {
-      seedUri = new URI(scheme + "://" + host + ":" + port);
-    } catch (URISyntaxException e) {
-      throw new RuntimeException(e);
-    }
-
-    credentialsProvider =
-        StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test"));
-
-    // Check if integration tests should run
-    integrationTestsEnabled =
-        Boolean.parseBoolean(System.getenv().getOrDefault("INTEGRATION_TESTS", "false"));
+  @Parameters(name = "{0}")
+  public static Collection<Object[]> data() {
+    return IntegrationTestConfig.httpAndHttpsEndpoints();
   }
 
   @Before
   public void setUp() {
     assumeTrue(
         "Integration tests disabled. Set INTEGRATION_TESTS=true to enable.",
-        integrationTestsEnabled);
+        IntegrationTestConfig.ENABLED);
   }
 
   private AlternatorDynamoDbAsyncClientWrapper buildClient(String dc, String rackName) {
     RoutingScope scope = deriveRoutingScope(dc, rackName);
     return AlternatorDynamoDbAsyncClient.builder()
         .endpointOverride(seedUri)
-        .credentialsProvider(credentialsProvider)
+        .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
         .withRoutingScope(scope)
         .buildWithAlternatorAPI();
   }
@@ -98,7 +83,7 @@ public class AlternatorDynamoDbAsyncClientIT {
   private AlternatorDynamoDbAsyncClientWrapper buildClient() {
     return AlternatorDynamoDbAsyncClient.builder()
         .endpointOverride(seedUri)
-        .credentialsProvider(credentialsProvider)
+        .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
         .buildWithAlternatorAPI();
   }
 
@@ -116,7 +101,7 @@ public class AlternatorDynamoDbAsyncClientIT {
 
   @Test
   public void testCheckIfRackAndDatacenterSetCorrectly_CorrectDC() throws Exception {
-    AlternatorDynamoDbAsyncClientWrapper client = buildClient(datacenter, "");
+    AlternatorDynamoDbAsyncClientWrapper client = buildClient(IntegrationTestConfig.DATACENTER, "");
 
     // Should have discovered nodes
     List<URI> nodes = client.getLiveNodes();
@@ -128,7 +113,7 @@ public class AlternatorDynamoDbAsyncClientIT {
   @Test
   public void testCheckIfRackAndDatacenterSetCorrectly_WrongRack() throws Exception {
     // With wrong rack, pickSupportedDatacenterRack should fallback gracefully
-    AlternatorDynamoDbAsyncClientWrapper client = buildClient(datacenter, "wrongRack");
+    AlternatorDynamoDbAsyncClientWrapper client = buildClient(IntegrationTestConfig.DATACENTER, "wrongRack");
 
     // Should have fallen back and discovered nodes
     List<URI> nodes = client.getLiveNodes();
@@ -139,7 +124,7 @@ public class AlternatorDynamoDbAsyncClientIT {
 
   @Test
   public void testCheckIfRackAndDatacenterSetCorrectly_CorrectRack() throws Exception {
-    AlternatorDynamoDbAsyncClientWrapper client = buildClient(datacenter, rack);
+    AlternatorDynamoDbAsyncClientWrapper client = buildClient(IntegrationTestConfig.DATACENTER, IntegrationTestConfig.RACK);
 
     // Should have discovered nodes
     List<URI> nodes = client.getLiveNodes();
@@ -150,7 +135,7 @@ public class AlternatorDynamoDbAsyncClientIT {
 
   @Test
   public void testCheckIfRackDatacenterFeatureIsSupported() throws Exception {
-    AlternatorDynamoDbAsyncClientWrapper client = buildClient(datacenter, "");
+    AlternatorDynamoDbAsyncClientWrapper client = buildClient(IntegrationTestConfig.DATACENTER, "");
 
     boolean supported = client.checkIfRackDatacenterFeatureIsSupported();
 
@@ -190,7 +175,7 @@ public class AlternatorDynamoDbAsyncClientIT {
 
   @Test
   public void testNodeDiscoveryWithRoundRobin() throws Exception {
-    AlternatorDynamoDbAsyncClientWrapper client = buildClient(datacenter, "");
+    AlternatorDynamoDbAsyncClientWrapper client = buildClient(IntegrationTestConfig.DATACENTER, "");
 
     // Wait for node discovery
     Thread.sleep(1000);
@@ -304,8 +289,8 @@ public class AlternatorDynamoDbAsyncClientIT {
     AlternatorDynamoDbAsyncClientWrapper wrapper =
         AlternatorDynamoDbAsyncClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
-            .withRoutingScope(DatacenterScope.of(datacenter, ClusterScope.create()))
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
+            .withRoutingScope(DatacenterScope.of(IntegrationTestConfig.DATACENTER, ClusterScope.create()))
             .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
             .withMinCompressionSizeBytes(512)
             .buildWithAlternatorAPI();
@@ -354,7 +339,7 @@ public class AlternatorDynamoDbAsyncClientIT {
     DynamoDbAsyncClient client =
         AlternatorDynamoDbAsyncClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .overrideConfiguration(overrideConfig)
             .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
             .withMinCompressionSizeBytes(100) // Low threshold to ensure compression kicks in
@@ -417,7 +402,7 @@ public class AlternatorDynamoDbAsyncClientIT {
     DynamoDbAsyncClient client =
         AlternatorDynamoDbAsyncClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .overrideConfiguration(overrideConfig)
             .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
             .withMinCompressionSizeBytes(10000) // High threshold - small requests won't compress
@@ -457,7 +442,7 @@ public class AlternatorDynamoDbAsyncClientIT {
     DynamoDbAsyncClient client =
         AlternatorDynamoDbAsyncClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .overrideConfiguration(overrideConfig)
             .withOptimizeHeaders(true)
             .build();
@@ -517,7 +502,7 @@ public class AlternatorDynamoDbAsyncClientIT {
     DynamoDbAsyncClient client =
         AlternatorDynamoDbAsyncClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .overrideConfiguration(overrideConfig)
             .withOptimizeHeaders(true)
             .withHeadersWhitelist(customWhitelist)
@@ -564,7 +549,7 @@ public class AlternatorDynamoDbAsyncClientIT {
     DynamoDbAsyncClient client =
         AlternatorDynamoDbAsyncClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .overrideConfiguration(overrideConfig)
             .build();
 
@@ -614,7 +599,7 @@ public class AlternatorDynamoDbAsyncClientIT {
     DynamoDbAsyncClient client =
         AlternatorDynamoDbAsyncClient.builder()
             .endpointOverride(seedUri)
-            .credentialsProvider(credentialsProvider)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .overrideConfiguration(overrideConfig)
             .withOptimizeHeaders(true)
             .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
