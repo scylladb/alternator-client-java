@@ -89,34 +89,24 @@ public class AlternatorDynamoDbClientCustomizerTest {
   @Test
   public void testApacheCustomizerWithConfig() {
     // Verify that config + customizer work together without errors
-    AlternatorConfig config =
-        AlternatorConfig.builder()
-            .withMaxConnections(100)
-            .withConnectionMaxIdleTimeMs(30000)
-            .withConnectionTimeToLiveMs(60000)
-            .build();
-
     // This should not throw - build will fail to connect but the builder setup is valid
     AlternatorDynamoDbClient.AlternatorDynamoDbClientBuilder builder =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(SEED_URI)
-            .withAlternatorConfig(config)
+            .withMaxConnections(100)
+            .withConnectionMaxIdleTimeMs(30000)
+            .withConnectionTimeToLiveMs(60000)
             .withApacheHttpClientCustomizer(b -> b.maxConnections(200));
     assertNotNull("Builder with config and customizer should be valid", builder);
   }
 
   @Test
   public void testCrtCustomizerWithConfig() {
-    AlternatorConfig config =
-        AlternatorConfig.builder()
-            .withMaxConnections(100)
-            .withConnectionMaxIdleTimeMs(30000)
-            .build();
-
     AlternatorDynamoDbClient.AlternatorDynamoDbClientBuilder builder =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(SEED_URI)
-            .withAlternatorConfig(config)
+            .withMaxConnections(100)
+            .withConnectionMaxIdleTimeMs(30000)
             .withCrtHttpClientCustomizer(b -> b.maxConcurrency(200));
     assertNotNull("Builder with config and CRT customizer should be valid", builder);
   }

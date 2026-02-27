@@ -64,18 +64,13 @@ public class HttpClientImplementationSyncIT {
 
   @Test
   public void testApacheClientWithConfigPropagation() throws Exception {
-    AlternatorConfig config =
-        AlternatorConfig.builder()
-            .withMaxConnections(50)
-            .withConnectionMaxIdleTimeMs(30000)
-            .withConnectionTimeToLiveMs(60000)
-            .build();
-
     AlternatorDynamoDbClientWrapper wrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(IntegrationTestConfig.HTTP_SEED_URI)
             .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
-            .withAlternatorConfig(config)
+            .withMaxConnections(50)
+            .withConnectionMaxIdleTimeMs(30000)
+            .withConnectionTimeToLiveMs(60000)
             .withApacheHttpClientCustomizer(builder -> {})
             .buildWithAlternatorAPI();
 
@@ -220,17 +215,12 @@ public class HttpClientImplementationSyncIT {
 
   @Test
   public void testCrtClientWithConfigPropagation() throws Exception {
-    AlternatorConfig config =
-        AlternatorConfig.builder()
-            .withMaxConnections(50)
-            .withConnectionMaxIdleTimeMs(30000)
-            .build();
-
     AlternatorDynamoDbClientWrapper wrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(IntegrationTestConfig.HTTP_SEED_URI)
             .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
-            .withAlternatorConfig(config)
+            .withMaxConnections(50)
+            .withConnectionMaxIdleTimeMs(30000)
             .withCrtHttpClientCustomizer(builder -> {})
             .buildWithAlternatorAPI();
 

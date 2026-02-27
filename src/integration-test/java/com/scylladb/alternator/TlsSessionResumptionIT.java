@@ -219,8 +219,8 @@ public class TlsSessionResumptionIT {
   }
 
   @Test
-  public void testTlsSessionCacheViaAlternatorConfig() throws Exception {
-    // Test setting TLS config via AlternatorConfig
+  public void testTlsSessionCacheViaDirectBuilderMethods() throws Exception {
+    // Test setting TLS config via direct builder methods
     TlsSessionCacheConfig tlsConfig =
         TlsSessionCacheConfig.builder()
             .withEnabled(true)
@@ -228,18 +228,12 @@ public class TlsSessionResumptionIT {
             .withSessionTimeoutSeconds(1800)
             .build();
 
-    AlternatorConfig config =
-        AlternatorConfig.builder()
-            .withSeedNode(seedUri)
-            .withRoutingScope(ClusterScope.create())
-            .withTlsSessionCacheConfig(tlsConfig)
-            .build();
-
     AlternatorDynamoDbClientWrapper wrapper =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(seedUri)
             .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
-            .withAlternatorConfig(config)
+            .withRoutingScope(ClusterScope.create())
+            .withTlsSessionCacheConfig(tlsConfig)
             .buildWithAlternatorAPI();
 
     // Verify config was applied
