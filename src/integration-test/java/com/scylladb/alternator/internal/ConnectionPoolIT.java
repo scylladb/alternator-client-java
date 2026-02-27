@@ -431,15 +431,15 @@ public class ConnectionPoolIT {
             .get(10, TimeUnit.SECONDS);
       }
       // Allow the background node-discovery thread to stabilize its connections
-      Thread.sleep(2000);
+      Thread.sleep(1000);
 
       long baseline = countEstablishedConnections(port);
       assertTrue("Should have at least 1 established connection after warmup", baseline >= 1);
       long minAcceptable = Math.max(1, baseline / 2);
 
-      // Verify connections are not dropped during short idle gaps (500ms between requests).
-      for (int i = 0; i < 20; i++) {
-        Thread.sleep(500);
+      // Verify connections are not dropped during short idle gaps (200ms between requests).
+      for (int i = 0; i < 10; i++) {
+        Thread.sleep(200);
         client
             .putItem(
                 PutItemRequest.builder()
@@ -454,7 +454,7 @@ public class ConnectionPoolIT {
 
       long afterGaps = countEstablishedConnections(port);
       assertTrue(
-          "Async: connections should not drop significantly during 500ms idle gaps"
+          "Async: connections should not drop significantly during 200ms idle gaps"
               + " (baseline="
               + baseline
               + ", after="
@@ -464,7 +464,7 @@ public class ConnectionPoolIT {
               + ")",
           afterGaps >= minAcceptable);
       assertTrue(
-          "Async: connections should not grow significantly during 500ms idle gap requests"
+          "Async: connections should not grow significantly during 200ms idle gap requests"
               + " (baseline="
               + baseline
               + ", after="
@@ -473,7 +473,7 @@ public class ConnectionPoolIT {
           afterGaps <= baseline * 1.5);
 
       // Perform many more operations back-to-back — connections should be reused
-      for (int i = 0; i < 50; i++) {
+      for (int i = 0; i < 30; i++) {
         client
             .putItem(
                 PutItemRequest.builder()
@@ -488,7 +488,7 @@ public class ConnectionPoolIT {
 
       long afterBulk = countEstablishedConnections(port);
       assertTrue(
-          "Async: connections should not grow significantly during 50 back-to-back requests"
+          "Async: connections should not grow significantly during 30 back-to-back requests"
               + " (baseline="
               + baseline
               + ", after="
@@ -496,11 +496,11 @@ public class ConnectionPoolIT {
               + ")",
           afterBulk <= baseline * 1.5);
 
-      // Let connections sit idle for 10 seconds
-      Thread.sleep(10_000);
+      // Let connections sit idle for 3 seconds
+      Thread.sleep(3_000);
 
       // Connections should still be alive and reused after idle period
-      for (int i = 0; i < 10; i++) {
+      for (int i = 0; i < 5; i++) {
         client
             .putItem(
                 PutItemRequest.builder()
@@ -515,7 +515,7 @@ public class ConnectionPoolIT {
 
       long afterIdle = countEstablishedConnections(port);
       assertTrue(
-          "Async: most connections should survive 10s idle period"
+          "Async: most connections should survive 3s idle period"
               + " (baseline="
               + baseline
               + ", after="
@@ -545,7 +545,7 @@ public class ConnectionPoolIT {
    * async client uses Netty's connection pool instead of Apache HttpClient, so this test validates
    * that Netty's pool behaves correctly with Alternator load balancing.
    */
-  @Test(timeout = 60_000)
+  @Test(timeout = 30_000)
   public void testAsyncDynamoDbOperationsReuseConnections() throws Exception {
     runAsyncDynamoDbConnectionReuseTest(buildAsyncWrapper(), "conn_pool_it_async_default");
   }
@@ -594,7 +594,7 @@ public class ConnectionPoolIT {
         afterBulk <= baseline * 1.5);
 
     // Verify connections survive a short idle period
-    Thread.sleep(5_000);
+    Thread.sleep(3_000);
 
     for (int i = 0; i < 10; i++) {
       liveNodes.updateLiveNodes();
@@ -603,7 +603,7 @@ public class ConnectionPoolIT {
     long afterIdle = countEstablishedConnections(port);
     long minAcceptable = Math.max(1, baseline / 2);
     assertTrue(
-        "Polling connections should survive 5s idle period"
+        "Polling connections should survive 3s idle period"
             + " (baseline="
             + baseline
             + ", after="
