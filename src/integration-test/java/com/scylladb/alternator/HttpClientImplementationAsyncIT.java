@@ -4,7 +4,10 @@ import static org.junit.Assert.*;
 import static org.junit.Assume.*;
 
 import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -114,6 +117,53 @@ public class HttpClientImplementationAsyncIT {
   }
 
   @Test
+  public void testNettyClientHttpsWithCustomCa() throws Exception {
+    Path caCertPath = IntegrationTestConfig.CA_CERT_PATH;
+    assumeTrue(
+        "Custom CA certificate path not set. Set ALTERNATOR_CA_CERT_PATH to enable this test.",
+        caCertPath != null && Files.exists(caCertPath));
+
+    TlsConfig tlsConfig =
+        TlsConfig.builder().withCaCertPath(caCertPath).withTrustSystemCaCerts(false).build();
+
+    AlternatorDynamoDbAsyncClientWrapper wrapper =
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(IntegrationTestConfig.HTTPS_SEED_URI)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
+            .withTlsConfig(tlsConfig)
+            .withNettyHttpClientCustomizer(builder -> {})
+            .buildWithAlternatorAPI();
+    try {
+      assertFalse(
+          "Netty HTTPS client with custom CA should discover nodes",
+          wrapper.getLiveNodes().isEmpty());
+      wrapper.getClient().listTables(ListTablesRequest.builder().limit(1).build()).get();
+    } finally {
+      wrapper.close();
+    }
+  }
+
+  @Test
+  public void testNettyClientHttpsWithCustomCaCrud() throws Exception {
+    Path caCertPath = IntegrationTestConfig.CA_CERT_PATH;
+    assumeTrue(
+        "Custom CA certificate path not set. Set ALTERNATOR_CA_CERT_PATH to enable this test.",
+        caCertPath != null && Files.exists(caCertPath));
+
+    TlsConfig tlsConfig =
+        TlsConfig.builder().withCaCertPath(caCertPath).withTrustSystemCaCerts(false).build();
+
+    AlternatorDynamoDbAsyncClientWrapper wrapper =
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(IntegrationTestConfig.HTTPS_SEED_URI)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
+            .withTlsConfig(tlsConfig)
+            .withNettyHttpClientCustomizer(builder -> {})
+            .buildWithAlternatorAPI();
+    runAsyncDynamoDbCrudTest(wrapper, "netty_custom_ca_it_table");
+  }
+
+  @Test
   public void testNettyClientWithHeadersOptimization() throws Exception {
     verifyHeadersOptimization(
         AlternatorDynamoDbAsyncClient.builder()
@@ -218,6 +268,29 @@ public class HttpClientImplementationAsyncIT {
     } finally {
       wrapper.close();
     }
+  }
+
+  /**
+   * CRT HTTP client uses native AWS-CRT TLS and does not support custom CA certificates via Java
+   * TrustManagers. This test verifies that initialization fails fast when custom CA is configured
+   * with the CRT async client.
+   */
+  @Test(expected = UnsupportedOperationException.class)
+  public void testCrtAsyncClientHttpsWithCustomCaFailsOnInit() throws Exception {
+    Path caCertPath = IntegrationTestConfig.CA_CERT_PATH;
+    assumeTrue(
+        "Custom CA certificate path not set. Set ALTERNATOR_CA_CERT_PATH to enable this test.",
+        caCertPath != null && Files.exists(caCertPath));
+
+    TlsConfig tlsConfig =
+        TlsConfig.builder().withCaCertPath(caCertPath).withTrustSystemCaCerts(false).build();
+
+    AlternatorDynamoDbAsyncClient.builder()
+        .endpointOverride(IntegrationTestConfig.HTTPS_SEED_URI)
+        .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
+        .withTlsConfig(tlsConfig)
+        .withCrtAsyncHttpClientCustomizer(builder -> {})
+        .buildWithAlternatorAPI();
   }
 
   @Test

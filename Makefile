@@ -91,8 +91,8 @@ wait-for-alternator:
 
 .PHONY: test-integration
 test-integration: scylla-start wait-for-alternator
-	INTEGRATION_TESTS=true ALTERNATOR_HOST=172.39.0.2 ALTERNATOR_PORT=9998 ALTERNATOR_HTTPS_PORT=9999 \
-		${mvn} test -Dtest="**/*IT" -DfailIfNoTests=false || (make scylla-stop && exit 1)
+	INTEGRATION_TESTS=true ALTERNATOR_HOST=172.39.0.2 ALTERNATOR_PORT=9998 ALTERNATOR_HTTPS_PORT=9999 ALTERNATOR_CA_CERT_PATH=$$(pwd)/test/scylla/db.crt \
+		${mvn} test -Dtest="**/*IT" -DfailIfNoTests=false -Dsurefire.timeout=30 || (make scylla-stop && exit 1)
 	make scylla-stop
 
 .PHONY: test-demo
@@ -103,8 +103,8 @@ test-demo: scylla-start wait-for-alternator
 
 .PHONY: test-all
 test-all: scylla-start wait-for-alternator
-	INTEGRATION_TESTS=true ALTERNATOR_HOST=172.39.0.2 ALTERNATOR_PORT=9998 ALTERNATOR_HTTPS_PORT=9999 \
-		${mvn} test -Dtest="**/*IT" -DfailIfNoTests=false || (make scylla-stop && exit 1)
+	INTEGRATION_TESTS=true ALTERNATOR_HOST=172.39.0.2 ALTERNATOR_PORT=9998 ALTERNATOR_HTTPS_PORT=9999 ALTERNATOR_CA_CERT_PATH=$$(pwd)/test/scylla/db.crt \
+		${mvn} test -Dtest="**/*IT" -DfailIfNoTests=false -Dsurefire.timeout=30 || (make scylla-stop && exit 1)
 	${mvn} exec:java -Dexec.mainClass=com.scylladb.alternator.demo.Demo2 -Dexec.classpathScope=test -Dexec.args="--endpoint http://172.39.0.2:9998" || (make scylla-stop && exit 1)
 	${mvn} exec:java -Dexec.mainClass=com.scylladb.alternator.demo.Demo3 -Dexec.classpathScope=test -Dexec.args="--endpoint http://172.39.0.2:9998" || (make scylla-stop && exit 1)
 	make scylla-stop
@@ -169,7 +169,7 @@ release-dry-run:
 
 .PHONY: .prepare-cert
 .prepare-cert:
-	@[ -f "${MAKEFILE_PATH}/test/scylla/db.key" ] || (echo "Prepare certificate" && cd ${MAKEFILE_PATH}/test/scylla/ && openssl req -subj "/C=US/ST=Denial/L=Springfield/O=Dis/CN=www.example.com" -x509 -newkey rsa:4096 -keyout db.key -out db.crt -days 3650 -nodes && chmod 644 db.key)
+	@[ -f "${MAKEFILE_PATH}/test/scylla/db.key" ] || (echo "Prepare certificate" && cd ${MAKEFILE_PATH}/test/scylla/ && openssl req -subj "/C=US/ST=Denial/L=Springfield/O=Dis/CN=www.example.com" -x509 -newkey rsa:4096 -keyout db.key -out db.crt -days 3650 -nodes -addext "subjectAltName=IP:172.39.0.2,IP:172.39.0.3,IP:172.39.0.4" && chmod 644 db.key)
 
 .PHONY: scylla-start
 scylla-start: cert-cache-load .prepare-docker-compose .prepare-environment-update-aio-max-nr docker-cache-load

@@ -59,6 +59,11 @@ public final class CrtSyncClientFactory {
    * @return a configured SdkHttpClient with small pool size
    */
   public static SdkHttpClient createPollingClient(TlsConfig tlsConfig) {
+    if (tlsConfig != null && !tlsConfig.getCustomCaCertPaths().isEmpty()) {
+      throw new UnsupportedOperationException(
+          "Custom CA certificates are not supported with the CRT HTTP client. "
+              + "Use Apache or Netty HTTP client instead, or use TlsConfig.trustAll() for testing.");
+    }
     AwsCrtHttpClient.Builder builder = AwsCrtHttpClient.builder();
     builder.maxConcurrency(4);
 
@@ -67,9 +72,10 @@ public final class CrtSyncClientFactory {
 
   private static SdkHttpClient buildWithTls(AwsCrtHttpClient.Builder builder, TlsConfig tlsConfig) {
     if (tlsConfig != null) {
-      // Validate custom TLS config eagerly to fail fast on invalid certs
       if (!tlsConfig.getCustomCaCertPaths().isEmpty()) {
-        TlsContextFactory.createTrustManagers(tlsConfig);
+        throw new UnsupportedOperationException(
+            "Custom CA certificates are not supported with the CRT HTTP client. "
+                + "Use Apache or Netty HTTP client instead, or use TlsConfig.trustAll() for testing.");
       }
       if (tlsConfig.isTrustAllCertificates()) {
         return builder.buildWithDefaults(
