@@ -981,8 +981,7 @@ public class AlternatorConfig {
     /**
      * Sets the maximum lifetime for pooled connections in milliseconds.
      *
-     * <p>Connections older than this value will be closed regardless of activity. This is useful
-     * for ensuring connections are periodically refreshed to pick up DNS or load balancer changes.
+     * <p>Connections older than this value will be closed regardless of activity.
      *
      * <p>Default: 0 (use SDK default)
      *
