@@ -99,4 +99,4 @@ jobs:
         if: always()
         with:
           name: integration-test-results-java-${{ matrix.java-version }}
-          path: target/failsafe-reports/*.xml
+          path: target/surefire-reports/*.xml

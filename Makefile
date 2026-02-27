@@ -92,7 +92,7 @@ wait-for-alternator:
 .PHONY: test-integration
 test-integration: scylla-start wait-for-alternator
 	INTEGRATION_TESTS=true ALTERNATOR_HOST=172.39.0.2 ALTERNATOR_PORT=9998 ALTERNATOR_HTTPS_PORT=9999 \
-		${mvn} test -Dtest=AlternatorDynamoDbClientIT,AlternatorDynamoDbAsyncClientIT,TlsConfigIT,TlsSessionResumptionIT,com.scylladb.alternator.internal.ConnectionPoolIT,com.scylladb.alternator.HttpConnectionReuseIT || (make scylla-stop && exit 1)
+		${mvn} test -Dtest="**/*IT" -DfailIfNoTests=false || (make scylla-stop && exit 1)
 	make scylla-stop
 
 .PHONY: test-demo
@@ -103,8 +103,8 @@ test-demo: scylla-start wait-for-alternator
 
 .PHONY: test-all
 test-all: scylla-start wait-for-alternator
-	INTEGRATION_TESTS=true ALTERNATOR_HOST=172.39.0.2 ALTERNATOR_PORT=9998 ALTERNATOR_HTTPS=false \
-		${mvn} test -Dtest=AlternatorDynamoDbClientIT,AlternatorDynamoDbAsyncClientIT,TlsConfigIT,TlsSessionResumptionIT,com.scylladb.alternator.internal.ConnectionPoolIT || (make scylla-stop && exit 1)
+	INTEGRATION_TESTS=true ALTERNATOR_HOST=172.39.0.2 ALTERNATOR_PORT=9998 ALTERNATOR_HTTPS_PORT=9999 \
+		${mvn} test -Dtest="**/*IT" -DfailIfNoTests=false || (make scylla-stop && exit 1)
 	${mvn} exec:java -Dexec.mainClass=com.scylladb.alternator.demo.Demo2 -Dexec.classpathScope=test -Dexec.args="--endpoint http://172.39.0.2:9998" || (make scylla-stop && exit 1)
 	${mvn} exec:java -Dexec.mainClass=com.scylladb.alternator.demo.Demo3 -Dexec.classpathScope=test -Dexec.args="--endpoint http://172.39.0.2:9998" || (make scylla-stop && exit 1)
 	make scylla-stop
