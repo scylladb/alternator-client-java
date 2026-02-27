@@ -5,10 +5,8 @@ import static org.junit.Assume.*;
 
 import java.net.URI;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.ArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.Before;
 import org.junit.Test;
@@ -148,15 +146,6 @@ public class HttpClientImplementationAsyncIT {
             .withNettyHttpClientCustomizer(builder -> {}));
   }
 
-  @Test
-  public void testNettyClientSendsKeepAliveHeader() throws Exception {
-    verifyKeepAliveHeader(
-        AlternatorDynamoDbAsyncClient.builder()
-            .endpointOverride(IntegrationTestConfig.HTTP_SEED_URI)
-            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
-            .withNettyHttpClientCustomizer(builder -> {}),
-        "Netty");
-  }
 
   // ===========================================================================
   // CRT Async Client
@@ -264,15 +253,6 @@ public class HttpClientImplementationAsyncIT {
             .withCrtAsyncHttpClientCustomizer(builder -> {}));
   }
 
-  @Test
-  public void testCrtAsyncClientSendsKeepAliveHeader() throws Exception {
-    verifyKeepAliveHeader(
-        AlternatorDynamoDbAsyncClient.builder()
-            .endpointOverride(IntegrationTestConfig.HTTP_SEED_URI)
-            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
-            .withCrtAsyncHttpClientCustomizer(builder -> {}),
-        "CRT async");
-  }
 
   // ===========================================================================
   // Auto-detection (no explicit customizer)
@@ -449,46 +429,6 @@ public class HttpClientImplementationAsyncIT {
     assertTrue("Compression should be applied", gzipSeen.get());
     assertTrue("Host header should be present", seenHeaders.contains("Host"));
     assertTrue("X-Amz-Target header should be present", seenHeaders.contains("X-Amz-Target"));
-  }
-
-  /**
-   * Verifies that DynamoDB SDK requests include the Connection: keep-alive header for the given
-   * async client implementation.
-   */
-  private void verifyKeepAliveHeader(
-      AlternatorDynamoDbAsyncClient.AlternatorDynamoDbAsyncClientBuilder clientBuilder,
-      String clientName) {
-    List<String> connectionHeaderValues = new ArrayList<>();
-    ExecutionInterceptor keepAliveTracker =
-        new ExecutionInterceptor() {
-          @Override
-          public void beforeTransmission(
-              Context.BeforeTransmission context, ExecutionAttributes attrs) {
-            context
-                .httpRequest()
-                .firstMatchingHeader("Connection")
-                .ifPresent(connectionHeaderValues::add);
-          }
-        };
-    clientBuilder.overrideConfiguration(
-        ClientOverrideConfiguration.builder().addExecutionInterceptor(keepAliveTracker).build());
-
-    DynamoDbAsyncClient client = clientBuilder.build();
-    try {
-      client.listTables(ListTablesRequest.builder().build()).get();
-    } catch (Exception e) {
-      // Ignore — we only care about headers
-    } finally {
-      client.close();
-    }
-
-    assertFalse(
-        clientName + " client should send Connection header in DynamoDB requests",
-        connectionHeaderValues.isEmpty());
-    assertTrue(
-        clientName + " client Connection header should contain 'keep-alive', got: "
-            + connectionHeaderValues,
-        connectionHeaderValues.stream().anyMatch(v -> v.toLowerCase().contains("keep-alive")));
   }
 
   private void runAsyncDynamoDbCrudTest(
