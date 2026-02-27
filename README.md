@@ -110,8 +110,8 @@ prefers Apache for sync and Netty for async (falling back to CRT if those are ab
 ### Customizing the HTTP client
 
 The library creates HTTP clients internally with Alternator-optimized defaults
-(connection pool size, idle timeouts, keep-alive). To customize these settings,
-use the implementation-specific customizer callbacks:
+(connection pool size, idle timeouts, TCP keep-alive, HTTP keep-alive). To
+customize these settings, use the implementation-specific customizer callbacks:
 
 ```java
 // Customize the Apache HTTP client (sync)
@@ -149,8 +149,10 @@ DynamoDbAsyncClient client = AlternatorDynamoDbAsyncClient.builder()
     .build();
 ```
 
-The customizer receives the builder **after** Alternator defaults have been applied,
-so you only need to override the settings you want to change.
+The customizer receives the builder **after** all Alternator defaults and TLS settings
+have been applied, so you only need to override the settings you want to change. The
+customizer is the last thing called before `build()`, giving you full control over the
+final builder state.
 
 **Note:** Customizers are mutually exclusive with `httpClient()` / `httpClientBuilder()`.
 If you provide a fully custom HTTP client via those methods, customizers cannot be used
@@ -177,6 +179,22 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
 
 These settings are applied as defaults before any customizer callback runs, so the
 customizer can override them if needed.
+
+### Keep-alive defaults
+
+The library enables both TCP and HTTP keep-alive by default on all HTTP clients to
+prevent firewalls and NATs from silently dropping idle connections.
+
+**TCP keep-alive** (`SO_KEEPALIVE`) is enabled on every HTTP client:
+- Apache and Netty: `tcpKeepAlive(true)` — uses OS-level TCP keep-alive settings
+- AWS CRT: `TcpKeepAliveConfiguration` with 30-second interval and 30-second timeout
+
+**HTTP keep-alive** (`Connection: keep-alive` header) is added to every DynamoDB request
+by the query plan interceptor, signaling to the server that the connection should be
+reused for subsequent requests.
+
+Both mechanisms work together to maintain persistent, reusable connections across all
+Alternator nodes, reducing connection setup overhead and improving throughput.
 
 ## Usage
 
