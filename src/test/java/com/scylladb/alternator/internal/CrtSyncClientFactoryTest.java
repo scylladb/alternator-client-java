@@ -6,7 +6,12 @@ import com.scylladb.alternator.AlternatorConfig;
 import com.scylladb.alternator.TlsConfig;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.logging.Handler;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 import org.junit.Test;
 import software.amazon.awssdk.http.SdkHttpClient;
 
@@ -39,6 +44,9 @@ public class CrtSyncClientFactoryTest {
         AlternatorConfig.builder()
             .withMaxConnections(100)
             .withConnectionMaxIdleTimeMs(30000)
+            .withConnectionTimeToLiveMs(60000)
+            .withConnectionAcquisitionTimeoutMs(5000)
+            .withConnectionTimeoutMs(5000)
             .build();
     SdkHttpClient client = CrtSyncClientFactory.create(null, config, null);
     assertNotNull("Should create client with custom pool settings", client);
@@ -142,11 +150,37 @@ public class CrtSyncClientFactoryTest {
 
   @Test
   public void testConnectionTimeToLiveNotSupported() {
-    // CRT doesn't support connectionTimeToLive, verify it doesn't cause errors
-    AlternatorConfig config = AlternatorConfig.builder().withConnectionTimeToLiveMs(60000).build();
-    SdkHttpClient client = CrtSyncClientFactory.create(null, config, null);
-    assertNotNull("CRT should handle config with TTL gracefully", client);
-    client.close();
+    // CRT doesn't support connectionTimeToLive — verify it logs a warning and still works
+    Logger logger = Logger.getLogger(CrtSyncClientFactory.class.getName());
+    List<LogRecord> records = new ArrayList<>();
+    Handler handler =
+        new Handler() {
+          @Override
+          public void publish(LogRecord record) {
+            records.add(record);
+          }
+
+          @Override
+          public void flush() {}
+
+          @Override
+          public void close() {}
+        };
+    logger.addHandler(handler);
+    try {
+      AlternatorConfig config =
+          AlternatorConfig.builder().withConnectionTimeToLiveMs(60000).build();
+      SdkHttpClient client = CrtSyncClientFactory.create(null, config, null);
+      assertNotNull("CRT should handle config with TTL gracefully", client);
+      client.close();
+
+      assertTrue("Should have logged a warning about unsupported TTL", records.size() >= 1);
+      assertTrue(
+          "Warning should mention connectionTimeToLiveMs",
+          records.get(0).getMessage().contains("connectionTimeToLiveMs"));
+    } finally {
+      logger.removeHandler(handler);
+    }
   }
 
   @Test(expected = RuntimeException.class)

@@ -4,6 +4,7 @@ import com.scylladb.alternator.AlternatorConfig;
 import com.scylladb.alternator.TlsConfig;
 import java.time.Duration;
 import java.util.function.Consumer;
+import java.util.logging.Logger;
 import software.amazon.awssdk.http.SdkHttpClient;
 import software.amazon.awssdk.http.SdkHttpConfigurationOption;
 import software.amazon.awssdk.http.crt.AwsCrtHttpClient;
@@ -19,6 +20,8 @@ import software.amazon.awssdk.utils.AttributeMap;
  * @since 2.1.0
  */
 public final class CrtSyncClientFactory {
+
+  private static final Logger logger = Logger.getLogger(CrtSyncClientFactory.class.getName());
 
   private CrtSyncClientFactory() {}
 
@@ -41,11 +44,34 @@ public final class CrtSyncClientFactory {
 
     // Apply Alternator-optimized defaults from config
     if (config != null) {
-      if (config.getMaxConnections() > 0) {
-        builder.maxConcurrency(config.getMaxConnections());
-      }
+      builder.maxConcurrency(config.getMaxConnections());
       if (config.getConnectionMaxIdleTimeMs() > 0) {
         builder.connectionMaxIdleTime(Duration.ofMillis(config.getConnectionMaxIdleTimeMs()));
+      } else if (config.getConnectionMaxIdleTimeMs() == 0) {
+        logger.info(
+            "connectionMaxIdleTimeMs=0 is not supported by CRT HTTP client;"
+                + " falling back to SDK default.");
+      }
+      // CRT SDK requires positive durations for these timeouts; skip when 0 (use SDK default)
+      if (config.getConnectionAcquisitionTimeoutMs() > 0) {
+        builder.connectionAcquisitionTimeout(
+            Duration.ofMillis(config.getConnectionAcquisitionTimeoutMs()));
+      } else if (config.getConnectionAcquisitionTimeoutMs() == 0) {
+        logger.info(
+            "connectionAcquisitionTimeoutMs=0 is not supported by CRT HTTP client;"
+                + " falling back to SDK default.");
+      }
+      if (config.getConnectionTimeoutMs() > 0) {
+        builder.connectionTimeout(Duration.ofMillis(config.getConnectionTimeoutMs()));
+      } else if (config.getConnectionTimeoutMs() == 0) {
+        logger.info(
+            "connectionTimeoutMs=0 is not supported by CRT HTTP client;"
+                + " falling back to SDK default.");
+      }
+      if (config.getConnectionTimeToLiveMs() > 0) {
+        logger.warning(
+            "connectionTimeToLiveMs is not supported by the CRT HTTP client and will be ignored. "
+                + "Use Apache HTTP client if connection TTL is required.");
       }
     }
 
