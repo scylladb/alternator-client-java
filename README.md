@@ -160,6 +160,7 @@ If you provide a fully custom HTTP client via those methods, customizers cannot 
 
 ### Connection pool tuning
 
+The library applies Alternator-optimized connection pool defaults out of the box.
 For common pool settings that apply regardless of which HTTP client implementation is
 used, you can configure them directly on the builder:
 
@@ -167,11 +168,25 @@ used, you can configure them directly on the builder:
 DynamoDbClient client = AlternatorDynamoDbClient.builder()
     .endpointOverride(URI.create("http://localhost:8043"))
     .credentialsProvider(myCredentials)
-    .withMaxConnections(100)
+    .withMaxConnections(200)
     .withConnectionMaxIdleTimeMs(30000)
     .withConnectionTimeToLiveMs(60000)  // Apache and Netty only; ignored by CRT
+    .withConnectionAcquisitionTimeoutMs(5000)
+    .withConnectionTimeoutMs(3000)
     .build();
 ```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `maxConnections` | 400 | Maximum connections in the pool. Higher than SDK defaults to support multi-node clusters. |
+| `connectionMaxIdleTimeMs` | 600,000 (10 min) | Idle connections are closed after this time. Set to 0 to disable idle eviction (a warning is logged). |
+| `connectionTimeToLiveMs` | 0 (unlimited) | Maximum lifetime for any connection. Apache and Netty only; CRT logs a warning and ignores it. |
+| `connectionAcquisitionTimeoutMs` | 10,000 (10 sec) | How long to wait for a connection from an exhausted pool. |
+| `connectionTimeoutMs` | 15,000 (15 sec) | How long to wait for a TCP connection to be established. |
+
+**CRT HTTP client note:** The CRT SDK requires positive durations for timeouts. Setting
+`connectionAcquisitionTimeoutMs` or `connectionTimeoutMs` to 0 with CRT will fall back to
+SDK defaults (an info message is logged).
 
 These settings are applied as defaults before any customizer callback runs, so the
 customizer can override them if needed.
