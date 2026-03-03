@@ -2,6 +2,12 @@ package com.scylladb.alternator;
 
 import static org.junit.Assert.*;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 import org.junit.Test;
 
 /**
@@ -15,15 +21,24 @@ public class AlternatorConfigConnectionPoolTest {
   public void testDefaultConnectionPoolSettings() {
     AlternatorConfig config = AlternatorConfig.builder().build();
 
-    assertEquals(AlternatorConfig.CONNECTION_POOL_DEFAULT, config.getMaxConnections());
-    assertEquals(AlternatorConfig.CONNECTION_POOL_DEFAULT, config.getConnectionMaxIdleTimeMs());
-    assertEquals(AlternatorConfig.CONNECTION_POOL_DEFAULT, config.getConnectionTimeToLiveMs());
-    assertFalse(config.hasCustomConnectionPoolSettings());
+    assertEquals(AlternatorConfig.DEFAULT_MAX_CONNECTIONS, config.getMaxConnections());
+    assertEquals(
+        AlternatorConfig.DEFAULT_CONNECTION_MAX_IDLE_TIME_MS, config.getConnectionMaxIdleTimeMs());
+    assertEquals(
+        AlternatorConfig.DEFAULT_CONNECTION_TIME_TO_LIVE_MS, config.getConnectionTimeToLiveMs());
+    assertEquals(
+        AlternatorConfig.DEFAULT_CONNECTION_ACQUISITION_TIMEOUT_MS,
+        config.getConnectionAcquisitionTimeoutMs());
+    assertEquals(AlternatorConfig.DEFAULT_CONNECTION_TIMEOUT_MS, config.getConnectionTimeoutMs());
   }
 
   @Test
-  public void testConnectionPoolDefaultConstantIsZero() {
-    assertEquals(0, AlternatorConfig.CONNECTION_POOL_DEFAULT);
+  public void testDefaultConstants() {
+    assertEquals(400, AlternatorConfig.DEFAULT_MAX_CONNECTIONS);
+    assertEquals(600_000, AlternatorConfig.DEFAULT_CONNECTION_MAX_IDLE_TIME_MS);
+    assertEquals(0, AlternatorConfig.DEFAULT_CONNECTION_TIME_TO_LIVE_MS);
+    assertEquals(10_000, AlternatorConfig.DEFAULT_CONNECTION_ACQUISITION_TIMEOUT_MS);
+    assertEquals(15_000, AlternatorConfig.DEFAULT_CONNECTION_TIMEOUT_MS);
   }
 
   @Test
@@ -31,7 +46,6 @@ public class AlternatorConfigConnectionPoolTest {
     AlternatorConfig config = AlternatorConfig.builder().withMaxConnections(100).build();
 
     assertEquals(100, config.getMaxConnections());
-    assertTrue(config.hasCustomConnectionPoolSettings());
   }
 
   @Test
@@ -39,7 +53,6 @@ public class AlternatorConfigConnectionPoolTest {
     AlternatorConfig config = AlternatorConfig.builder().withConnectionMaxIdleTimeMs(30000).build();
 
     assertEquals(30000, config.getConnectionMaxIdleTimeMs());
-    assertTrue(config.hasCustomConnectionPoolSettings());
   }
 
   @Test
@@ -47,7 +60,21 @@ public class AlternatorConfigConnectionPoolTest {
     AlternatorConfig config = AlternatorConfig.builder().withConnectionTimeToLiveMs(60000).build();
 
     assertEquals(60000, config.getConnectionTimeToLiveMs());
-    assertTrue(config.hasCustomConnectionPoolSettings());
+  }
+
+  @Test
+  public void testCustomConnectionAcquisitionTimeout() {
+    AlternatorConfig config =
+        AlternatorConfig.builder().withConnectionAcquisitionTimeoutMs(5000).build();
+
+    assertEquals(5000, config.getConnectionAcquisitionTimeoutMs());
+  }
+
+  @Test
+  public void testCustomConnectionTimeout() {
+    AlternatorConfig config = AlternatorConfig.builder().withConnectionTimeoutMs(3000).build();
+
+    assertEquals(3000, config.getConnectionTimeoutMs());
   }
 
   @Test
@@ -57,27 +84,36 @@ public class AlternatorConfigConnectionPoolTest {
             .withMaxConnections(200)
             .withConnectionMaxIdleTimeMs(30000)
             .withConnectionTimeToLiveMs(60000)
+            .withConnectionAcquisitionTimeoutMs(5000)
+            .withConnectionTimeoutMs(3000)
             .build();
 
     assertEquals(200, config.getMaxConnections());
     assertEquals(30000, config.getConnectionMaxIdleTimeMs());
     assertEquals(60000, config.getConnectionTimeToLiveMs());
-    assertTrue(config.hasCustomConnectionPoolSettings());
+    assertEquals(5000, config.getConnectionAcquisitionTimeoutMs());
+    assertEquals(3000, config.getConnectionTimeoutMs());
   }
 
   @Test
-  public void testZeroValuesAreValid() {
+  public void testZeroValuesAreValidForTimeSettings() {
     AlternatorConfig config =
         AlternatorConfig.builder()
-            .withMaxConnections(0)
             .withConnectionMaxIdleTimeMs(0)
             .withConnectionTimeToLiveMs(0)
+            .withConnectionAcquisitionTimeoutMs(0)
+            .withConnectionTimeoutMs(0)
             .build();
 
-    assertEquals(0, config.getMaxConnections());
     assertEquals(0, config.getConnectionMaxIdleTimeMs());
     assertEquals(0, config.getConnectionTimeToLiveMs());
-    assertFalse(config.hasCustomConnectionPoolSettings());
+    assertEquals(0, config.getConnectionAcquisitionTimeoutMs());
+    assertEquals(0, config.getConnectionTimeoutMs());
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testZeroMaxConnectionsThrowsException() {
+    AlternatorConfig.builder().withMaxConnections(0).build();
   }
 
   @Test(expected = IllegalArgumentException.class)
@@ -95,24 +131,82 @@ public class AlternatorConfigConnectionPoolTest {
     AlternatorConfig.builder().withConnectionTimeToLiveMs(-1).build();
   }
 
-  @Test
-  public void testHasCustomConnectionPoolSettingsWithOnlyMaxConnections() {
-    AlternatorConfig config = AlternatorConfig.builder().withMaxConnections(50).build();
+  @Test(expected = IllegalArgumentException.class)
+  public void testNegativeConnectionAcquisitionTimeoutThrowsException() {
+    AlternatorConfig.builder().withConnectionAcquisitionTimeoutMs(-1).build();
+  }
 
-    assertTrue(config.hasCustomConnectionPoolSettings());
+  @Test(expected = IllegalArgumentException.class)
+  public void testNegativeConnectionTimeoutThrowsException() {
+    AlternatorConfig.builder().withConnectionTimeoutMs(-1).build();
   }
 
   @Test
-  public void testHasCustomConnectionPoolSettingsWithOnlyIdleTime() {
-    AlternatorConfig config = AlternatorConfig.builder().withConnectionMaxIdleTimeMs(10000).build();
+  public void testZeroIdleTimeWarnsAboutStaleConnections() {
+    List<LogRecord> records = new ArrayList<>();
+    Logger logger = Logger.getLogger(AlternatorConfig.class.getName());
+    Handler handler = new CapturingHandler(records);
+    logger.addHandler(handler);
+    try {
+      AlternatorConfig.builder().withConnectionMaxIdleTimeMs(0).build();
 
-    assertTrue(config.hasCustomConnectionPoolSettings());
+      assertEquals("Expected exactly one warning", 1, records.size());
+      LogRecord record = records.get(0);
+      assertEquals(Level.WARNING, record.getLevel());
+      assertTrue(
+          "Warning should mention disabling idle connection eviction",
+          record.getMessage().contains("disables idle connection eviction"));
+    } finally {
+      logger.removeHandler(handler);
+    }
   }
 
   @Test
-  public void testHasCustomConnectionPoolSettingsWithOnlyTtl() {
-    AlternatorConfig config = AlternatorConfig.builder().withConnectionTimeToLiveMs(120000).build();
+  public void testDefaultIdleTimeNoWarning() {
+    List<LogRecord> records = new ArrayList<>();
+    Logger logger = Logger.getLogger(AlternatorConfig.class.getName());
+    Handler handler = new CapturingHandler(records);
+    logger.addHandler(handler);
+    try {
+      AlternatorConfig.builder().build();
 
-    assertTrue(config.hasCustomConnectionPoolSettings());
+      assertTrue("No warning expected for default config", records.isEmpty());
+    } finally {
+      logger.removeHandler(handler);
+    }
+  }
+
+  @Test
+  public void testNonZeroIdleTimeNoWarning() {
+    List<LogRecord> records = new ArrayList<>();
+    Logger logger = Logger.getLogger(AlternatorConfig.class.getName());
+    Handler handler = new CapturingHandler(records);
+    logger.addHandler(handler);
+    try {
+      AlternatorConfig.builder().withConnectionMaxIdleTimeMs(30000).build();
+
+      assertTrue("No warning expected for non-zero idle time", records.isEmpty());
+    } finally {
+      logger.removeHandler(handler);
+    }
+  }
+
+  private static class CapturingHandler extends Handler {
+    private final List<LogRecord> records;
+
+    CapturingHandler(List<LogRecord> records) {
+      this.records = records;
+    }
+
+    @Override
+    public void publish(LogRecord record) {
+      records.add(record);
+    }
+
+    @Override
+    public void flush() {}
+
+    @Override
+    public void close() {}
   }
 }

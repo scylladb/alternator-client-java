@@ -40,6 +40,8 @@ public class NettyAsyncClientFactoryTest {
             .withMaxConnections(100)
             .withConnectionMaxIdleTimeMs(30000)
             .withConnectionTimeToLiveMs(60000)
+            .withConnectionAcquisitionTimeoutMs(5000)
+            .withConnectionTimeoutMs(5000)
             .build();
     SdkAsyncHttpClient client = NettyAsyncClientFactory.create(null, config, null);
     assertNotNull("Should create client with custom pool settings", client);

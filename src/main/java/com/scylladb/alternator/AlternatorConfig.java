@@ -12,6 +12,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.logging.Logger;
 
 /**
  * Configuration class for Alternator load balancing settings.
@@ -47,6 +48,8 @@ import java.util.Set;
  * @since 2.0.0
  */
 public class AlternatorConfig {
+  private static final Logger logger = Logger.getLogger(AlternatorConfig.class.getName());
+
   /** Default minimum request body size (in bytes) that triggers compression. */
   public static final int DEFAULT_MIN_COMPRESSION_SIZE_BYTES = 1024;
 
@@ -56,12 +59,24 @@ public class AlternatorConfig {
   /** Default refresh interval (in milliseconds) when the client is idle. */
   public static final long DEFAULT_IDLE_REFRESH_INTERVAL_MS = 60000;
 
+  /** Default maximum number of connections in the HTTP client pool. */
+  public static final int DEFAULT_MAX_CONNECTIONS = 400;
+
+  /** Default maximum idle time for pooled connections in milliseconds (10 minutes). */
+  public static final long DEFAULT_CONNECTION_MAX_IDLE_TIME_MS = 600_000;
+
   /**
-   * Default value for connection pool settings, indicating that the SDK default should be used.
+   * Default maximum lifetime for pooled connections in milliseconds (0 = unlimited).
    *
-   * @since 2.0.2
+   * <p>A value of 0 means connections are not closed based on age.
    */
-  public static final int CONNECTION_POOL_DEFAULT = 0;
+  public static final long DEFAULT_CONNECTION_TIME_TO_LIVE_MS = 0;
+
+  /** Default timeout for acquiring a connection from the pool in milliseconds (10 seconds). */
+  public static final long DEFAULT_CONNECTION_ACQUISITION_TIMEOUT_MS = 10_000;
+
+  /** Default timeout for establishing a TCP connection in milliseconds (15 seconds). */
+  public static final long DEFAULT_CONNECTION_TIMEOUT_MS = 15_000;
 
   /**
    * Base HTTP headers required for proper operation with Alternator.
@@ -132,6 +147,8 @@ public class AlternatorConfig {
   private final int maxConnections;
   private final long connectionMaxIdleTimeMs;
   private final long connectionTimeToLiveMs;
+  private final long connectionAcquisitionTimeoutMs;
+  private final long connectionTimeoutMs;
 
   /**
    * Package-private constructor. Use {@link AlternatorConfig#builder()} to create instances.
@@ -150,11 +167,14 @@ public class AlternatorConfig {
    * @param keyRouteAffinityConfig the key route affinity configuration
    * @param activeRefreshIntervalMs refresh interval when there are active requests
    * @param idleRefreshIntervalMs refresh interval when the client is idle
-   * @param maxConnections maximum number of connections in the HTTP client pool (0 = SDK default)
-   * @param connectionMaxIdleTimeMs maximum idle time for pooled connections in milliseconds (0 =
-   *     SDK default)
-   * @param connectionTimeToLiveMs maximum lifetime for pooled connections in milliseconds (0 = SDK
-   *     default)
+   * @param maxConnections maximum number of connections in the HTTP client pool
+   * @param connectionMaxIdleTimeMs maximum idle time for pooled connections in milliseconds
+   * @param connectionTimeToLiveMs maximum lifetime for pooled connections in milliseconds (0 =
+   *     unlimited)
+   * @param connectionAcquisitionTimeoutMs maximum time to wait for a connection from the pool in
+   *     milliseconds
+   * @param connectionTimeoutMs maximum time to wait for a connection to be established in
+   *     milliseconds
    */
   protected AlternatorConfig(
       List<String> seedHosts,
@@ -173,7 +193,9 @@ public class AlternatorConfig {
       long idleRefreshIntervalMs,
       int maxConnections,
       long connectionMaxIdleTimeMs,
-      long connectionTimeToLiveMs) {
+      long connectionTimeToLiveMs,
+      long connectionAcquisitionTimeoutMs,
+      long connectionTimeoutMs) {
     this.seedHosts =
         seedHosts != null
             ? Collections.unmodifiableList(new ArrayList<>(seedHosts))
@@ -208,6 +230,8 @@ public class AlternatorConfig {
     this.maxConnections = maxConnections;
     this.connectionMaxIdleTimeMs = connectionMaxIdleTimeMs;
     this.connectionTimeToLiveMs = connectionTimeToLiveMs;
+    this.connectionAcquisitionTimeoutMs = connectionAcquisitionTimeoutMs;
+    this.connectionTimeoutMs = connectionTimeoutMs;
   }
 
   /**
@@ -407,9 +431,7 @@ public class AlternatorConfig {
   /**
    * Gets the maximum number of connections in the HTTP client connection pool.
    *
-   * <p>A value of 0 means the SDK default will be used.
-   *
-   * @return the maximum number of connections, or 0 for SDK default
+   * @return the maximum number of connections
    * @since 2.0.2
    */
   public int getMaxConnections() {
@@ -419,10 +441,9 @@ public class AlternatorConfig {
   /**
    * Gets the maximum idle time for pooled connections in milliseconds.
    *
-   * <p>Connections that have been idle longer than this value will be closed. A value of 0 means
-   * the SDK default will be used.
+   * <p>Connections that have been idle longer than this value will be closed.
    *
-   * @return the maximum idle time in milliseconds, or 0 for SDK default
+   * @return the maximum idle time in milliseconds
    * @since 2.0.2
    */
   public long getConnectionMaxIdleTimeMs() {
@@ -433,9 +454,9 @@ public class AlternatorConfig {
    * Gets the maximum lifetime for pooled connections in milliseconds.
    *
    * <p>Connections older than this value will be closed regardless of activity. A value of 0 means
-   * the SDK default will be used.
+   * unlimited lifetime.
    *
-   * @return the connection time-to-live in milliseconds, or 0 for SDK default
+   * @return the connection time-to-live in milliseconds
    * @since 2.0.2
    */
   public long getConnectionTimeToLiveMs() {
@@ -443,12 +464,29 @@ public class AlternatorConfig {
   }
 
   /**
-   * Checks whether any custom connection pool settings have been configured.
+   * Returns the maximum time to wait for a connection from the pool in milliseconds.
    *
-   * @return true if any connection pool setting differs from the default
+   * <p>When the connection pool is exhausted, this controls how long the client will wait for a
+   * connection to become available before failing.
+   *
+   * @return the connection acquisition timeout in milliseconds
+   * @since 2.0.3
    */
-  boolean hasCustomConnectionPoolSettings() {
-    return maxConnections > 0 || connectionMaxIdleTimeMs > 0 || connectionTimeToLiveMs > 0;
+  public long getConnectionAcquisitionTimeoutMs() {
+    return connectionAcquisitionTimeoutMs;
+  }
+
+  /**
+   * Returns the maximum time to wait for a connection to be established in milliseconds.
+   *
+   * <p>This controls how long the client will wait for the TCP connection handshake to complete
+   * when connecting to a node.
+   *
+   * @return the connection timeout in milliseconds
+   * @since 2.0.3
+   */
+  public long getConnectionTimeoutMs() {
+    return connectionTimeoutMs;
   }
 
   /**
@@ -496,9 +534,12 @@ public class AlternatorConfig {
     private KeyRouteAffinityConfig keyRouteAffinityConfig = null;
     private long activeRefreshIntervalMs = DEFAULT_ACTIVE_REFRESH_INTERVAL_MS;
     private long idleRefreshIntervalMs = DEFAULT_IDLE_REFRESH_INTERVAL_MS;
-    private int maxConnections = CONNECTION_POOL_DEFAULT;
-    private long connectionMaxIdleTimeMs = CONNECTION_POOL_DEFAULT;
-    private long connectionTimeToLiveMs = CONNECTION_POOL_DEFAULT;
+    private int maxConnections = DEFAULT_MAX_CONNECTIONS;
+    private long connectionMaxIdleTimeMs = DEFAULT_CONNECTION_MAX_IDLE_TIME_MS;
+    private boolean connectionMaxIdleTimeMsSet = false;
+    private long connectionTimeToLiveMs = DEFAULT_CONNECTION_TIME_TO_LIVE_MS;
+    private long connectionAcquisitionTimeoutMs = DEFAULT_CONNECTION_ACQUISITION_TIMEOUT_MS;
+    private long connectionTimeoutMs = DEFAULT_CONNECTION_TIMEOUT_MS;
 
     /** Package-private constructor. Use {@link AlternatorConfig#builder()} to create instances. */
     Builder() {}
@@ -950,9 +991,9 @@ public class AlternatorConfig {
      * this value is recommended for multi-node Alternator clusters to allow concurrent requests to
      * different nodes.
      *
-     * <p>Default: 0 (use SDK default)
+     * <p>Default: {@link #DEFAULT_MAX_CONNECTIONS} (400)
      *
-     * @param maxConnections the maximum number of connections, or 0 to use SDK default
+     * @param maxConnections the maximum number of connections (must be positive)
      * @return this builder instance
      * @since 2.0.2
      */
@@ -967,31 +1008,76 @@ public class AlternatorConfig {
      * <p>Connections that have been idle longer than this value will be closed and removed from the
      * pool. This helps reclaim resources when the cluster is underutilized.
      *
-     * <p>Default: 0 (use SDK default)
+     * <p>Default: {@link #DEFAULT_CONNECTION_MAX_IDLE_TIME_MS} (10 minutes)
      *
-     * @param connectionMaxIdleTimeMs the maximum idle time in milliseconds, or 0 to use SDK default
+     * @param connectionMaxIdleTimeMs the maximum idle time in milliseconds (must be non-negative)
      * @return this builder instance
      * @since 2.0.2
      */
     public Builder withConnectionMaxIdleTimeMs(long connectionMaxIdleTimeMs) {
       this.connectionMaxIdleTimeMs = connectionMaxIdleTimeMs;
+      this.connectionMaxIdleTimeMsSet = true;
       return this;
     }
 
     /**
      * Sets the maximum lifetime for pooled connections in milliseconds.
      *
-     * <p>Connections older than this value will be closed regardless of activity.
+     * <p>Connections older than this value will be closed regardless of activity. A value of 0
+     * means unlimited lifetime.
      *
-     * <p>Default: 0 (use SDK default)
+     * <p>Default: {@link #DEFAULT_CONNECTION_TIME_TO_LIVE_MS} (0, unlimited)
      *
-     * @param connectionTimeToLiveMs the connection time-to-live in milliseconds, or 0 to use SDK
-     *     default
+     * @param connectionTimeToLiveMs the connection time-to-live in milliseconds (must be
+     *     non-negative, 0 for unlimited)
      * @return this builder instance
      * @since 2.0.2
      */
     public Builder withConnectionTimeToLiveMs(long connectionTimeToLiveMs) {
       this.connectionTimeToLiveMs = connectionTimeToLiveMs;
+      return this;
+    }
+
+    /**
+     * Sets the maximum time to wait for a connection from the pool in milliseconds.
+     *
+     * <p>When the connection pool is exhausted, this controls how long the client will wait for a
+     * connection to become available before failing with a timeout exception.
+     *
+     * <p>A value of 0 means "unlimited" (wait indefinitely) for Apache and Netty HTTP clients. The
+     * CRT HTTP client does not support zero-duration timeouts; setting 0 with CRT will fall back to
+     * the SDK default and log an info message.
+     *
+     * <p>Default: {@link #DEFAULT_CONNECTION_ACQUISITION_TIMEOUT_MS} (10 seconds)
+     *
+     * @param connectionAcquisitionTimeoutMs the acquisition timeout in milliseconds (must be
+     *     non-negative)
+     * @return this builder instance
+     * @since 2.0.3
+     */
+    public Builder withConnectionAcquisitionTimeoutMs(long connectionAcquisitionTimeoutMs) {
+      this.connectionAcquisitionTimeoutMs = connectionAcquisitionTimeoutMs;
+      return this;
+    }
+
+    /**
+     * Sets the maximum time to wait for a connection to be established in milliseconds.
+     *
+     * <p>This controls how long the client will wait for the TCP connection handshake to complete
+     * when connecting to a node.
+     *
+     * <p>A value of 0 means "unlimited" (wait indefinitely) for Apache and Netty HTTP clients. The
+     * CRT HTTP client does not support zero-duration timeouts; setting 0 with CRT will fall back to
+     * the SDK default and log an info message.
+     *
+     * <p>Default: {@link #DEFAULT_CONNECTION_TIMEOUT_MS} (15 seconds)
+     *
+     * @param connectionTimeoutMs the connection timeout in milliseconds (must be non-negative)
+     * @return this builder instance
+     * @since 2.0.3
+     */
+    public Builder withConnectionTimeoutMs(long connectionTimeoutMs) {
+      this.connectionTimeoutMs = connectionTimeoutMs;
       return this;
     }
 
@@ -1010,9 +1096,9 @@ public class AlternatorConfig {
       }
 
       // Validate connection pool settings
-      if (maxConnections < 0) {
+      if (maxConnections <= 0) {
         throw new IllegalArgumentException(
-            "maxConnections must be non-negative, but was: " + maxConnections);
+            "maxConnections must be positive, but was: " + maxConnections);
       }
       if (connectionMaxIdleTimeMs < 0) {
         throw new IllegalArgumentException(
@@ -1021,6 +1107,22 @@ public class AlternatorConfig {
       if (connectionTimeToLiveMs < 0) {
         throw new IllegalArgumentException(
             "connectionTimeToLiveMs must be non-negative, but was: " + connectionTimeToLiveMs);
+      }
+      if (connectionAcquisitionTimeoutMs < 0) {
+        throw new IllegalArgumentException(
+            "connectionAcquisitionTimeoutMs must be non-negative, but was: "
+                + connectionAcquisitionTimeoutMs);
+      }
+      if (connectionTimeoutMs < 0) {
+        throw new IllegalArgumentException(
+            "connectionTimeoutMs must be non-negative, but was: " + connectionTimeoutMs);
+      }
+
+      // Warn when idle connection eviction is explicitly disabled
+      if (connectionMaxIdleTimeMsSet && connectionMaxIdleTimeMs == 0) {
+        logger.warning(
+            "connectionMaxIdleTimeMs is set to 0, which disables idle connection eviction. "
+                + "This can lead to stale connections in long-running applications.");
       }
 
       // Validate headersWhitelist if it was explicitly set
@@ -1088,7 +1190,9 @@ public class AlternatorConfig {
           idleRefreshIntervalMs,
           maxConnections,
           connectionMaxIdleTimeMs,
-          connectionTimeToLiveMs);
+          connectionTimeToLiveMs,
+          connectionAcquisitionTimeoutMs,
+          connectionTimeoutMs);
     }
   }
 }

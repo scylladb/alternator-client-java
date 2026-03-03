@@ -37,15 +37,20 @@ public final class ApacheSyncClientFactory {
 
     // Apply Alternator-optimized defaults from config
     if (config != null) {
-      if (config.getMaxConnections() > 0) {
-        builder.maxConnections(config.getMaxConnections());
-      }
+      builder.maxConnections(config.getMaxConnections());
       if (config.getConnectionMaxIdleTimeMs() > 0) {
         builder.connectionMaxIdleTime(Duration.ofMillis(config.getConnectionMaxIdleTimeMs()));
+        builder.useIdleConnectionReaper(true);
+      } else {
+        // Idle time is 0 — disable idle eviction entirely
+        builder.useIdleConnectionReaper(false);
       }
       if (config.getConnectionTimeToLiveMs() > 0) {
         builder.connectionTimeToLive(Duration.ofMillis(config.getConnectionTimeToLiveMs()));
       }
+      builder.connectionAcquisitionTimeout(
+          Duration.ofMillis(config.getConnectionAcquisitionTimeoutMs()));
+      builder.connectionTimeout(Duration.ofMillis(config.getConnectionTimeoutMs()));
     }
 
     // Apply TLS trust manager settings

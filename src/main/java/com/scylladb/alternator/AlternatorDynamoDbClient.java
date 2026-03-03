@@ -278,7 +278,7 @@ public class AlternatorDynamoDbClient {
     /**
      * Sets the maximum number of connections in the HTTP client connection pool.
      *
-     * @param maxConnections the maximum number of connections, or 0 to use SDK default
+     * @param maxConnections the maximum number of connections (must be positive)
      * @return this builder instance
      * @since 2.0.2
      */
@@ -290,7 +290,7 @@ public class AlternatorDynamoDbClient {
     /**
      * Sets the maximum idle time for pooled connections in milliseconds.
      *
-     * @param connectionMaxIdleTimeMs the maximum idle time in milliseconds, or 0 to use SDK default
+     * @param connectionMaxIdleTimeMs the maximum idle time in milliseconds (must be non-negative)
      * @return this builder instance
      * @since 2.0.2
      */
@@ -303,13 +303,38 @@ public class AlternatorDynamoDbClient {
     /**
      * Sets the maximum lifetime for pooled connections in milliseconds.
      *
-     * @param connectionTimeToLiveMs the connection time-to-live in milliseconds, or 0 to use SDK
-     *     default
+     * @param connectionTimeToLiveMs the connection time-to-live in milliseconds (0 for unlimited)
      * @return this builder instance
      * @since 2.0.2
      */
     public AlternatorDynamoDbClientBuilder withConnectionTimeToLiveMs(long connectionTimeToLiveMs) {
       configBuilder.withConnectionTimeToLiveMs(connectionTimeToLiveMs);
+      return this;
+    }
+
+    /**
+     * Sets the maximum time to wait for a connection from the pool in milliseconds.
+     *
+     * @param connectionAcquisitionTimeoutMs the acquisition timeout in milliseconds (must be
+     *     non-negative)
+     * @return this builder instance
+     * @since 2.0.3
+     */
+    public AlternatorDynamoDbClientBuilder withConnectionAcquisitionTimeoutMs(
+        long connectionAcquisitionTimeoutMs) {
+      configBuilder.withConnectionAcquisitionTimeoutMs(connectionAcquisitionTimeoutMs);
+      return this;
+    }
+
+    /**
+     * Sets the maximum time to wait for a connection to be established in milliseconds.
+     *
+     * @param connectionTimeoutMs the connection timeout in milliseconds (must be non-negative)
+     * @return this builder instance
+     * @since 2.0.3
+     */
+    public AlternatorDynamoDbClientBuilder withConnectionTimeoutMs(long connectionTimeoutMs) {
+      configBuilder.withConnectionTimeoutMs(connectionTimeoutMs);
       return this;
     }
 
