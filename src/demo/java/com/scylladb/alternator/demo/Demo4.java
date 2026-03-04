@@ -235,7 +235,7 @@ public class Demo4 {
       sc.init(null, trustAllCerts, new java.security.SecureRandom());
       HttpsURLConnection.setDefaultSSLSocketFactory(sc.getSocketFactory());
     } catch (Exception e) {
-      e.printStackTrace();
+      System.err.println("Failed to configure SSL: " + e.getMessage());
     }
     HttpsURLConnection.setDefaultHostnameVerifier(
         new HostnameVerifier() {
