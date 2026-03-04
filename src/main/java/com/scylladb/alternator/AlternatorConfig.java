@@ -62,6 +62,45 @@ public class AlternatorConfig {
   /** Default maximum number of connections in the HTTP client pool. */
   public static final int DEFAULT_MAX_CONNECTIONS = 400;
 
+  /**
+   * Recommended maximum retry attempts for partition key discovery (currently hard-coded).
+   *
+   * <p><strong>Note:</strong> This value is currently hard-coded in PartitionKeyResolver and cannot
+   * be configured at runtime. It is exposed here for documentation and future configurability.
+   */
+  public static final int RECOMMENDED_PARTITION_KEY_DISCOVERY_MAX_RETRIES = 3;
+
+  /**
+   * Recommended initial retry delay for partition key discovery in milliseconds (currently
+   * hard-coded).
+   *
+   * <p><strong>Note:</strong> This value is currently hard-coded in PartitionKeyResolver and cannot
+   * be configured at runtime. It is exposed here for documentation and future configurability.
+   */
+  public static final long RECOMMENDED_PARTITION_KEY_DISCOVERY_INITIAL_DELAY_MS = 100;
+
+  /**
+   * Recommended maximum retry delay for partition key discovery in milliseconds (currently
+   * hard-coded).
+   *
+   * <p><strong>Note:</strong> This value is currently hard-coded in PartitionKeyResolver and cannot
+   * be configured at runtime. It is exposed here for documentation and future configurability.
+   */
+  public static final long RECOMMENDED_PARTITION_KEY_DISCOVERY_MAX_DELAY_MS = 2000;
+
+  /**
+   * Recommended cooldown period after permanent failure for partition key discovery in milliseconds
+   * (currently hard-coded).
+   *
+   * <p>After a permanent failure (e.g., table doesn't exist), the library waits this long before
+   * allowing another discovery attempt for the same table. Default is 5 minutes.
+   *
+   * <p><strong>Note:</strong> This constant is currently hard-coded in PartitionKeyResolver and
+   * cannot be configured at runtime. It is exposed here for documentation and future
+   * configurability.
+   */
+  public static final long RECOMMENDED_PARTITION_KEY_DISCOVERY_COOLDOWN_MS = 5 * 60 * 1000;
+
   /** Default maximum idle time for pooled connections in milliseconds (10 minutes). */
   public static final long DEFAULT_CONNECTION_MAX_IDLE_TIME_MS = 600_000;
 

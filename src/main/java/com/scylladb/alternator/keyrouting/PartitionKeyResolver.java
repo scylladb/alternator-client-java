@@ -45,16 +45,33 @@ public class PartitionKeyResolver implements AutoCloseable {
 
   private static final Logger logger = Logger.getLogger(PartitionKeyResolver.class.getName());
 
-  /** Maximum number of retry attempts for transient failures. */
+  /**
+   * Maximum number of retry attempts for transient failures.
+   *
+   * @see com.scylladb.alternator.AlternatorConfig#RECOMMENDED_PARTITION_KEY_DISCOVERY_MAX_RETRIES
+   */
   static final int MAX_RETRIES = 3;
 
-  /** Initial delay between retries in milliseconds. */
+  /**
+   * Initial delay between retries in milliseconds.
+   *
+   * @see
+   *     com.scylladb.alternator.AlternatorConfig#RECOMMENDED_PARTITION_KEY_DISCOVERY_INITIAL_DELAY_MS
+   */
   static final long INITIAL_RETRY_DELAY_MS = 100;
 
-  /** Maximum delay between retries in milliseconds. */
+  /**
+   * Maximum delay between retries in milliseconds.
+   *
+   * @see com.scylladb.alternator.AlternatorConfig#RECOMMENDED_PARTITION_KEY_DISCOVERY_MAX_DELAY_MS
+   */
   static final long MAX_RETRY_DELAY_MS = 2000;
 
-  /** Cooldown period after permanent failure before allowing another discovery attempt (5 min). */
+  /**
+   * Cooldown period after permanent failure before allowing another discovery attempt (5 min).
+   *
+   * @see com.scylladb.alternator.AlternatorConfig#RECOMMENDED_PARTITION_KEY_DISCOVERY_COOLDOWN_MS
+   */
   static final long PERMANENT_FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
 
   private final ConcurrentHashMap<String, String> cache;
