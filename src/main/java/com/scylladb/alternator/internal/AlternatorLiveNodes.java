@@ -532,7 +532,7 @@ public class AlternatorLiveNodes extends Thread {
       try {
         stream.abort();
       } catch (Exception abortEx) {
-        // ignore
+        logger.log(Level.WARNING, "Failed to abort AbortableInputStream during cleanup", abortEx);
       }
     }
   }
