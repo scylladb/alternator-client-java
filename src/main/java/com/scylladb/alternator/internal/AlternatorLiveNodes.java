@@ -44,6 +44,7 @@ public class AlternatorLiveNodes extends Thread {
   private final AtomicInteger nextLiveNodeIndex;
   private final AlternatorConfig config;
   private final AtomicBoolean running = new AtomicBoolean(false);
+  private final AtomicBoolean shutdownRequested = new AtomicBoolean(false);
   private final SdkHttpClient pollingHttpClient;
   private final boolean ownsPollingClient;
   private final AtomicLong lastActivityTime = new AtomicLong(0);
@@ -54,8 +55,9 @@ public class AlternatorLiveNodes extends Thread {
   @Override
   public void run() {
     logger.log(Level.INFO, "AlternatorLiveNodes thread started");
+    running.set(true);
     try {
-      for (; ; ) {
+      while (!shutdownRequested.get()) {
         try {
           updateLiveNodes();
         } catch (IOException e) {
@@ -65,10 +67,12 @@ public class AlternatorLiveNodes extends Thread {
           Thread.sleep(getRefreshInterval());
         } catch (InterruptedException e) {
           logger.log(Level.INFO, "AlternatorLiveNodes thread interrupted and stopping");
+          Thread.currentThread().interrupt(); // Restore interrupted status
           return;
         }
       }
     } finally {
+      running.set(false);
       closePollingClient();
       logger.log(Level.INFO, "AlternatorLiveNodes thread stopped");
     }
@@ -79,6 +83,29 @@ public class AlternatorLiveNodes extends Thread {
     if (ownsPollingClient && pollingHttpClient != null) {
       pollingHttpClient.close();
     }
+  }
+
+  /**
+   * Initiates a graceful shutdown of the background thread.
+   *
+   * <p>This method signals the thread to stop and returns immediately. Use {@link #join()} or
+   * {@link #join(long)} to wait for the thread to terminate.
+   *
+   * @since 2.0.4
+   */
+  public void shutdown() {
+    shutdownRequested.set(true);
+    this.interrupt();
+  }
+
+  /**
+   * Checks if the background thread is currently running.
+   *
+   * @return true if the thread is running, false otherwise
+   * @since 2.0.4
+   */
+  public boolean isRunning() {
+    return running.get();
   }
 
   /**
