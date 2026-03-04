@@ -74,6 +74,9 @@ public class PartitionKeyResolver implements AutoCloseable {
    */
   static final long PERMANENT_FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
 
+  /** Maximum jitter as a percentage of the base delay (20%). */
+  static final double MAX_JITTER_PERCENT = 0.2;
+
   private final ConcurrentHashMap<String, String> cache;
   private final Set<String> discoveryInProgress;
   private final ConcurrentHashMap<String, FailureRecord> failedTables;
@@ -235,12 +238,13 @@ public class PartitionKeyResolver implements AutoCloseable {
             return;
           }
 
+          long jitteredDelay = calculateJitteredDelay(delay);
           logger.log(
               Level.FINE,
               "Transient error discovering partition key for table {0}, retry {1}/{2} after {3}ms: {4}",
-              new Object[] {tableName, attempt, MAX_RETRIES, delay, e.getMessage()});
+              new Object[] {tableName, attempt, MAX_RETRIES, jitteredDelay, e.getMessage()});
 
-          sleep(delay);
+          sleep(jitteredDelay);
           delay = Math.min(delay * 2, MAX_RETRY_DELAY_MS);
 
         } catch (Exception e) {
@@ -259,6 +263,7 @@ public class PartitionKeyResolver implements AutoCloseable {
             return;
           }
 
+          long jitteredDelay = calculateJitteredDelay(delay);
           if (logger.isLoggable(Level.FINE)) {
             logger.log(
                 Level.FINE,
@@ -269,12 +274,12 @@ public class PartitionKeyResolver implements AutoCloseable {
                     + "/"
                     + MAX_RETRIES
                     + " after "
-                    + delay
+                    + jitteredDelay
                     + "ms",
                 e);
           }
 
-          sleep(delay);
+          sleep(jitteredDelay);
           delay = Math.min(delay * 2, MAX_RETRY_DELAY_MS);
         }
       }
@@ -301,6 +306,20 @@ public class PartitionKeyResolver implements AutoCloseable {
     }
     // 4xx errors (except 429 throttling) are generally permanent
     return e.statusCode() >= 400 && e.statusCode() < 500 && e.statusCode() != 429;
+  }
+
+  /**
+   * Calculates a jittered delay to prevent thundering herd.
+   *
+   * @param baseDelay the base delay in milliseconds
+   * @return the jittered delay in milliseconds
+   */
+  private long calculateJitteredDelay(long baseDelay) {
+    // Add random jitter: base delay ± up to MAX_JITTER_PERCENT
+    double jitterRange = baseDelay * MAX_JITTER_PERCENT;
+    double jitter =
+        (Math.random() * 2 - 1) * jitterRange; // Random value in [-jitterRange, +jitterRange]
+    return Math.max(1, Math.round(baseDelay + jitter)); // Ensure minimum 1ms delay
   }
 
   /**
