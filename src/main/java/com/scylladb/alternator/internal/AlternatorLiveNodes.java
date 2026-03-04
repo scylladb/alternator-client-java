@@ -401,7 +401,9 @@ public class AlternatorLiveNodes extends Thread {
     if (nodes.isEmpty()) {
       throw new IllegalStateException("No live nodes available");
     }
-    return nodes.get(Math.abs(nextLiveNodeIndex.getAndIncrement() % nodes.size()));
+    int counter = nextLiveNodeIndex.getAndIncrement();
+    int index = (counter & Integer.MAX_VALUE) % nodes.size();
+    return nodes.get(index);
   }
 
   /**
