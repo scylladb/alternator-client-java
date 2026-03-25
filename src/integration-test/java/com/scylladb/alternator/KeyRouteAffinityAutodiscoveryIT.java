@@ -142,6 +142,7 @@ public class KeyRouteAffinityAutodiscoveryIT {
               GetItemRequest.builder()
                   .tableName(tableName)
                   .key(Map.of("user_id", AttributeValue.builder().s("user-001").build()))
+                  .consistentRead(true)
                   .build());
       assertNotNull("First item should exist", response1.item());
       assertEquals("Alice", response1.item().get("name").s());
@@ -151,6 +152,7 @@ public class KeyRouteAffinityAutodiscoveryIT {
               GetItemRequest.builder()
                   .tableName(tableName)
                   .key(Map.of("user_id", AttributeValue.builder().s("user-002").build()))
+                  .consistentRead(true)
                   .build());
       assertNotNull("Second item should exist", response2.item());
       assertEquals("Bob", response2.item().get("name").s());
@@ -226,6 +228,7 @@ public class KeyRouteAffinityAutodiscoveryIT {
               GetItemRequest.builder()
                   .tableName(tableName)
                   .key(Map.of("user_id", AttributeValue.builder().s("route-test").build()))
+                  .consistentRead(true)
                   .build());
 
       assertNotNull("Item should exist after repeated writes", finalResponse.item());
@@ -254,6 +257,7 @@ public class KeyRouteAffinityAutodiscoveryIT {
                 GetItemRequest.builder()
                     .tableName(tableName)
                     .key(Map.of("user_id", AttributeValue.builder().s(pk).build()))
+                    .consistentRead(true)
                     .build());
         assertNotNull("Item " + pk + " should exist", response.item());
         assertEquals("val-" + i, response.item().get("value").s());
@@ -316,6 +320,7 @@ public class KeyRouteAffinityAutodiscoveryIT {
               GetItemRequest.builder()
                   .tableName(tableName)
                   .key(Map.of("user_id", AttributeValue.builder().s("preconf-user").build()))
+                  .consistentRead(true)
                   .build());
 
       assertNotNull("Item should exist", response.item());
@@ -342,6 +347,7 @@ public class KeyRouteAffinityAutodiscoveryIT {
                 GetItemRequest.builder()
                     .tableName(tableName)
                     .key(Map.of("user_id", AttributeValue.builder().s("user-" + i).build()))
+                    .consistentRead(true)
                     .build());
         assertNotNull("Item user-" + i + " should exist", readResponse.item());
         assertEquals("data-" + i, readResponse.item().get("data").s());

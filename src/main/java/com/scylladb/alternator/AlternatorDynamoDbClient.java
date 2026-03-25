@@ -11,6 +11,7 @@ import com.scylladb.alternator.queryplan.BasicQueryPlanInterceptor;
 import com.scylladb.alternator.routing.RoutingScope;
 import java.net.URI;
 import java.util.Collection;
+import java.util.Objects;
 import java.util.function.Consumer;
 import software.amazon.awssdk.auth.credentials.AnonymousCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
@@ -96,6 +97,7 @@ public class AlternatorDynamoDbClient {
     private boolean credentialsProviderSet = false;
     private Consumer<ApacheHttpClient.Builder> apacheCustomizer;
     private Consumer<AwsCrtHttpClient.Builder> crtCustomizer;
+    private HttpClientType httpClientType;
 
     private AlternatorDynamoDbClientBuilder() {
       this.delegate = DynamoDbClient.builder();
@@ -363,6 +365,9 @@ public class AlternatorDynamoDbClient {
         configBuilder.withMaxConnections(config.getMaxConnections());
         configBuilder.withConnectionMaxIdleTimeMs(config.getConnectionMaxIdleTimeMs());
         configBuilder.withConnectionTimeToLiveMs(config.getConnectionTimeToLiveMs());
+        configBuilder.withConnectionAcquisitionTimeoutMs(
+            config.getConnectionAcquisitionTimeoutMs());
+        configBuilder.withConnectionTimeoutMs(config.getConnectionTimeoutMs());
       }
       return this;
     }
@@ -422,6 +427,31 @@ public class AlternatorDynamoDbClient {
     public AlternatorDynamoDbClientBuilder withCrtHttpClientCustomizer(
         Consumer<AwsCrtHttpClient.Builder> customizer) {
       this.crtCustomizer = customizer;
+      return this;
+    }
+
+    /**
+     * Explicitly selects which HTTP client implementation to use.
+     *
+     * <p>By default, the builder auto-detects the HTTP client from the classpath (Apache &gt; CRT).
+     * Use this method to force a specific implementation. If the requested implementation is not on
+     * the classpath, the builder will throw {@link IllegalStateException} at build time.
+     *
+     * <p>Only {@link HttpClientType#APACHE}, {@link HttpClientType#CRT}, and {@link
+     * HttpClientType#AUTO} are valid for sync clients. Setting {@link HttpClientType#NETTY} will
+     * throw {@link IllegalStateException} since Netty is async-only.
+     *
+     * <p>This is mutually exclusive with {@link #httpClient(SdkHttpClient)} and {@link
+     * #httpClientBuilder}. It can be combined with a matching customizer (e.g., {@link
+     * HttpClientType#APACHE} with {@link #withApacheHttpClientCustomizer}), but not with a
+     * mismatched one.
+     *
+     * @param httpClientType the HTTP client type to use
+     * @return this builder instance
+     * @since 2.1.0
+     */
+    public AlternatorDynamoDbClientBuilder withHttpClientType(HttpClientType httpClientType) {
+      this.httpClientType = Objects.requireNonNull(httpClientType, "httpClientType");
       return this;
     }
 
@@ -561,27 +591,21 @@ public class AlternatorDynamoDbClient {
                 + "Call endpointOverride(URI) with the seed Alternator node URI.");
       }
 
-      // Validate mutually exclusive options
-      validateHttpClientOptions();
+      SyncClientDetector.SyncClientType clientType = validateAndDetectSyncClientType();
 
-      // Use anonymous credentials if no credentials were provided
       if (!credentialsProviderSet) {
         configBuilder.authenticationEnabled(false);
         delegate.credentialsProvider(AnonymousCredentialsProvider.create());
       }
 
-      // Set the seed node on the config
       configBuilder.withSeedNode(seedUri);
 
-      // If disableCertificateChecks was called, set trust-all TLS config
       if (disableCertificateChecks) {
         configBuilder.withTlsConfig(TlsConfig.trustAll());
       }
 
-      // Build the AlternatorConfig from the internal builder
       AlternatorConfig alternatorConfig = configBuilder.build();
 
-      // Apply SDK-level interceptors from config (compression only)
       if (alternatorConfig.getCompressionAlgorithm().isEnabled()) {
         ClientOverrideConfiguration.Builder overrideBuilder =
             delegate.overrideConfiguration() != null
@@ -595,16 +619,10 @@ public class AlternatorDynamoDbClient {
       TlsConfig tlsConfig = alternatorConfig.getTlsConfig();
       boolean optimizeHeaders = alternatorConfig.isOptimizeHeaders();
 
-      // Create the HTTP client for the SDK
       SdkHttpClient pollingClient = null;
       if (!httpClientSet) {
-        // Determine which sync implementation to use
-        SyncClientDetector.SyncClientType clientType = detectSyncClientType();
-
-        // Create the main SDK HTTP client via factory
         SdkHttpClient mainClient = createMainSyncClient(clientType, alternatorConfig, tlsConfig);
 
-        // Wrap with header filtering if enabled
         if (optimizeHeaders) {
           delegate.httpClient(
               new HeadersFilteringSdkHttpClient(
@@ -613,19 +631,15 @@ public class AlternatorDynamoDbClient {
           delegate.httpClient(mainClient);
         }
 
-        // Create polling client for LiveNodes
         pollingClient = SyncClientDetector.createPollingClient(clientType, tlsConfig);
       } else {
-        // User provided custom HTTP client - still need a polling client for LiveNodes
-        SyncClientDetector.SyncClientType clientType = SyncClientDetector.detect();
-        pollingClient = SyncClientDetector.createPollingClient(clientType, tlsConfig);
+        SyncClientDetector.SyncClientType pollingType = SyncClientDetector.detect();
+        pollingClient = SyncClientDetector.createPollingClient(pollingType, tlsConfig);
       }
 
-      // Create AlternatorLiveNodes and start node discovery
       AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(alternatorConfig, pollingClient);
       liveNodes.start();
 
-      // Add query plan interceptor
       ClientOverrideConfiguration.Builder overrideBuilder =
           delegate.overrideConfiguration() != null
               ? delegate.overrideConfiguration().toBuilder()
@@ -643,22 +657,26 @@ public class AlternatorDynamoDbClient {
       }
       delegate.overrideConfiguration(overrideBuilder.build());
 
-      // Use seed URI as base endpoint - interceptor will override with actual target node
       delegate.endpointOverride(seedUri);
 
-      // Set default region if not specified
       if (region == null) {
         delegate.region(Region.of("fake-aws-region"));
       }
 
-      // Build the underlying client and wrap it
       DynamoDbClient client = delegate.build();
       return new AlternatorDynamoDbClientWrapper(
           client, liveNodes, alternatorConfig, affinityInterceptor, pollingClient);
     }
 
-    private void validateHttpClientOptions() {
+    /**
+     * Validates mutually exclusive HTTP client options and detects the sync client type.
+     *
+     * @return the resolved client type, or {@code null} if a custom HTTP client was provided via
+     *     {@link #httpClient} / {@link #httpClientBuilder}
+     */
+    SyncClientDetector.SyncClientType validateAndDetectSyncClientType() {
       boolean hasCustomizer = apacheCustomizer != null || crtCustomizer != null;
+
       if (httpClientSet && hasCustomizer) {
         throw new IllegalStateException(
             "Cannot use httpClient()/httpClientBuilder() together with "
@@ -670,18 +688,52 @@ public class AlternatorDynamoDbClient {
             "Cannot set both withApacheHttpClientCustomizer() and "
                 + "withCrtHttpClientCustomizer(). Choose one HTTP client implementation.");
       }
-    }
+      if (httpClientType != null && httpClientSet) {
+        throw new IllegalStateException(
+            "Cannot use httpClient()/httpClientBuilder() together with withHttpClientType(). "
+                + "Use one approach or the other.");
+      }
 
-    private SyncClientDetector.SyncClientType detectSyncClientType() {
-      // If a customizer was set, use the corresponding type
-      if (apacheCustomizer != null) {
-        return SyncClientDetector.SyncClientType.APACHE;
+      if (httpClientSet) {
+        return null;
       }
-      if (crtCustomizer != null) {
-        return SyncClientDetector.SyncClientType.CRT;
+
+      HttpClientType effectiveType = httpClientType != null ? httpClientType : HttpClientType.AUTO;
+
+      switch (effectiveType) {
+        case APACHE:
+          if (crtCustomizer != null) {
+            throw new IllegalStateException(
+                "HttpClientType.APACHE was set, but withCrtHttpClientCustomizer() was also called. "
+                    + "Use withApacheHttpClientCustomizer() or change HttpClientType to CRT.");
+          }
+          SyncClientDetector.requireAvailableHttpClient(SyncClientDetector.SyncClientType.APACHE);
+          return SyncClientDetector.SyncClientType.APACHE;
+        case CRT:
+          if (apacheCustomizer != null) {
+            throw new IllegalStateException(
+                "HttpClientType.CRT was set, but withApacheHttpClientCustomizer() was also called. "
+                    + "Use withCrtHttpClientCustomizer() or change HttpClientType to APACHE.");
+          }
+          SyncClientDetector.requireAvailableHttpClient(SyncClientDetector.SyncClientType.CRT);
+          return SyncClientDetector.SyncClientType.CRT;
+        case NETTY:
+          throw new IllegalStateException(
+              "HttpClientType.NETTY does not support synchronous clients. "
+                  + "Use HttpClientType.APACHE, HttpClientType.CRT, or HttpClientType.AUTO.");
+        case AUTO:
+          if (apacheCustomizer != null) {
+            SyncClientDetector.requireAvailableHttpClient(SyncClientDetector.SyncClientType.APACHE);
+            return SyncClientDetector.SyncClientType.APACHE;
+          }
+          if (crtCustomizer != null) {
+            SyncClientDetector.requireAvailableHttpClient(SyncClientDetector.SyncClientType.CRT);
+            return SyncClientDetector.SyncClientType.CRT;
+          }
+          return SyncClientDetector.detect();
+        default:
+          throw new IllegalStateException("Unknown HttpClientType: " + effectiveType);
       }
-      // Auto-detect from classpath
-      return SyncClientDetector.detect();
     }
 
     private SdkHttpClient createMainSyncClient(

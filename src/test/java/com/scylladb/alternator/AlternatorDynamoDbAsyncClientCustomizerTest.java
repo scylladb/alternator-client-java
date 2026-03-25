@@ -2,6 +2,7 @@ package com.scylladb.alternator;
 
 import static org.junit.Assert.*;
 
+import com.scylladb.alternator.internal.AsyncClientDetector;
 import java.net.URI;
 import org.junit.Test;
 import software.amazon.awssdk.http.async.SdkAsyncHttpClient;
@@ -95,7 +96,7 @@ public class AlternatorDynamoDbAsyncClientCustomizerTest {
             .withConnectionMaxIdleTimeMs(30000)
             .withConnectionTimeToLiveMs(60000)
             .withNettyHttpClientCustomizer(b -> b.maxConcurrency(200));
-    assertNotNull("Builder with config and Netty customizer should be valid", builder);
+    builder.validateAndDetectAsyncClientType();
   }
 
   @Test
@@ -106,7 +107,230 @@ public class AlternatorDynamoDbAsyncClientCustomizerTest {
             .withMaxConnections(100)
             .withConnectionMaxIdleTimeMs(30000)
             .withCrtAsyncHttpClientCustomizer(b -> b.maxConcurrency(200));
-    assertNotNull("Builder with config and CRT customizer should be valid", builder);
+    builder.validateAndDetectAsyncClientType();
+  }
+
+  @Test(expected = IllegalStateException.class)
+  public void testApacheHttpClientTypeOnAsyncBuilder() {
+    AlternatorDynamoDbAsyncClient.builder()
+        .endpointOverride(SEED_URI)
+        .withHttpClientType(HttpClientType.APACHE)
+        .build();
+  }
+
+  @Test(expected = IllegalStateException.class)
+  public void testHttpClientTypeNettyConflictsWithCrtCustomizer() {
+    AlternatorDynamoDbAsyncClient.builder()
+        .endpointOverride(SEED_URI)
+        .withHttpClientType(HttpClientType.NETTY)
+        .withCrtAsyncHttpClientCustomizer(b -> {})
+        .build();
+  }
+
+  @Test(expected = IllegalStateException.class)
+  public void testHttpClientTypeCrtConflictsWithNettyCustomizer() {
+    AlternatorDynamoDbAsyncClient.builder()
+        .endpointOverride(SEED_URI)
+        .withHttpClientType(HttpClientType.CRT)
+        .withNettyHttpClientCustomizer(b -> {})
+        .build();
+  }
+
+  @Test(expected = IllegalStateException.class)
+  public void testHttpClientTypeConflictsWithHttpClient() {
+    SdkAsyncHttpClient httpClient = NettyNioAsyncHttpClient.create();
+    try {
+      AlternatorDynamoDbAsyncClient.builder()
+          .endpointOverride(SEED_URI)
+          .httpClient(httpClient)
+          .withHttpClientType(HttpClientType.NETTY)
+          .build();
+    } finally {
+      httpClient.close();
+    }
+  }
+
+  @Test
+  public void testHttpClientTypeBuilderReturnsThis() {
+    AlternatorDynamoDbAsyncClient.AlternatorDynamoDbAsyncClientBuilder builder =
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(SEED_URI)
+            .withHttpClientType(HttpClientType.NETTY);
+    assertNotNull("Builder should return itself for chaining", builder);
+  }
+
+  @Test
+  public void testHttpClientTypeAutoWithNettyCustomizerPassesValidation() {
+    AlternatorDynamoDbAsyncClient.AlternatorDynamoDbAsyncClientBuilder builder =
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(SEED_URI)
+            .withHttpClientType(HttpClientType.AUTO)
+            .withNettyHttpClientCustomizer(b -> {});
+    builder.validateAndDetectAsyncClientType();
+  }
+
+  @Test
+  public void testHttpClientTypeNettyWithMatchingCustomizerPassesValidation() {
+    AlternatorDynamoDbAsyncClient.AlternatorDynamoDbAsyncClientBuilder builder =
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(SEED_URI)
+            .withHttpClientType(HttpClientType.NETTY)
+            .withNettyHttpClientCustomizer(b -> b.maxConcurrency(100));
+    builder.validateAndDetectAsyncClientType();
+  }
+
+  @Test
+  public void testHttpClientTypeCrtWithMatchingCustomizerPassesValidation() {
+    AlternatorDynamoDbAsyncClient.AlternatorDynamoDbAsyncClientBuilder builder =
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(SEED_URI)
+            .withHttpClientType(HttpClientType.CRT)
+            .withCrtAsyncHttpClientCustomizer(b -> b.maxConcurrency(200));
+    builder.validateAndDetectAsyncClientType();
+  }
+
+  @Test
+  public void testHttpClientTypeAutoAlonePassesValidation() {
+    AlternatorDynamoDbAsyncClient.AlternatorDynamoDbAsyncClientBuilder builder =
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(SEED_URI)
+            .withHttpClientType(HttpClientType.AUTO);
+    builder.validateAndDetectAsyncClientType();
+  }
+
+  @Test(expected = IllegalStateException.class)
+  public void testHttpClientTypeAutoConflictsWithHttpClient() {
+    SdkAsyncHttpClient httpClient = NettyNioAsyncHttpClient.create();
+    try {
+      AlternatorDynamoDbAsyncClient.builder()
+          .endpointOverride(SEED_URI)
+          .httpClient(httpClient)
+          .withHttpClientType(HttpClientType.AUTO)
+          .build();
+    } finally {
+      httpClient.close();
+    }
+  }
+
+  @Test(expected = NullPointerException.class)
+  public void testHttpClientTypeRejectsNull() {
+    AlternatorDynamoDbAsyncClient.builder().endpointOverride(SEED_URI).withHttpClientType(null);
+  }
+
+  @Test
+  public void testHttpClientTypeNettyAlonePassesValidation() {
+    var builder =
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(SEED_URI)
+            .withHttpClientType(HttpClientType.NETTY);
+    builder.validateAndDetectAsyncClientType();
+  }
+
+  @Test
+  public void testHttpClientTypeCrtAlonePassesValidation() {
+    var builder =
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(SEED_URI)
+            .withHttpClientType(HttpClientType.CRT);
+    builder.validateAndDetectAsyncClientType();
+  }
+
+  @Test
+  public void testHttpClientTypeAutoWithCrtAsyncCustomizerPassesValidation() {
+    var builder =
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(SEED_URI)
+            .withHttpClientType(HttpClientType.AUTO)
+            .withCrtAsyncHttpClientCustomizer(b -> {});
+    builder.validateAndDetectAsyncClientType();
+  }
+
+  @Test
+  public void testDetectAsyncClientTypeWithNettyCustomizerOnly() {
+    assertEquals(
+        AsyncClientDetector.AsyncClientType.NETTY,
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(SEED_URI)
+            .withNettyHttpClientCustomizer(b -> {})
+            .validateAndDetectAsyncClientType());
+  }
+
+  @Test
+  public void testDetectAsyncClientTypeWithCrtCustomizerOnly() {
+    assertEquals(
+        AsyncClientDetector.AsyncClientType.CRT,
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(SEED_URI)
+            .withCrtAsyncHttpClientCustomizer(b -> {})
+            .validateAndDetectAsyncClientType());
+  }
+
+  @Test
+  public void testDetectAsyncClientTypeWithExplicitNetty() {
+    assertEquals(
+        AsyncClientDetector.AsyncClientType.NETTY,
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(SEED_URI)
+            .withHttpClientType(HttpClientType.NETTY)
+            .validateAndDetectAsyncClientType());
+  }
+
+  @Test
+  public void testDetectAsyncClientTypeWithExplicitCrt() {
+    assertEquals(
+        AsyncClientDetector.AsyncClientType.CRT,
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(SEED_URI)
+            .withHttpClientType(HttpClientType.CRT)
+            .validateAndDetectAsyncClientType());
+  }
+
+  @Test
+  public void testHttpClientTypeAutoResolveSameAsNull() {
+    AsyncClientDetector.AsyncClientType autoResult =
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(SEED_URI)
+            .withHttpClientType(HttpClientType.AUTO)
+            .validateAndDetectAsyncClientType();
+    AsyncClientDetector.AsyncClientType nullResult =
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(SEED_URI)
+            .validateAndDetectAsyncClientType();
+    assertEquals(
+        "AUTO and null (default) should resolve to the same client type", nullResult, autoResult);
+  }
+
+  @Test
+  @SuppressWarnings("deprecation")
+  public void testHttpClientTypeCrtWithAlternatorConfigPassesValidation() {
+    AlternatorConfig config = AlternatorConfig.builder().withMaxConnections(100).build();
+    var builder =
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(SEED_URI)
+            .withAlternatorConfig(config)
+            .withHttpClientType(HttpClientType.CRT);
+    builder.validateAndDetectAsyncClientType();
+  }
+
+  @Test
+  @SuppressWarnings("deprecation")
+  public void testHttpClientTypeNettyWithAlternatorConfigPassesValidation() {
+    AlternatorConfig config = AlternatorConfig.builder().withMaxConnections(100).build();
+    var builder =
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(SEED_URI)
+            .withHttpClientType(HttpClientType.NETTY)
+            .withAlternatorConfig(config);
+    builder.validateAndDetectAsyncClientType();
+  }
+
+  @Test(expected = IllegalStateException.class)
+  public void testHttpClientTypeConflictsWithHttpClientBuilder() {
+    AlternatorDynamoDbAsyncClient.builder()
+        .endpointOverride(SEED_URI)
+        .httpClientBuilder(NettyNioAsyncHttpClient.builder())
+        .withHttpClientType(HttpClientType.NETTY)
+        .build();
   }
 
   @Test
