@@ -16,7 +16,9 @@ public final class SyncClientDetector {
 
   private static final Logger logger = Logger.getLogger(SyncClientDetector.class.getName());
 
-  // Class names split to satisfy checkstyle (no fully-qualified names inline)
+  // WARNING: String concatenation is intentional — do not "simplify" into a single literal.
+  // The checkstyle RegexpMultiline rule bans fully-qualified class names outside imports;
+  // splitting the string prevents the regex from matching the constant value.
   private static final String APACHE_CLASS =
       "software.amazon.awssdk" + ".http.apache.ApacheHttpClient";
   private static final String CRT_CLASS = "software.amazon.awssdk" + ".http.crt.AwsCrtHttpClient";
@@ -38,11 +40,11 @@ public final class SyncClientDetector {
    * @throws IllegalStateException if no supported implementation is found
    */
   public static SyncClientType detect() {
-    if (isClassAvailable(APACHE_CLASS)) {
+    if (ClasspathUtil.isClassAvailable(APACHE_CLASS)) {
       logger.log(Level.FINE, "Detected Apache HTTP client on classpath");
       return SyncClientType.APACHE;
     }
-    if (isClassAvailable(CRT_CLASS)) {
+    if (ClasspathUtil.isClassAvailable(CRT_CLASS)) {
       logger.log(Level.FINE, "Detected AWS CRT HTTP client on classpath");
       return SyncClientType.CRT;
     }
@@ -51,6 +53,33 @@ public final class SyncClientDetector {
             + "Add one of the following dependencies: "
             + "software.amazon.awssdk:apache-client or "
             + "software.amazon.awssdk:aws-crt-client");
+  }
+
+  /**
+   * Verifies that the specified sync HTTP client implementation is available on the classpath.
+   *
+   * @param type the client type to check
+   * @throws IllegalStateException if the implementation is not on the classpath
+   */
+  public static void requireAvailableHttpClient(SyncClientType type) {
+    switch (type) {
+      case APACHE:
+        if (!ClasspathUtil.isClassAvailable(APACHE_CLASS)) {
+          throw new IllegalStateException(
+              "HttpClientType.APACHE was requested, but Apache HTTP client is not on the "
+                  + "classpath. Add dependency: software.amazon.awssdk:apache-client");
+        }
+        return;
+      case CRT:
+        if (!ClasspathUtil.isClassAvailable(CRT_CLASS)) {
+          throw new IllegalStateException(
+              "HttpClientType.CRT was requested, but AWS CRT HTTP client is not on the "
+                  + "classpath. Add dependency: software.amazon.awssdk:aws-crt-client");
+        }
+        return;
+      default:
+        throw new IllegalStateException("Unknown sync client type: " + type);
+    }
   }
 
   /**
@@ -68,15 +97,6 @@ public final class SyncClientDetector {
         return CrtSyncClientFactory.createPollingClient(tlsConfig);
       default:
         throw new IllegalStateException("Unknown sync client type: " + type);
-    }
-  }
-
-  private static boolean isClassAvailable(String className) {
-    try {
-      Class.forName(className);
-      return true;
-    } catch (ClassNotFoundException e) {
-      return false;
     }
   }
 }

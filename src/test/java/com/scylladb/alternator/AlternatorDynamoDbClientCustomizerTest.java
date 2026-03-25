@@ -2,6 +2,7 @@ package com.scylladb.alternator;
 
 import static org.junit.Assert.*;
 
+import com.scylladb.alternator.internal.SyncClientDetector;
 import java.net.URI;
 import org.junit.Test;
 import software.amazon.awssdk.http.SdkHttpClient;
@@ -88,8 +89,6 @@ public class AlternatorDynamoDbClientCustomizerTest {
 
   @Test
   public void testApacheCustomizerWithConfig() {
-    // Verify that config + customizer work together without errors
-    // This should not throw - build will fail to connect but the builder setup is valid
     AlternatorDynamoDbClient.AlternatorDynamoDbClientBuilder builder =
         AlternatorDynamoDbClient.builder()
             .endpointOverride(SEED_URI)
@@ -97,7 +96,7 @@ public class AlternatorDynamoDbClientCustomizerTest {
             .withConnectionMaxIdleTimeMs(30000)
             .withConnectionTimeToLiveMs(60000)
             .withApacheHttpClientCustomizer(b -> b.maxConnections(200));
-    assertNotNull("Builder with config and customizer should be valid", builder);
+    builder.validateAndDetectSyncClientType();
   }
 
   @Test
@@ -108,7 +107,230 @@ public class AlternatorDynamoDbClientCustomizerTest {
             .withMaxConnections(100)
             .withConnectionMaxIdleTimeMs(30000)
             .withCrtHttpClientCustomizer(b -> b.maxConcurrency(200));
-    assertNotNull("Builder with config and CRT customizer should be valid", builder);
+    builder.validateAndDetectSyncClientType();
+  }
+
+  @Test(expected = IllegalStateException.class)
+  public void testNettyHttpClientTypeOnSyncBuilder() {
+    AlternatorDynamoDbClient.builder()
+        .endpointOverride(SEED_URI)
+        .withHttpClientType(HttpClientType.NETTY)
+        .build();
+  }
+
+  @Test(expected = IllegalStateException.class)
+  public void testHttpClientTypeApacheConflictsWithCrtCustomizer() {
+    AlternatorDynamoDbClient.builder()
+        .endpointOverride(SEED_URI)
+        .withHttpClientType(HttpClientType.APACHE)
+        .withCrtHttpClientCustomizer(b -> {})
+        .build();
+  }
+
+  @Test(expected = IllegalStateException.class)
+  public void testHttpClientTypeCrtConflictsWithApacheCustomizer() {
+    AlternatorDynamoDbClient.builder()
+        .endpointOverride(SEED_URI)
+        .withHttpClientType(HttpClientType.CRT)
+        .withApacheHttpClientCustomizer(b -> {})
+        .build();
+  }
+
+  @Test(expected = IllegalStateException.class)
+  public void testHttpClientTypeConflictsWithHttpClient() {
+    SdkHttpClient httpClient = ApacheHttpClient.create();
+    try {
+      AlternatorDynamoDbClient.builder()
+          .endpointOverride(SEED_URI)
+          .httpClient(httpClient)
+          .withHttpClientType(HttpClientType.APACHE)
+          .build();
+    } finally {
+      httpClient.close();
+    }
+  }
+
+  @Test
+  public void testHttpClientTypeBuilderReturnsThis() {
+    AlternatorDynamoDbClient.AlternatorDynamoDbClientBuilder builder =
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(SEED_URI)
+            .withHttpClientType(HttpClientType.APACHE);
+    assertNotNull("Builder should return itself for chaining", builder);
+  }
+
+  @Test
+  public void testHttpClientTypeAutoWithApacheCustomizerPassesValidation() {
+    AlternatorDynamoDbClient.AlternatorDynamoDbClientBuilder builder =
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(SEED_URI)
+            .withHttpClientType(HttpClientType.AUTO)
+            .withApacheHttpClientCustomizer(b -> {});
+    builder.validateAndDetectSyncClientType();
+  }
+
+  @Test
+  public void testHttpClientTypeApacheWithMatchingCustomizerPassesValidation() {
+    AlternatorDynamoDbClient.AlternatorDynamoDbClientBuilder builder =
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(SEED_URI)
+            .withHttpClientType(HttpClientType.APACHE)
+            .withApacheHttpClientCustomizer(b -> b.maxConnections(100));
+    builder.validateAndDetectSyncClientType();
+  }
+
+  @Test
+  public void testHttpClientTypeCrtWithMatchingCustomizerPassesValidation() {
+    AlternatorDynamoDbClient.AlternatorDynamoDbClientBuilder builder =
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(SEED_URI)
+            .withHttpClientType(HttpClientType.CRT)
+            .withCrtHttpClientCustomizer(b -> b.maxConcurrency(200));
+    builder.validateAndDetectSyncClientType();
+  }
+
+  @Test
+  public void testHttpClientTypeAutoAlonePassesValidation() {
+    AlternatorDynamoDbClient.AlternatorDynamoDbClientBuilder builder =
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(SEED_URI)
+            .withHttpClientType(HttpClientType.AUTO);
+    builder.validateAndDetectSyncClientType();
+  }
+
+  @Test(expected = IllegalStateException.class)
+  public void testHttpClientTypeAutoConflictsWithHttpClient() {
+    SdkHttpClient httpClient = ApacheHttpClient.create();
+    try {
+      AlternatorDynamoDbClient.builder()
+          .endpointOverride(SEED_URI)
+          .httpClient(httpClient)
+          .withHttpClientType(HttpClientType.AUTO)
+          .build();
+    } finally {
+      httpClient.close();
+    }
+  }
+
+  @Test(expected = NullPointerException.class)
+  public void testHttpClientTypeRejectsNull() {
+    AlternatorDynamoDbClient.builder().endpointOverride(SEED_URI).withHttpClientType(null);
+  }
+
+  @Test
+  public void testHttpClientTypeApacheAlonePassesValidation() {
+    var builder =
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(SEED_URI)
+            .withHttpClientType(HttpClientType.APACHE);
+    builder.validateAndDetectSyncClientType();
+  }
+
+  @Test
+  public void testHttpClientTypeCrtAlonePassesValidation() {
+    var builder =
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(SEED_URI)
+            .withHttpClientType(HttpClientType.CRT);
+    builder.validateAndDetectSyncClientType();
+  }
+
+  @Test
+  public void testHttpClientTypeAutoWithCrtCustomizerPassesValidation() {
+    var builder =
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(SEED_URI)
+            .withHttpClientType(HttpClientType.AUTO)
+            .withCrtHttpClientCustomizer(b -> {});
+    builder.validateAndDetectSyncClientType();
+  }
+
+  @Test
+  public void testDetectSyncClientTypeWithApacheCustomizerOnly() {
+    assertEquals(
+        SyncClientDetector.SyncClientType.APACHE,
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(SEED_URI)
+            .withApacheHttpClientCustomizer(b -> {})
+            .validateAndDetectSyncClientType());
+  }
+
+  @Test
+  public void testDetectSyncClientTypeWithCrtCustomizerOnly() {
+    assertEquals(
+        SyncClientDetector.SyncClientType.CRT,
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(SEED_URI)
+            .withCrtHttpClientCustomizer(b -> {})
+            .validateAndDetectSyncClientType());
+  }
+
+  @Test
+  public void testDetectSyncClientTypeWithExplicitApache() {
+    assertEquals(
+        SyncClientDetector.SyncClientType.APACHE,
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(SEED_URI)
+            .withHttpClientType(HttpClientType.APACHE)
+            .validateAndDetectSyncClientType());
+  }
+
+  @Test
+  public void testDetectSyncClientTypeWithExplicitCrt() {
+    assertEquals(
+        SyncClientDetector.SyncClientType.CRT,
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(SEED_URI)
+            .withHttpClientType(HttpClientType.CRT)
+            .validateAndDetectSyncClientType());
+  }
+
+  @Test
+  public void testHttpClientTypeAutoResolveSameAsNull() {
+    SyncClientDetector.SyncClientType autoResult =
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(SEED_URI)
+            .withHttpClientType(HttpClientType.AUTO)
+            .validateAndDetectSyncClientType();
+    SyncClientDetector.SyncClientType nullResult =
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(SEED_URI)
+            .validateAndDetectSyncClientType();
+    assertEquals(
+        "AUTO and null (default) should resolve to the same client type", nullResult, autoResult);
+  }
+
+  @Test
+  @SuppressWarnings("deprecation")
+  public void testHttpClientTypeCrtWithAlternatorConfigPassesValidation() {
+    AlternatorConfig config = AlternatorConfig.builder().withMaxConnections(100).build();
+    var builder =
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(SEED_URI)
+            .withAlternatorConfig(config)
+            .withHttpClientType(HttpClientType.CRT);
+    builder.validateAndDetectSyncClientType();
+  }
+
+  @Test
+  @SuppressWarnings("deprecation")
+  public void testHttpClientTypeApacheWithAlternatorConfigPassesValidation() {
+    AlternatorConfig config = AlternatorConfig.builder().withMaxConnections(100).build();
+    var builder =
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(SEED_URI)
+            .withHttpClientType(HttpClientType.APACHE)
+            .withAlternatorConfig(config);
+    builder.validateAndDetectSyncClientType();
+  }
+
+  @Test(expected = IllegalStateException.class)
+  public void testHttpClientTypeConflictsWithHttpClientBuilder() {
+    AlternatorDynamoDbClient.builder()
+        .endpointOverride(SEED_URI)
+        .httpClientBuilder(ApacheHttpClient.builder())
+        .withHttpClientType(HttpClientType.APACHE)
+        .build();
   }
 
   @Test

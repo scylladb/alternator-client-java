@@ -15,14 +15,12 @@ public class SyncClientDetectorTest {
 
   @Test
   public void testDetectFindsImplementation() {
-    // Both Apache and CRT are on the test classpath, so detection should succeed
     SyncClientDetector.SyncClientType type = SyncClientDetector.detect();
     assertNotNull("Should detect a sync client type", type);
   }
 
   @Test
   public void testDetectPrefersApacheOverCrt() {
-    // Both are on classpath; Apache should win by priority
     SyncClientDetector.SyncClientType type = SyncClientDetector.detect();
     assertEquals(
         "Apache should be preferred when both are available",
@@ -54,6 +52,16 @@ public class SyncClientDetectorTest {
       assertNotNull("Should create polling client with trust-all TLS for " + type, client);
       client.close();
     }
+  }
+
+  @Test
+  public void testRequireAvailableHttpClientApache() {
+    SyncClientDetector.requireAvailableHttpClient(SyncClientDetector.SyncClientType.APACHE);
+  }
+
+  @Test
+  public void testRequireAvailableHttpClientCrt() {
+    SyncClientDetector.requireAvailableHttpClient(SyncClientDetector.SyncClientType.CRT);
   }
 
   @Test
