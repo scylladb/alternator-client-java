@@ -463,15 +463,22 @@ public class AlternatorLiveNodes extends Thread {
 
   void updateLiveNodes() throws IOException {
     RoutingScope scope = this.config.getRoutingScope();
+    IOException lastException = null;
     while (scope != null) {
       String query = scope.getLocalNodesQuery();
       URI uri = nextAsURI("/localnodes", query.isEmpty() ? null : query);
-      List<URI> nodes = getNodes(uri);
-      if (!nodes.isEmpty()) {
-        liveNodes.set(nodes);
+      try {
+        List<URI> nodes = getNodes(uri);
+        if (!nodes.isEmpty()) {
+          liveNodes.set(mergeWithInitialNodes(nodes));
+          logger.log(
+              Level.FINE, "Updated hosts to " + liveNodes + " using " + scope.getDescription());
+          return;
+        }
+      } catch (IOException e) {
         logger.log(
-            Level.FINE, "Updated hosts to " + liveNodes + " using " + scope.getDescription());
-        return;
+            Level.WARNING, "Failed to contact node " + uri + " for " + scope.getDescription(), e);
+        lastException = e;
       }
       RoutingScope fallback = scope.getFallback();
       if (fallback != null) {
@@ -484,8 +491,31 @@ public class AlternatorLiveNodes extends Thread {
       }
       scope = fallback;
     }
-    // No nodes found in any scope - keep the current list
-    logger.log(Level.WARNING, "No nodes found in any routing scope, keeping existing node list");
+    // No nodes found in any scope - keep the current list but ensure seeds are present
+    if (lastException != null) {
+      liveNodes.set(mergeWithInitialNodes(liveNodes.get()));
+      logger.log(
+          Level.WARNING,
+          "All nodes unreachable in every routing scope, re-injected seed nodes into live list");
+    } else {
+      logger.log(Level.WARNING, "No nodes found in any routing scope, keeping existing node list");
+    }
+  }
+
+  /**
+   * Merges the given node list with the initial seed nodes, ensuring seed nodes are always present
+   * as fallback candidates for re-discovery. Seed nodes are appended at the end to preserve the
+   * ordering priority of discovered nodes.
+   *
+   * @param nodes the current list of discovered nodes
+   * @return a new list containing all discovered nodes plus any missing seed nodes
+   */
+  private List<URI> mergeWithInitialNodes(List<URI> nodes) {
+    Set<URI> seen = new LinkedHashSet<>(nodes);
+    for (URI seed : initialNodes) {
+      seen.add(seed);
+    }
+    return new ArrayList<>(seen);
   }
 
   private List<URI> getNodes(URI uri) throws IOException {
