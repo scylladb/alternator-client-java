@@ -9,6 +9,7 @@ import com.scylladb.alternator.keyrouting.KeyRouteAffinityConfig;
 import com.scylladb.alternator.queryplan.AffinityQueryPlanInterceptor;
 import com.scylladb.alternator.queryplan.BasicQueryPlanInterceptor;
 import com.scylladb.alternator.routing.RoutingScope;
+import com.scylladb.alternator.vectorsearch.VectorSearchInterceptor;
 import java.net.URI;
 import java.util.Collection;
 import java.util.Objects;
@@ -606,16 +607,6 @@ public class AlternatorDynamoDbClient {
 
       AlternatorConfig alternatorConfig = configBuilder.build();
 
-      if (alternatorConfig.getCompressionAlgorithm().isEnabled()) {
-        ClientOverrideConfiguration.Builder overrideBuilder =
-            delegate.overrideConfiguration() != null
-                ? delegate.overrideConfiguration().toBuilder()
-                : ClientOverrideConfiguration.builder();
-        overrideBuilder.addExecutionInterceptor(
-            new GzipRequestInterceptor(alternatorConfig.getMinCompressionSizeBytes()));
-        delegate.overrideConfiguration(overrideBuilder.build());
-      }
-
       TlsConfig tlsConfig = alternatorConfig.getTlsConfig();
       boolean optimizeHeaders = alternatorConfig.isOptimizeHeaders();
 
@@ -645,6 +636,16 @@ public class AlternatorDynamoDbClient {
               ? delegate.overrideConfiguration().toBuilder()
               : ClientOverrideConfiguration.builder();
 
+      // Interceptor registration order matters for request bodies:
+      //   1. VectorSearchInterceptor  — injects VectorIndexes/VectorSearch JSON and converts
+      //                                 FLOAT32VECTOR markers; must see the original JSON body.
+      //   2. GzipRequestInterceptor   — compresses the (already vector-modified) body.
+      //   3. QueryPlanInterceptor     — selects the target node; body-independent.
+      overrideBuilder.addExecutionInterceptor(VectorSearchInterceptor.INSTANCE);
+      if (alternatorConfig.getCompressionAlgorithm().isEnabled()) {
+        overrideBuilder.addExecutionInterceptor(
+            new GzipRequestInterceptor(alternatorConfig.getMinCompressionSizeBytes()));
+      }
       AffinityQueryPlanInterceptor affinityInterceptor = null;
       KeyRouteAffinityConfig keyAffinityConfig = alternatorConfig.getKeyRouteAffinityConfig();
       if (keyAffinityConfig != null

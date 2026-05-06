@@ -779,3 +779,240 @@ Key route affinity may not be beneficial for:
 - Read-heavy workloads (reads don't use Paxos)
 - Workloads with uniformly distributed writes across many keys
 - Async clients (use sync clients only)
+
+### Vector Search (Alternator extension)
+
+Alternator extends the DynamoDB API with **vector indexes** and **vector similarity search**.
+These features are not available on AWS DynamoDB, so the standard AWS SDK for Java has no
+knowledge of the new parameters (`VectorIndexes`, `VectorSearch`, `FLOAT32VECTOR`, etc.).
+
+This library bridges the gap without modifying the SDK source. It uses an
+`ExecutionInterceptor` that intercepts the serialised JSON body of each request before
+it is sent, and of each response before the SDK parses it into Java objects:
+- **Requests** — extra parameters are injected into the JSON body before transmission.
+- **Responses** — extra fields are extracted from the JSON body before the SDK discards them.
+
+#### Setup
+
+`VectorSearchInterceptor` is registered automatically by `AlternatorDynamoDbClient` and
+`AlternatorDynamoDbAsyncClient`. No extra configuration is needed:
+
+```java
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("http://localhost:8000"))
+    .credentialsProvider(myCredentials)
+    .build();
+```
+
+If you use the plain `DynamoDbClient.builder()` / `DynamoDbAsyncClient.builder()` directly
+(without the Alternator builder), register the interceptor manually:
+
+```java
+import com.scylladb.alternator.vectorsearch.VectorSearchInterceptor;
+
+DynamoDbClient client = DynamoDbClient.builder()
+    .endpointOverride(URI.create("http://localhost:8000"))
+    .credentialsProvider(myCredentials)
+    .overrideConfiguration(c -> c.addExecutionInterceptor(VectorSearchInterceptor.INSTANCE))
+    .build();
+```
+
+#### CreateTable with a vector index
+
+```java
+import com.scylladb.alternator.vectorsearch.*;
+
+VectorIndex vi = VectorIndex.builder()
+    .indexName("embedding-index")
+    .vectorAttribute(VectorAttribute.builder()
+        .attributeName("embedding")
+        .dimensions(128)
+        .build())
+    .similarityFunction("COSINE")   // optional; "DOT_PRODUCT" and "EUCLIDEAN" are also supported
+    .build();
+
+CreateTableRequest base = CreateTableRequest.builder()
+    .tableName("items")
+    .keySchema(KeySchemaElement.builder().attributeName("id").keyType(KeyType.HASH).build())
+    .attributeDefinitions(
+        AttributeDefinition.builder().attributeName("id").attributeType(ScalarAttributeType.S).build())
+    .billingMode(BillingMode.PAY_PER_REQUEST)
+    .build();
+
+VectorSearchSupport.createTable(client, base, List.of(vi));
+```
+
+You can also use the lower-level helper if you want to call `client.createTable()` yourself:
+
+```java
+client.createTable(VectorSearchSupport.withVectorIndexes(base, List.of(vi)));
+```
+
+#### UpdateTable — adding or removing a vector index
+
+```java
+VectorIndexUpdate addIndex = VectorIndexUpdate.builder()
+    .create(CreateVectorIndexAction.builder()
+        .indexName("new-index")
+        .vectorAttribute(VectorAttribute.builder()
+            .attributeName("embedding")
+            .dimensions(64)
+            .build())
+        .build())
+    .build();
+
+VectorIndexUpdate removeIndex = VectorIndexUpdate.builder()
+    .delete(DeleteVectorIndexAction.builder()
+        .indexName("old-index")
+        .build())
+    .build();
+
+VectorSearchSupport.updateTable(client,
+    UpdateTableRequest.builder().tableName("items").build(),
+    List.of(addIndex, removeIndex));
+```
+
+You can also use the lower-level helper if you want to call `client.updateTable()` yourself:
+
+```java
+client.updateTable(VectorSearchSupport.withVectorIndexUpdates(
+    UpdateTableRequest.builder().tableName("items").build(),
+    List.of(addIndex, removeIndex)));
+```
+
+#### DescribeTable — reading vector index metadata
+
+```java
+VectorSearchSupport.DescribeTableWithVectorIndexes result =
+    VectorSearchSupport.describeTable(client,
+        DescribeTableRequest.builder().tableName("items").build());
+
+for (VectorIndex vi : result.vectorIndexes()) {
+    System.out.printf("index=%s attribute=%s dimensions=%d status=%s%n",
+        vi.indexName(),
+        vi.vectorAttribute().attributeName(),
+        vi.vectorAttribute().dimensions(),
+        vi.indexStatus());
+}
+```
+
+#### Writing items with the optimized FLOAT32VECTOR type
+
+Alternator stores vectors in a compact binary format called `FLOAT32VECTOR`. This is
+significantly more efficient than the standard DynamoDB list-of-numbers encoding (`L`)
+and is recommended for use with a vector index.
+
+Use `Float32Vector.toAttributeValue(float...)` to create the attribute value. The
+interceptor automatically converts it to `{"FLOAT32VECTOR": [...]}` in the JSON body:
+
+```java
+import com.scylladb.alternator.vectorsearch.Float32Vector;
+
+Map<String, AttributeValue> item = new HashMap<>();
+item.put("id", AttributeValue.fromS("item-1"));
+item.put("embedding", Float32Vector.toAttributeValue(0.1f, 0.2f, 0.3f, ...));
+
+client.putItem(PutItemRequest.builder().tableName("items").item(item).build());
+```
+
+This works transparently for all write operations: `PutItem`, `UpdateItem`
+(`ExpressionAttributeValues`), and `BatchWriteItem`.
+
+#### Reading FLOAT32VECTOR attributes back
+
+When Alternator returns a `FLOAT32VECTOR` attribute, the interceptor converts it
+transparently to a standard DynamoDB list-of-numbers (`L` type). Access the values
+using the normal SDK API:
+
+```java
+AttributeValue av = resp.item().get("embedding");
+List<AttributeValue> numbers = av.l();   // each element has type N
+float[] values = new float[numbers.size()];
+for (int i = 0; i < values.length; i++) {
+    values[i] = Float.parseFloat(numbers.get(i).n());
+}
+```
+
+To write the vector back with the efficient `FLOAT32VECTOR` storage format,
+re-encode it using the `List<AttributeValue>` overload of `Float32Vector.toAttributeValue()`:
+
+```java
+AttributeValue reEncoded = Float32Vector.toAttributeValue(av.l());
+```
+
+> **Warning — copying items:** When you read an item that contains a `FLOAT32VECTOR`
+> attribute, the interceptor converts it to a standard DynamoDB `L` (list-of-numbers)
+> `AttributeValue`. If you then pass that `AttributeValue` straight back in a write
+> (e.g. `putItem(...item(response.item())...)`), the vector will be stored as a plain
+> `L` list — **not** as `FLOAT32VECTOR`. To preserve the compact storage format you
+> must explicitly re-encode every vector attribute before writing:
+>
+> ```java
+> Map<String, AttributeValue> item = new HashMap<>(response.item());
+> item.put("embedding", Float32Vector.toAttributeValue(item.get("embedding").l()));
+> client.putItem(PutItemRequest.builder().tableName("items").item(item).build());
+> ```
+
+#### Vector similarity search (Query)
+
+```java
+VectorSearch vs = VectorSearch.builder()
+    .queryVector(0.1f, 0.2f, 0.3f, ...)         // sent as FLOAT32VECTOR
+    .returnScores(true)                         // optional; include similarity scores
+    .build();
+
+VectorQueryResult result = VectorSearchSupport.query(client,
+    QueryRequest.builder()
+        .tableName("items")
+        .indexName("embedding-index")
+        .limit(10)
+        .build(),
+    vs);
+
+Standard `QueryRequest` parameters work alongside `VectorSearch`: `filterExpression`,
+`select`, `projectionExpression`, `expressionAttributeValues`, and
+`keyConditionExpression` are all supported. Note that `limit` is **required** for vector
+search queries (it specifies how many nearest neighbours to return), and
+`exclusiveStartKey` (pagination) is not supported.
+
+for (int i = 0; i < result.items().size(); i++) {
+    System.out.printf("item=%s score=%.4f%n",
+        result.items().get(i).get("id").s(),
+        result.scores().get(i));
+}
+```
+
+For the async client:
+
+```java
+CompletableFuture<VectorQueryResult> future =
+    VectorSearchSupport.queryAsync(asyncClient, queryRequest, vs);
+```
+
+You can also pass the query vector as an `AttributeValue` (standard DynamoDB list type)
+instead of a `float[]`, which is useful when the items were stored without the
+`FLOAT32VECTOR` optimisation:
+
+```java
+VectorSearch vs = VectorSearch.builder()
+    .queryVector(AttributeValue.fromL(Arrays.asList(
+        AttributeValue.fromN("0.1"),
+        AttributeValue.fromN("0.2"),
+        AttributeValue.fromN("0.3"))))
+    .build();
+```
+
+#### Summary of the `vectorsearch` package
+
+| Class | Purpose |
+|---|---|
+| `VectorSearchInterceptor` | Core interceptor — register once on the client |
+| `VectorSearchSupport` | Convenience facade for all operations |
+| `VectorIndex` | Descriptor for a vector index (create/describe) |
+| `VectorAttribute` | Attribute name + dimensionality for a `VectorIndex` |
+| `VectorSearch` | Query parameters: query vector + optional score request |
+| `VectorQueryResult` | Wraps `QueryResponse` and adds `scores()` |
+| `VectorIndexUpdate` | A single create/delete change for `UpdateTable` |
+| `CreateVectorIndexAction` | Create action inside a `VectorIndexUpdate` |
+| `DeleteVectorIndexAction` | Delete action inside a `VectorIndexUpdate` |
+| `Float32Vector` | Encode/decode `float...` as the compact `FLOAT32VECTOR` type |
