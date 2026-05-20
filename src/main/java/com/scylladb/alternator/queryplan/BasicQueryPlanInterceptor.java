@@ -3,6 +3,7 @@ package com.scylladb.alternator.queryplan;
 import com.scylladb.alternator.internal.AlternatorLiveNodes;
 import com.scylladb.alternator.internal.LazyQueryPlan;
 import java.net.URI;
+import java.util.List;
 import software.amazon.awssdk.core.interceptor.Context;
 import software.amazon.awssdk.core.interceptor.ExecutionAttribute;
 import software.amazon.awssdk.core.interceptor.ExecutionAttributes;
@@ -43,7 +44,9 @@ public class BasicQueryPlanInterceptor implements ExecutionInterceptor {
   @Override
   public void beforeExecution(
       Context.BeforeExecution context, ExecutionAttributes executionAttributes) {
-    // Create a query plan with random seed for pseudo-random load balancing
+    // Always install a plan: even single-node clusters need it because the inbound request
+    // points at a placeholder host and modifyHttpRequest rewrites it to the real node URL.
+    // The plan's first next() call is O(1) for single-node clusters (see LazyQueryPlan).
     executionAttributes.putAttribute(QUERY_PLAN, new LazyQueryPlan(liveNodes));
   }
 
@@ -59,13 +62,18 @@ public class BasicQueryPlanInterceptor implements ExecutionInterceptor {
     URI targetUri = plan.next();
     SdkHttpRequest originalRequest = context.httpRequest();
 
-    // Build new request with the target node's host and port
-    return originalRequest.toBuilder()
+    // Build new request with the target node's host and port. Only set keep-alive if the
+    // SDK hasn't already (the Apache and CRT clients add it by default); writing the same
+    // header again forces the SDK to recopy the header list.
+    SdkHttpRequest.Builder builder = originalRequest.toBuilder()
         .protocol(targetUri.getScheme())
         .host(targetUri.getHost())
-        .port(targetUri.getPort())
-        .putHeader("Connection", "keep-alive")
-        .build();
+        .port(targetUri.getPort());
+    List<String> existing = originalRequest.matchingHeaders("Connection");
+    if (existing == null || existing.isEmpty()) {
+      builder.putHeader("Connection", "keep-alive");
+    }
+    return builder.build();
   }
 
   /**
