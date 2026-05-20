@@ -27,25 +27,25 @@ import software.amazon.awssdk.http.SdkHttpRequest;
 
 /**
  * Regression tests for the dead-seed-stays-in-rotation bug reproduced from a Scylla rolling-
- * upgrade failure: the YCSB DynamoDB binding ran with native load balancing, the seed node
- * went down during the upgrade, and 62,624 UPDATE operations failed with connection-refused
- * because {@link AlternatorLiveNodes#updateLiveNodes()} kept re-injecting the dead seed into
- * the live list on every refresh, so {@code nextAsURI()} kept round-robining onto it.
+ * upgrade failure: the YCSB DynamoDB binding ran with native load balancing, the seed node went
+ * down during the upgrade, and 62,624 UPDATE operations failed with connection-refused because
+ * {@link AlternatorLiveNodes#updateLiveNodes()} kept re-injecting the dead seed into the live list
+ * on every refresh, so {@code nextAsURI()} kept round-robining onto it.
  *
- * <p>Expected behavior: once every configured seed has failed to answer /localnodes in a
- * refresh cycle (the whole cycle fails, not just one poll), a dead seed is pruned from the
- * live list rather than being blindly merged back in; if that empties the list, the original
- * seed list is restored as a last-resort recovery candidate so a future refresh has something
- * to retry. A seed that fails while at least one other seed/scope still succeeds this cycle is
- * deliberately left in rotation — see {@code
+ * <p>Expected behavior: once every configured seed has failed to answer /localnodes in a refresh
+ * cycle (the whole cycle fails, not just one poll), a dead seed is pruned from the live list rather
+ * than being blindly merged back in; if that empties the list, the original seed list is restored
+ * as a last-resort recovery candidate so a future refresh has something to retry. A seed that fails
+ * while at least one other seed/scope still succeeds this cycle is deliberately left in rotation —
+ * see {@code
  * AlternatorLiveNodesClusterDiscoveryTest#testClusterScopeKeepsSuccessfulDiscoveryWhenAnotherSeedFails}.
  */
 public class AlternatorLiveNodesDeadSeedTest {
 
   /**
    * SdkHttpClient that lets the test mark hosts as "down". A request to a down host throws
-   * IOException (mirrors connection refused/reset); requests to live hosts return the
-   * configured /localnodes response body.
+   * IOException (mirrors connection refused/reset); requests to live hosts return the configured
+   * /localnodes response body.
    */
   private static final class SelectiveHttpClient implements SdkHttpClient {
     private final Set<String> downHosts = ConcurrentHashMap.newKeySet();
@@ -93,15 +93,14 @@ public class AlternatorLiveNodesDeadSeedTest {
   }
 
   /**
-   * The scenario from the production failure: three Alternator nodes, refresh discovers all
-   * three, then one of them — the original seed — dies. The next refresh must drop the dead
-   * seed from the live list so that subsequent {@code nextAsURI()} calls stop returning it.
+   * The scenario from the production failure: three Alternator nodes, refresh discovers all three,
+   * then one of them — the original seed — dies. The next refresh must drop the dead seed from the
+   * live list so that subsequent {@code nextAsURI()} calls stop returning it.
    */
   @Test
   public void deadSeedIsEvictedAfterRefreshDiscoversHealthyPeers() throws Exception {
     // /localnodes from any healthy node reports the full cluster initially.
-    SelectiveHttpClient http =
-        new SelectiveHttpClient("[\"10.0.0.1\",\"10.0.0.2\",\"10.0.0.3\"]");
+    SelectiveHttpClient http = new SelectiveHttpClient("[\"10.0.0.1\",\"10.0.0.2\",\"10.0.0.3\"]");
 
     AlternatorConfig config =
         AlternatorConfig.builder().withSeedNode(URI.create("http://10.0.0.1:8000")).build();
@@ -149,8 +148,7 @@ public class AlternatorLiveNodesDeadSeedTest {
    */
   @Test
   public void seedListRestoredWhenEverythingIsDown() throws Exception {
-    SelectiveHttpClient http =
-        new SelectiveHttpClient("[\"10.0.0.1\",\"10.0.0.2\",\"10.0.0.3\"]");
+    SelectiveHttpClient http = new SelectiveHttpClient("[\"10.0.0.1\",\"10.0.0.2\",\"10.0.0.3\"]");
     AlternatorConfig config =
         AlternatorConfig.builder()
             .withSeedHosts(Arrays.asList("10.0.0.1", "10.0.0.2", "10.0.0.3"))
@@ -193,8 +191,7 @@ public class AlternatorLiveNodesDeadSeedTest {
     AlternatorLiveNodes next = new AlternatorLiveNodes(config, newClient);
     // Use the previous discovered list (which still contains the seed) so the new instance
     // starts in the same state the running client would be in at the moment the seed dies.
-    java.lang.reflect.Field f =
-        AlternatorLiveNodes.class.getDeclaredField("liveNodes");
+    java.lang.reflect.Field f = AlternatorLiveNodes.class.getDeclaredField("liveNodes");
     f.setAccessible(true);
     @SuppressWarnings("unchecked")
     java.util.concurrent.atomic.AtomicReference<List<URI>> ref =

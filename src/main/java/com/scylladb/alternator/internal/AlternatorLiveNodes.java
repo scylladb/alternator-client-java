@@ -51,6 +51,12 @@ public class AlternatorLiveNodes extends Thread {
   private final boolean ownsPollingClient;
   private final AtomicLong lastActivityTime = new AtomicLong(0);
 
+  /**
+   * Set once {@link #validateConfig()} has proven the scheme/port pair valid. After that {@link
+   * #hostToURI(String)} skips the expensive toURL() validation on each refresh.
+   */
+  private boolean schemeAndPortValidated;
+
   private static Logger logger = Logger.getLogger(AlternatorLiveNodes.class.getName());
 
   /** {@inheritDoc} */
@@ -358,17 +364,19 @@ public class AlternatorLiveNodes extends Thread {
     }
     this.alternatorScheme = config.getScheme();
     this.alternatorPort = config.getPort();
-    this.initialNodes = hostsToUris(seedHosts);
     this.liveNodes = new AtomicReference<>();
     this.nextLiveNodeIndex = new AtomicInteger(0);
     this.config = config;
     this.pollingHttpClient = pollingHttpClient;
     this.ownsPollingClient = ownsPollingClient;
+    // Validate the scheme/port pair first so hostsToUris() below — and every subsequent
+    // /localnodes refresh — can skip the toURL() round-trip in hostToURI().
     try {
-      this.validate();
+      this.validateConfig();
     } catch (ValidationError e) {
       throw new RuntimeException(e);
     }
+    this.initialNodes = hostsToUris(seedHosts);
     this.liveNodes.set(initialNodes);
   }
 
@@ -447,8 +455,13 @@ public class AlternatorLiveNodes extends Thread {
 
   private void validateConfig() throws ValidationError {
     try {
-      // Make sure that `alternatorScheme` and `alternatorPort` are correct values
-      this.hostToURI("1.1.1.1");
+      // Make sure that `alternatorScheme` and `alternatorPort` are correct values; once this
+      // succeeds, subsequent hostToURI() calls can skip the toURL() check (the only failure
+      // mode there is the scheme/port combination, which is fixed for the lifetime of this
+      // instance).
+      URI probe = new URI(alternatorScheme, null, "1.1.1.1", alternatorPort, null, null, null);
+      probe.toURL();
+      schemeAndPortValidated = true;
     } catch (MalformedURLException | URISyntaxException e) {
       throw new ValidationError("failed to validate configuration", e);
     }
@@ -456,8 +469,16 @@ public class AlternatorLiveNodes extends Thread {
 
   private URI hostToURI(String host) throws URISyntaxException, MalformedURLException {
     URI uri = new URI(alternatorScheme, null, host, alternatorPort, null, null, null);
-    // Make sure that URI to URL conversion works
-    uri.toURL();
+    // Skip the toURL() round-trip once we've already proved the scheme/port valid in
+    // validateConfig(). Most bad host strings still fail URI construction above, but some (e.g.
+    // a host starting with '/') silently produce a URI whose port is -1 because the host is
+    // reinterpreted as a path. Reject those here.
+    if (uri.getPort() != alternatorPort) {
+      throw new URISyntaxException(host, "host string produced a URI with unexpected port");
+    }
+    if (!schemeAndPortValidated) {
+      uri.toURL();
+    }
     return uri;
   }
 
@@ -484,7 +505,10 @@ public class AlternatorLiveNodes extends Thread {
     if (nodes.isEmpty()) {
       throw new IllegalStateException("No live nodes available");
     }
-    return nodes.get(Math.abs(nextLiveNodeIndex.getAndIncrement() % nodes.size()));
+    // Math.floorMod handles the AtomicInteger wrap-around case where getAndIncrement returns
+    // Integer.MIN_VALUE. Math.abs(Integer.MIN_VALUE) == Integer.MIN_VALUE (still negative),
+    // which would throw IndexOutOfBoundsException once every ~2^31 calls.
+    return nodes.get(Math.floorMod(nextLiveNodeIndex.getAndIncrement(), nodes.size()));
   }
 
   /**
@@ -522,9 +546,9 @@ public class AlternatorLiveNodes extends Thread {
   }
 
   void updateLiveNodes() throws IOException {
-    // Mark activity so the background poller stays at the active refresh interval. Refresh no
-    // longer routes through nextAsURI() (which implicitly bumped lastActivityTime), so we mark
-    // it here or the poller would fall back to the idle interval after a node death.
+    // Mark activity so the background poller stays at the active (1s) refresh interval. Refresh
+    // no longer routes through nextAsURI() (which implicitly bumped lastActivityTime), so we
+    // mark it here or the poller would fall back to the idle (60s) interval after a node death.
     markActivity();
     RoutingScope scope = this.config.getRoutingScope();
     IOException lastException = null;
@@ -532,7 +556,8 @@ public class AlternatorLiveNodes extends Thread {
     // consulted by the fallback branch below, when every scope failed outright: a scope that
     // succeeds still merges in all configured seeds via mergeWithInitialNodes(), since one
     // failed poll to a seed is not enough evidence to evict it while other seeds are answering
-    // (see AlternatorLiveNodesClusterDiscoveryTest#testClusterScopeKeepsSuccessfulDiscoveryWhenAnotherSeedFails).
+    // (see
+    // AlternatorLiveNodesClusterDiscoveryTest#testClusterScopeKeepsSuccessfulDiscoveryWhenAnotherSeedFails).
     Set<URI> deadInThisCycle = new HashSet<>();
     while (scope != null) {
       try {
@@ -558,11 +583,10 @@ public class AlternatorLiveNodes extends Thread {
       }
       scope = fallback;
     }
-    // No scope produced a usable list. Prune nodes we confirmed dead in this cycle. If
-    // that empties the list, fall back to the original seed set so a future refresh can
-    // rediscover the cluster — but do NOT silently merge dead seeds back into a list that
-    // still has live nodes, which is exactly what kept routing traffic at downed
-    // coordinators.
+    // No scope produced a usable list. Prune nodes we confirmed dead in this cycle. If that
+    // empties the list, fall back to the original seed set so a future refresh can rediscover
+    // the cluster — but do NOT silently merge dead seeds back into a list that still has
+    // live nodes, that's exactly what kept routing traffic at downed coordinators.
     if (lastException != null) {
       List<URI> remaining = new ArrayList<>(liveNodes.get());
       remaining.removeAll(deadInThisCycle);
@@ -570,8 +594,8 @@ public class AlternatorLiveNodes extends Thread {
         liveNodes.set(new ArrayList<>(initialNodes));
         logger.log(
             Level.WARNING,
-            "All known nodes unreachable in every routing scope, restoring seed list as "
-                + "last-resort recovery candidates");
+            "All known nodes unreachable in every routing scope, restoring seed list "
+                + "as last-resort recovery candidates");
       } else {
         liveNodes.set(remaining);
         logger.log(
@@ -620,6 +644,22 @@ public class AlternatorLiveNodes extends Thread {
     return Collections.emptyList();
   }
 
+  /**
+   * Merges the given node list with the initial seed nodes, ensuring seed nodes are always present
+   * as fallback candidates for re-discovery. Seed nodes are appended at the end to preserve the
+   * ordering priority of discovered nodes.
+   *
+   * @param nodes the current list of discovered nodes
+   * @return a new list containing all discovered nodes plus any missing seed nodes
+   */
+  private List<URI> mergeWithInitialNodes(List<URI> nodes) {
+    Set<URI> seen = new LinkedHashSet<>(nodes);
+    for (URI seed : initialNodes) {
+      seen.add(seed);
+    }
+    return new ArrayList<>(seen);
+  }
+
   private List<URI> getNodes(URI uri) throws IOException {
     SdkHttpRequest sdkRequest =
         SdkHttpRequest.builder()
@@ -650,7 +690,12 @@ public class AlternatorLiveNodes extends Thread {
         responseStr = streamToString(body);
       }
 
-      return parseLocalNodesResponse(responseStr);
+      // /localnodes responds with a JSON array of host strings, e.g.
+      //   ["127.0.0.2","127.0.0.3","127.0.0.1"]
+      // We parse it by hand to avoid pulling in a JSON library — the format is restricted
+      // enough that a streaming scan over the bytes is straightforward and tolerant of
+      // whitespace, an empty array, or a missing trailing newline.
+      return parseLocalNodes(responseStr);
     } catch (IOException e) {
       // Ensure the response body is consumed on error
       response.responseBody().ifPresent(this::consumeAndClose);
@@ -658,39 +703,78 @@ public class AlternatorLiveNodes extends Thread {
     }
   }
 
-  private List<URI> parseLocalNodesResponse(String responseStr) {
-    // response looks like: ["127.0.0.2","127.0.0.3","127.0.0.1"]
-    responseStr = responseStr.trim();
-    if (!responseStr.startsWith("[") || !responseStr.endsWith("]")) {
-      logger.log(Level.WARNING, "Malformed /localnodes response: " + responseStr);
+  /**
+   * Parses a JSON array of host strings into a list of URIs. Tolerates surrounding whitespace, an
+   * empty array, and missing trailing newline. Skips entries that fail URI construction with a
+   * warning rather than failing the whole refresh.
+   */
+  List<URI> parseLocalNodes(String json) {
+    if (json == null) {
       return Collections.emptyList();
     }
-
-    String responseBody = responseStr.substring(1, responseStr.length() - 1).trim();
-    if (responseBody.isEmpty()) {
+    int i = 0;
+    int n = json.length();
+    // Skip leading whitespace
+    while (i < n && Character.isWhitespace(json.charAt(i))) {
+      i++;
+    }
+    if (i >= n || json.charAt(i) != '[') {
+      logger.log(Level.WARNING, "Unexpected /localnodes response (not a JSON array): " + json);
       return Collections.emptyList();
     }
-
-    String[] list = responseBody.split(",");
-    List<URI> newHosts = new ArrayList<>();
-    for (String host : list) {
-      host = host.trim();
-      if (host.isEmpty()) {
+    i++; // consume '['
+    List<URI> result = new ArrayList<>();
+    StringBuilder host = new StringBuilder(32);
+    while (i < n) {
+      char c = json.charAt(i);
+      if (Character.isWhitespace(c) || c == ',') {
+        i++;
         continue;
       }
-      if (host.length() < 2 || !host.startsWith("\"") || !host.endsWith("\"")) {
-        logger.log(Level.WARNING, "Malformed host entry in /localnodes response: " + host);
+      if (c == ']') {
+        break;
+      }
+      if (c != '"') {
+        logger.log(
+            Level.WARNING,
+            "Unexpected character in /localnodes response at index " + i + ": " + json);
+        break;
+      }
+      i++; // consume opening quote
+      host.setLength(0);
+      while (i < n) {
+        char ch = json.charAt(i);
+        if (ch == '\\' && i + 1 < n) {
+          host.append(json.charAt(i + 1));
+          i += 2;
+          continue;
+        }
+        if (ch == '"') {
+          i++; // consume closing quote
+          break;
+        }
+        host.append(ch);
+        i++;
+      }
+      String parsed = host.toString();
+      if (parsed.isEmpty()) {
         continue;
       }
-      host = host.substring(1, host.length() - 1);
       try {
-        newHosts.add(this.hostToURI(host));
+        result.add(hostToURI(parsed));
       } catch (URISyntaxException | MalformedURLException e) {
-        logger.log(Level.WARNING, "Invalid host: " + host, e);
+        logger.log(Level.WARNING, "Invalid host in /localnodes response: " + parsed, e);
       }
     }
-    return newHosts;
+    return result;
   }
+
+  /**
+   * Thread-local drain buffer reused across {@link #consumeAndClose} calls so we don't allocate a
+   * new 1 KiB array every time we have to discard a response body.
+   */
+  private static final ThreadLocal<byte[]> DRAIN_BUFFER =
+      ThreadLocal.withInitial(() -> new byte[1024]);
 
   /**
    * Consumes and closes an AbortableInputStream to release the underlying connection back to the
@@ -698,8 +782,7 @@ public class AlternatorLiveNodes extends Thread {
    */
   private void consumeAndClose(AbortableInputStream stream) {
     try {
-      // Read remaining bytes to ensure the connection can be reused
-      byte[] buf = new byte[1024];
+      byte[] buf = DRAIN_BUFFER.get();
       while (stream.read(buf) != -1) {
         // discard
       }
@@ -847,6 +930,9 @@ public class AlternatorLiveNodes extends Thread {
    * @since 2.0.0
    */
   public List<URI> getLiveNodes() {
-    return Collections.unmodifiableList(new ArrayList<>(liveNodes.get()));
+    // No defensive copy: every list ever stored in the AtomicReference is constructed
+    // internally and never mutated after publication. unmodifiableList prevents callers
+    // from accidentally mutating that internal list.
+    return Collections.unmodifiableList(liveNodes.get());
   }
 }

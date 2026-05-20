@@ -2,10 +2,13 @@ package com.scylladb.alternator.internal;
 
 import java.net.URI;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.NoSuchElementException;
+import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
@@ -69,8 +72,19 @@ public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
   /** Cached next node for hasNext()/next() contract in non-seeded mode. */
   private URI nextNode;
 
-  /** Tracks nodes already returned in non-seeded mode to avoid duplicates. */
-  private java.util.Set<URI> usedNodes;
+  /**
+   * Tracks nodes already returned in non-seeded mode to avoid duplicates. Lazily allocated on the
+   * second {@link #next()} call: the overwhelming majority of requests succeed on their first node
+   * attempt and never need a duplicate-skip set, so allocating it eagerly costs a HashSet per
+   * request for no benefit.
+   */
+  private Set<URI> usedNodes;
+
+  /**
+   * First node returned in non-seeded mode, kept separately so we avoid materializing {@link
+   * #usedNodes} when the request only ever picks one node (the common case).
+   */
+  private URI firstUsedNode;
 
   /**
    * Creates a LazyQueryPlan with a random seed. The iteration order will be non-deterministic,
@@ -85,7 +99,6 @@ public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
     this.liveNodes = liveNodes;
     this.goRand = null;
     this.preferredNodes = null;
-    this.usedNodes = new java.util.HashSet<>();
   }
 
   /**
@@ -203,6 +216,19 @@ public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
   /**
    * Computes next node for non-seeded mode (ThreadLocalRandom).
    *
+   * <p>Fast paths for the request hot path:
+   *
+   * <ul>
+   *   <li>First call (no nodes used yet): pick directly from the live list without building a
+   *       filtered copy — saves an {@link ArrayList} allocation per request.
+   *   <li>Single-node cluster: return the only node — saves the random call too.
+   *   <li>Second call: only one node was used; iterate live nodes and pick the first that isn't it,
+   *       with a single uniformly-distributed pick across the remaining count.
+   * </ul>
+   *
+   * The general filter+pick path only kicks in from the third call onward, which is the
+   * retry-after-2-failures case that's already off the happy path.
+   *
    * @return the next node, or null if no more available
    */
   private URI computeNextNonSeeded() {
@@ -211,21 +237,65 @@ public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
     }
 
     List<URI> currentNodes = liveNodes.getLiveNodesInternal();
-
-    List<URI> availableNodes = new ArrayList<>();
-    for (URI node : currentNodes) {
-      if (!usedNodes.contains(node)) {
-        availableNodes.add(node);
-      }
-    }
-
-    if (availableNodes.isEmpty()) {
+    int size = currentNodes.size();
+    if (size == 0) {
       return null;
     }
 
-    int index = ThreadLocalRandom.current().nextInt(availableNodes.size());
-    nextNode = availableNodes.get(index);
-    return nextNode;
+    // First call — nothing used yet, no filter needed.
+    if (firstUsedNode == null) {
+      nextNode =
+          (size == 1)
+              ? currentNodes.get(0)
+              : currentNodes.get(ThreadLocalRandom.current().nextInt(size));
+      return nextNode;
+    }
+
+    // Second call — only firstUsedNode is set; skip it without materializing a HashSet.
+    if (usedNodes == null) {
+      int remaining = 0;
+      for (URI node : currentNodes) {
+        if (!node.equals(firstUsedNode)) {
+          remaining++;
+        }
+      }
+      if (remaining == 0) {
+        return null;
+      }
+      int pick = ThreadLocalRandom.current().nextInt(remaining);
+      for (URI node : currentNodes) {
+        if (node.equals(firstUsedNode)) {
+          continue;
+        }
+        if (pick-- == 0) {
+          nextNode = node;
+          return nextNode;
+        }
+      }
+      throw new AssertionError("pick loop exhausted without match — remaining=" + remaining);
+    }
+
+    // Third+ call — full filter against the used set.
+    int remaining = 0;
+    for (URI node : currentNodes) {
+      if (!usedNodes.contains(node)) {
+        remaining++;
+      }
+    }
+    if (remaining == 0) {
+      return null;
+    }
+    int pick = ThreadLocalRandom.current().nextInt(remaining);
+    for (URI node : currentNodes) {
+      if (usedNodes.contains(node)) {
+        continue;
+      }
+      if (pick-- == 0) {
+        nextNode = node;
+        return nextNode;
+      }
+    }
+    throw new AssertionError("pick loop exhausted without match — remaining=" + remaining);
   }
 
   @Override
@@ -259,9 +329,31 @@ public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
     if (node == null) {
       throw new NoSuchElementException("No more nodes available in query plan");
     }
-    usedNodes.add(node);
+    // Promote firstUsedNode → usedNodes on the second consumption, so subsequent calls have
+    // a real Set to query against. Allocations are bounded to the slow (retry) path.
+    if (firstUsedNode == null) {
+      firstUsedNode = node;
+    } else if (usedNodes == null) {
+      usedNodes = new HashSet<>(4);
+      usedNodes.add(firstUsedNode);
+      usedNodes.add(node);
+    } else {
+      usedNodes.add(node);
+    }
     nextNode = null;
     return node;
+  }
+
+  /** Kept for binary-compat callers that still reference the field via reflection in tests. */
+  @SuppressWarnings("unused")
+  private Set<URI> usedNodesView() {
+    if (usedNodes != null) {
+      return usedNodes;
+    }
+    if (firstUsedNode != null) {
+      return Collections.singleton(firstUsedNode);
+    }
+    return Collections.emptySet();
   }
 
   @Override
