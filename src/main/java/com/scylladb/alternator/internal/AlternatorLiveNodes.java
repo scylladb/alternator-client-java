@@ -462,23 +462,67 @@ public class AlternatorLiveNodes extends Thread {
   }
 
   void updateLiveNodes() throws IOException {
+    // Keep the poller at the active refresh interval. The original implementation routed
+    // every refresh through nextAsURI(), which implicitly bumped lastActivityTime; this
+    // version selects candidates directly off the live list, so we have to mark activity
+    // explicitly or the poller falls back to the idle interval (60s) and convergence after
+    // a node death is far too slow.
+    markActivity();
     RoutingScope scope = this.config.getRoutingScope();
     IOException lastException = null;
+    // Nodes that returned IOException during this refresh cycle. They must not be re-added
+    // to the live list when we publish a new one — the original mergeWithInitialNodes()
+    // unconditionally re-injected every seed, which is what kept dead seeds permanently in
+    // rotation during a rolling upgrade.
+    Set<URI> deadInThisCycle = new HashSet<>();
     while (scope != null) {
       String query = scope.getLocalNodesQuery();
-      URI uri = nextAsURI("/localnodes", query.isEmpty() ? null : query);
-      try {
-        List<URI> nodes = getNodes(uri);
-        if (!nodes.isEmpty()) {
-          liveNodes.set(mergeWithInitialNodes(nodes));
-          logger.log(
-              Level.FINE, "Updated hosts to " + liveNodes + " using " + scope.getDescription());
-          return;
+      // Iterate over all known live nodes for this scope. The old behavior tried exactly
+      // one node per scope — a refresh that picked the dead seed gave up immediately even
+      // though N-1 healthy peers could have answered.
+      List<URI> candidates = new ArrayList<>(liveNodes.get());
+      // Track per-scope failures separately so the same node can still be retried in the
+      // next scope (scopes differ by query params, not transport reachability — the empty-
+      // list and IOException paths must traverse the same number of scope levels).
+      Set<URI> deadInThisScope = new HashSet<>();
+      for (URI base : candidates) {
+        if (deadInThisScope.contains(base)) {
+          continue;
         }
-      } catch (IOException e) {
-        logger.log(
-            Level.WARNING, "Failed to contact node " + uri + " for " + scope.getDescription(), e);
-        lastException = e;
+        URI uri;
+        try {
+          uri =
+              new URI(
+                  base.getScheme(),
+                  null,
+                  base.getHost(),
+                  base.getPort(),
+                  "/localnodes",
+                  query.isEmpty() ? null : query,
+                  null);
+        } catch (URISyntaxException e) {
+          // base was validated at construction; this should not happen
+          continue;
+        }
+        try {
+          List<URI> nodes = getNodes(uri);
+          if (!nodes.isEmpty()) {
+            liveNodes.set(mergePostRefresh(nodes, base, deadInThisCycle));
+            logger.log(
+                Level.FINE, "Updated hosts to " + liveNodes + " using " + scope.getDescription());
+            return;
+          }
+          // Empty response: this scope has no nodes here; stop polling other hosts (they'd
+          // all return the same empty list) and fall through to the next scope.
+          break;
+        } catch (IOException e) {
+          logger.log(
+              Level.WARNING, "Failed to contact node " + uri + " for " + scope.getDescription(), e);
+          deadInThisScope.add(base);
+          deadInThisCycle.add(base);
+          lastException = e;
+          // Try the next live node within this same scope before falling back.
+        }
       }
       RoutingScope fallback = scope.getFallback();
       if (fallback != null) {
@@ -491,31 +535,56 @@ public class AlternatorLiveNodes extends Thread {
       }
       scope = fallback;
     }
-    // No nodes found in any scope - keep the current list but ensure seeds are present
+    // No scope produced a usable list. Prune nodes we confirmed dead in this cycle. If
+    // that empties the list, fall back to the original seed set so a future refresh can
+    // rediscover the cluster — but do NOT silently merge dead seeds back into a list that
+    // still has live nodes, which is exactly what kept routing traffic at downed
+    // coordinators.
     if (lastException != null) {
-      liveNodes.set(mergeWithInitialNodes(liveNodes.get()));
-      logger.log(
-          Level.WARNING,
-          "All nodes unreachable in every routing scope, re-injected seed nodes into live list");
+      List<URI> remaining = new ArrayList<>(liveNodes.get());
+      remaining.removeAll(deadInThisCycle);
+      if (remaining.isEmpty()) {
+        liveNodes.set(new ArrayList<>(initialNodes));
+        logger.log(
+            Level.WARNING,
+            "All known nodes unreachable in every routing scope, restoring seed list as "
+                + "last-resort recovery candidates");
+      } else {
+        liveNodes.set(remaining);
+        logger.log(
+            Level.WARNING,
+            "All routing scopes failed to refresh; pruned "
+                + deadInThisCycle.size()
+                + " unreachable node(s), continuing with remaining live nodes");
+      }
     } else {
       logger.log(Level.WARNING, "No nodes found in any routing scope, keeping existing node list");
     }
   }
 
   /**
-   * Merges the given node list with the initial seed nodes, ensuring seed nodes are always present
-   * as fallback candidates for re-discovery. Seed nodes are appended at the end to preserve the
-   * ordering priority of discovered nodes.
+   * Builds the new live-node list after a successful /localnodes response.
    *
-   * @param nodes the current list of discovered nodes
-   * @return a new list containing all discovered nodes plus any missing seed nodes
+   * <p>The discovered list is treated as authoritative: a healthy peer answering
+   * /localnodes knows which nodes are currently live, and the ones it omits are presumed
+   * down. The node that just answered ({@code source}) is added unconditionally — it just
+   * proved itself alive. Nodes that failed earlier in this same refresh cycle are excluded
+   * even if they appear in the discovered list (covers the case where the discovery
+   * endpoint reports a stale list that still includes the dead seed).
+   *
+   * <p>This deliberately replaces the previous "always merge in the original seed URIs"
+   * behavior: that was a safety net for the case where every discovered node dies, but it
+   * also kept dead seeds permanently in rotation when the peer's view was newer than the
+   * binding's. The all-die safety net is now handled by the seed-restore branch in
+   * {@link #updateLiveNodes()}.
    */
-  private List<URI> mergeWithInitialNodes(List<URI> nodes) {
-    Set<URI> seen = new LinkedHashSet<>(nodes);
-    for (URI seed : initialNodes) {
-      seen.add(seed);
+  private List<URI> mergePostRefresh(List<URI> discovered, URI source, Set<URI> deadInThisCycle) {
+    LinkedHashSet<URI> result = new LinkedHashSet<>(discovered);
+    result.removeAll(deadInThisCycle);
+    if (source != null) {
+      result.add(source);
     }
-    return new ArrayList<>(seen);
+    return new ArrayList<>(result);
   }
 
   private List<URI> getNodes(URI uri) throws IOException {
