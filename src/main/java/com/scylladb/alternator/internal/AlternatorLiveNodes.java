@@ -522,11 +522,21 @@ public class AlternatorLiveNodes extends Thread {
   }
 
   void updateLiveNodes() throws IOException {
+    // Mark activity so the background poller stays at the active refresh interval. Refresh no
+    // longer routes through nextAsURI() (which implicitly bumped lastActivityTime), so we mark
+    // it here or the poller would fall back to the idle interval after a node death.
+    markActivity();
     RoutingScope scope = this.config.getRoutingScope();
     IOException lastException = null;
+    // Seeds that returned IOException while queried directly during this refresh cycle. Only
+    // consulted by the fallback branch below, when every scope failed outright: a scope that
+    // succeeds still merges in all configured seeds via mergeWithInitialNodes(), since one
+    // failed poll to a seed is not enough evidence to evict it while other seeds are answering
+    // (see AlternatorLiveNodesClusterDiscoveryTest#testClusterScopeKeepsSuccessfulDiscoveryWhenAnotherSeedFails).
+    Set<URI> deadInThisCycle = new HashSet<>();
     while (scope != null) {
       try {
-        List<URI> nodes = getNodesForScope(scope);
+        List<URI> nodes = getNodesForScope(scope, deadInThisCycle);
         if (!nodes.isEmpty()) {
           liveNodes.set(mergeWithInitialNodes(nodes));
           logger.log(
@@ -548,18 +558,35 @@ public class AlternatorLiveNodes extends Thread {
       }
       scope = fallback;
     }
-    // No nodes found in any scope - keep the current list but ensure seeds are present
+    // No scope produced a usable list. Prune nodes we confirmed dead in this cycle. If
+    // that empties the list, fall back to the original seed set so a future refresh can
+    // rediscover the cluster — but do NOT silently merge dead seeds back into a list that
+    // still has live nodes, which is exactly what kept routing traffic at downed
+    // coordinators.
     if (lastException != null) {
-      liveNodes.set(mergeWithInitialNodes(liveNodes.get()));
-      logger.log(
-          Level.WARNING,
-          "All nodes unreachable in every routing scope, re-injected seed nodes into live list");
+      List<URI> remaining = new ArrayList<>(liveNodes.get());
+      remaining.removeAll(deadInThisCycle);
+      if (remaining.isEmpty()) {
+        liveNodes.set(new ArrayList<>(initialNodes));
+        logger.log(
+            Level.WARNING,
+            "All known nodes unreachable in every routing scope, restoring seed list as "
+                + "last-resort recovery candidates");
+      } else {
+        liveNodes.set(remaining);
+        logger.log(
+            Level.WARNING,
+            "All routing scopes failed to refresh; pruned "
+                + deadInThisCycle.size()
+                + " unreachable node(s), continuing with remaining live nodes");
+      }
     } else {
       logger.log(Level.WARNING, "No nodes found in any routing scope, keeping existing node list");
     }
   }
 
-  private List<URI> getNodesForScope(RoutingScope scope) throws IOException {
+  private List<URI> getNodesForScope(RoutingScope scope, Set<URI> deadInThisCycle)
+      throws IOException {
     String query = scope.getLocalNodesQuery();
     String requestQuery = query.isEmpty() ? null : query;
     IOException lastException = null;
@@ -578,6 +605,7 @@ public class AlternatorLiveNodes extends Thread {
             Level.WARNING,
             "Failed to contact seed node " + seedNode + " for " + scope.getDescription(),
             e);
+        deadInThisCycle.add(seedNode);
         lastException = e;
       } catch (URISyntaxException e) {
         throw new RuntimeException(e);
@@ -590,22 +618,6 @@ public class AlternatorLiveNodes extends Thread {
       throw lastException;
     }
     return Collections.emptyList();
-  }
-
-  /**
-   * Merges the given node list with the initial seed nodes, ensuring seed nodes are always present
-   * as fallback candidates for re-discovery. Seed nodes are appended at the end to preserve the
-   * ordering priority of discovered nodes.
-   *
-   * @param nodes the current list of discovered nodes
-   * @return a new list containing all discovered nodes plus any missing seed nodes
-   */
-  private List<URI> mergeWithInitialNodes(List<URI> nodes) {
-    Set<URI> seen = new LinkedHashSet<>(nodes);
-    for (URI seed : initialNodes) {
-      seen.add(seed);
-    }
-    return new ArrayList<>(seen);
   }
 
   private List<URI> getNodes(URI uri) throws IOException {
@@ -750,7 +762,7 @@ public class AlternatorLiveNodes extends Thread {
       return;
     }
     try {
-      List<URI> nodes = getNodesForScope(scope);
+      List<URI> nodes = getNodesForScope(scope, new HashSet<>());
       if (nodes.isEmpty()) {
         throw new ValidationError(
             "node returned empty list for "
