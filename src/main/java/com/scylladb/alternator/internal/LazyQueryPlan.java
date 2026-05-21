@@ -71,15 +71,17 @@ public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
   private URI nextNode;
 
   /**
-   * Tracks nodes already returned in non-seeded mode to avoid duplicates. Lazily allocated on
-   * the second {@link #next()} call: the overwhelming majority of requests succeed on their
-   * first node attempt and never need a duplicate-skip set, so allocating it eagerly costs a
-   * HashSet per request for no benefit.
+   * Tracks nodes already returned in non-seeded mode to avoid duplicates. Lazily allocated on the
+   * second {@link #next()} call: the overwhelming majority of requests succeed on their first node
+   * attempt and never need a duplicate-skip set, so allocating it eagerly costs a HashSet per
+   * request for no benefit.
    */
   private Set<URI> usedNodes;
 
-  /** First node returned in non-seeded mode, kept separately so we avoid materializing
-   * {@link #usedNodes} when the request only ever picks one node (the common case). */
+  /**
+   * First node returned in non-seeded mode, kept separately so we avoid materializing {@link
+   * #usedNodes} when the request only ever picks one node (the common case).
+   */
   private URI firstUsedNode;
 
   /**
@@ -150,8 +152,8 @@ public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
    *   <li>First call (no nodes used yet): pick directly from the live list without building a
    *       filtered copy — saves an {@link ArrayList} allocation per request.
    *   <li>Single-node cluster: return the only node — saves the random call too.
-   *   <li>Second call: only one node was used; iterate live nodes and pick the first that
-   *       isn't it, with a single uniformly-distributed pick across the remaining count.
+   *   <li>Second call: only one node was used; iterate live nodes and pick the first that isn't it,
+   *       with a single uniformly-distributed pick across the remaining count.
    * </ul>
    *
    * The general filter+pick path only kicks in from the third call onward, which is the
@@ -172,8 +174,10 @@ public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
 
     // First call — nothing used yet, no filter needed.
     if (firstUsedNode == null && usedNodes == null) {
-      nextNode = (size == 1) ? currentNodes.get(0)
-          : currentNodes.get(ThreadLocalRandom.current().nextInt(size));
+      nextNode =
+          (size == 1)
+              ? currentNodes.get(0)
+              : currentNodes.get(ThreadLocalRandom.current().nextInt(size));
       return nextNode;
     }
 

@@ -65,10 +65,11 @@ public class BasicQueryPlanInterceptor implements ExecutionInterceptor {
     // Build new request with the target node's host and port. Only set keep-alive if the
     // SDK hasn't already (the Apache and CRT clients add it by default); writing the same
     // header again forces the SDK to recopy the header list.
-    SdkHttpRequest.Builder builder = originalRequest.toBuilder()
-        .protocol(targetUri.getScheme())
-        .host(targetUri.getHost())
-        .port(targetUri.getPort());
+    SdkHttpRequest.Builder builder =
+        originalRequest.toBuilder()
+            .protocol(targetUri.getScheme())
+            .host(targetUri.getHost())
+            .port(targetUri.getPort());
     List<String> existing = originalRequest.matchingHeaders("Connection");
     if (existing == null || existing.isEmpty()) {
       builder.putHeader("Connection", "keep-alive");

@@ -27,30 +27,29 @@ import software.amazon.awssdk.http.SdkHttpRequest;
 
 /**
  * Regression tests for the dead-seed-stays-in-rotation bug reproduced from a Scylla rolling-
- * upgrade failure: the YCSB DynamoDB binding ran with native load balancing, the seed node
- * went down during the upgrade, and 62,624 UPDATE operations failed with connection-refused
- * because {@link AlternatorLiveNodes#updateLiveNodes()} kept re-injecting the dead seed into
- * the live list (via the old {@code mergeWithInitialNodes}) so {@code nextAsURI()} kept
- * round-robining onto it.
+ * upgrade failure: the YCSB DynamoDB binding ran with native load balancing, the seed node went
+ * down during the upgrade, and 62,624 UPDATE operations failed with connection-refused because
+ * {@link AlternatorLiveNodes#updateLiveNodes()} kept re-injecting the dead seed into the live list
+ * (via the old {@code mergeWithInitialNodes}) so {@code nextAsURI()} kept round-robining onto it.
  *
  * <p>Expected behavior:
  *
  * <ul>
- *   <li>When the seed dies, the refresh thread must try other known live nodes before giving
- *       up on the scope.
- *   <li>A successful refresh from a healthy peer is authoritative: the responder is alive,
- *       nodes it reports are alive, and nodes that just failed in this refresh cycle must
- *       NOT be re-added to the live list.
- *   <li>If every known node is unreachable the original seed list is restored as a
- *       last-resort recovery candidate.
+ *   <li>When the seed dies, the refresh thread must try other known live nodes before giving up on
+ *       the scope.
+ *   <li>A successful refresh from a healthy peer is authoritative: the responder is alive, nodes it
+ *       reports are alive, and nodes that just failed in this refresh cycle must NOT be re-added to
+ *       the live list.
+ *   <li>If every known node is unreachable the original seed list is restored as a last-resort
+ *       recovery candidate.
  * </ul>
  */
 public class AlternatorLiveNodesDeadSeedTest {
 
   /**
    * SdkHttpClient that lets the test mark hosts as "down". A request to a down host throws
-   * IOException (mirrors connection refused/reset); requests to live hosts return the
-   * configured /localnodes response body.
+   * IOException (mirrors connection refused/reset); requests to live hosts return the configured
+   * /localnodes response body.
    */
   private static final class SelectiveHttpClient implements SdkHttpClient {
     private final Set<String> downHosts = ConcurrentHashMap.newKeySet();
@@ -98,15 +97,14 @@ public class AlternatorLiveNodesDeadSeedTest {
   }
 
   /**
-   * The scenario from the production failure: three Alternator nodes, refresh discovers all
-   * three, then one of them — the original seed — dies. The next refresh must drop the dead
-   * seed from the live list so that subsequent {@code nextAsURI()} calls stop returning it.
+   * The scenario from the production failure: three Alternator nodes, refresh discovers all three,
+   * then one of them — the original seed — dies. The next refresh must drop the dead seed from the
+   * live list so that subsequent {@code nextAsURI()} calls stop returning it.
    */
   @Test
   public void deadSeedIsEvictedAfterRefreshDiscoversHealthyPeers() throws Exception {
     // /localnodes from any healthy node reports the full cluster initially.
-    SelectiveHttpClient http =
-        new SelectiveHttpClient("[\"10.0.0.1\",\"10.0.0.2\",\"10.0.0.3\"]");
+    SelectiveHttpClient http = new SelectiveHttpClient("[\"10.0.0.1\",\"10.0.0.2\",\"10.0.0.3\"]");
 
     AlternatorConfig config =
         AlternatorConfig.builder().withSeedNode(URI.create("http://10.0.0.1:8000")).build();
@@ -148,14 +146,13 @@ public class AlternatorLiveNodesDeadSeedTest {
   }
 
   /**
-   * When a refresh polls the seed and it fails, the refresh must continue with the other
-   * known live nodes within the same scope. The old code stopped after one attempt per
-   * scope, so a refresh that happened to pick the dead seed gave up immediately.
+   * When a refresh polls the seed and it fails, the refresh must continue with the other known live
+   * nodes within the same scope. The old code stopped after one attempt per scope, so a refresh
+   * that happened to pick the dead seed gave up immediately.
    */
   @Test
   public void refreshIteratesOverAllLiveNodesWhenFirstChoiceFails() throws Exception {
-    SelectiveHttpClient http =
-        new SelectiveHttpClient("[\"10.0.0.1\",\"10.0.0.2\",\"10.0.0.3\"]");
+    SelectiveHttpClient http = new SelectiveHttpClient("[\"10.0.0.1\",\"10.0.0.2\",\"10.0.0.3\"]");
     AlternatorConfig config =
         AlternatorConfig.builder().withSeedNode(URI.create("http://10.0.0.1:8000")).build();
     AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, http);
@@ -171,7 +168,8 @@ public class AlternatorLiveNodesDeadSeedTest {
 
     assertTrue(
         "refresh should have contacted at least one healthy peer when the seed failed, "
-            + "contacted=" + contactedThisCycle,
+            + "contacted="
+            + contactedThisCycle,
         contactedThisCycle.stream().anyMatch(h -> !h.equals("10.0.0.1")));
   }
 
@@ -182,8 +180,7 @@ public class AlternatorLiveNodesDeadSeedTest {
    */
   @Test
   public void seedListRestoredWhenEverythingIsDown() throws Exception {
-    SelectiveHttpClient http =
-        new SelectiveHttpClient("[\"10.0.0.1\",\"10.0.0.2\",\"10.0.0.3\"]");
+    SelectiveHttpClient http = new SelectiveHttpClient("[\"10.0.0.1\",\"10.0.0.2\",\"10.0.0.3\"]");
     AlternatorConfig config =
         AlternatorConfig.builder()
             .withSeedHosts(Arrays.asList("10.0.0.1", "10.0.0.2", "10.0.0.3"))
@@ -226,8 +223,7 @@ public class AlternatorLiveNodesDeadSeedTest {
     AlternatorLiveNodes next = new AlternatorLiveNodes(config, newClient);
     // Use the previous discovered list (which still contains the seed) so the new instance
     // starts in the same state the running client would be in at the moment the seed dies.
-    java.lang.reflect.Field f =
-        AlternatorLiveNodes.class.getDeclaredField("liveNodes");
+    java.lang.reflect.Field f = AlternatorLiveNodes.class.getDeclaredField("liveNodes");
     f.setAccessible(true);
     @SuppressWarnings("unchecked")
     java.util.concurrent.atomic.AtomicReference<List<URI>> ref =

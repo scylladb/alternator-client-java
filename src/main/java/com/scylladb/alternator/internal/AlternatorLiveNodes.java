@@ -48,8 +48,11 @@ public class AlternatorLiveNodes extends Thread {
   private final SdkHttpClient pollingHttpClient;
   private final boolean ownsPollingClient;
   private final AtomicLong lastActivityTime = new AtomicLong(0);
-  /** Set once {@link #validateConfig()} has proven the scheme/port pair valid. After that
-   * {@link #hostToURI(String)} skips the expensive toURL() validation on each refresh. */
+
+  /**
+   * Set once {@link #validateConfig()} has proven the scheme/port pair valid. After that {@link
+   * #hostToURI(String)} skips the expensive toURL() validation on each refresh.
+   */
   private boolean schemeAndPortValidated;
 
   private static Logger logger = Logger.getLogger(AlternatorLiveNodes.class.getName());
@@ -587,18 +590,17 @@ public class AlternatorLiveNodes extends Thread {
   /**
    * Builds the new live-node list after a successful /localnodes response.
    *
-   * <p>The discovered list is treated as authoritative: a healthy peer answering /localnodes
-   * knows which nodes are currently live and the ones it omits are presumed down. The node
-   * that just answered ({@code source}) is added unconditionally — it just proved itself
-   * alive. Nodes that failed earlier in this same refresh cycle are excluded even if they
-   * appear in the discovered list (covers the case where the discovery endpoint reports a
-   * stale list that still includes the dead seed).
+   * <p>The discovered list is treated as authoritative: a healthy peer answering /localnodes knows
+   * which nodes are currently live and the ones it omits are presumed down. The node that just
+   * answered ({@code source}) is added unconditionally — it just proved itself alive. Nodes that
+   * failed earlier in this same refresh cycle are excluded even if they appear in the discovered
+   * list (covers the case where the discovery endpoint reports a stale list that still includes the
+   * dead seed).
    *
-   * <p>This deliberately replaces the previous "always merge in the original seed URIs"
-   * behavior: that was a safety net for the case where every discovered node dies, but it
-   * also kept dead seeds permanently in rotation when the peer's view was newer than the
-   * binding's. The all-die safety net is handled by the seed-restore branch in
-   * {@link #updateLiveNodes()} instead.
+   * <p>This deliberately replaces the previous "always merge in the original seed URIs" behavior:
+   * that was a safety net for the case where every discovered node dies, but it also kept dead
+   * seeds permanently in rotation when the peer's view was newer than the binding's. The all-die
+   * safety net is handled by the seed-restore branch in {@link #updateLiveNodes()} instead.
    */
   private List<URI> mergePostRefresh(List<URI> discovered, URI source, Set<URI> deadInThisCycle) {
     LinkedHashSet<URI> result = new LinkedHashSet<>(discovered);
@@ -653,9 +655,9 @@ public class AlternatorLiveNodes extends Thread {
   }
 
   /**
-   * Parses a JSON array of host strings into a list of URIs. Tolerates surrounding
-   * whitespace, an empty array, and missing trailing newline. Skips entries that fail
-   * URI construction with a warning rather than failing the whole refresh.
+   * Parses a JSON array of host strings into a list of URIs. Tolerates surrounding whitespace, an
+   * empty array, and missing trailing newline. Skips entries that fail URI construction with a
+   * warning rather than failing the whole refresh.
    */
   private List<URI> parseLocalNodes(String json) {
     if (json == null) {
@@ -719,10 +721,11 @@ public class AlternatorLiveNodes extends Thread {
   }
 
   /**
-   * Thread-local drain buffer reused across {@link #consumeAndClose} calls so we don't
-   * allocate a new 1 KiB array every time we have to discard a response body.
+   * Thread-local drain buffer reused across {@link #consumeAndClose} calls so we don't allocate a
+   * new 1 KiB array every time we have to discard a response body.
    */
-  private static final ThreadLocal<byte[]> DRAIN_BUFFER = ThreadLocal.withInitial(() -> new byte[1024]);
+  private static final ThreadLocal<byte[]> DRAIN_BUFFER =
+      ThreadLocal.withInitial(() -> new byte[1024]);
 
   /**
    * Consumes and closes an AbortableInputStream to release the underlying connection back to the
