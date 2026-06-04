@@ -426,7 +426,12 @@ public class AlternatorLiveNodes extends Thread {
   private URI hostToURI(String host) throws URISyntaxException, MalformedURLException {
     URI uri = new URI(alternatorScheme, null, host, alternatorPort, null, null, null);
     // Skip the toURL() round-trip once we've already proved the scheme/port valid in
-    // validateConfig(). A bad host string will still fail URI construction above.
+    // validateConfig(). Most bad host strings still fail URI construction above, but some (e.g.
+    // a host starting with '/') silently produce a URI whose port is -1 because the host is
+    // reinterpreted as a path. Reject those here.
+    if (uri.getPort() != alternatorPort) {
+      throw new URISyntaxException(host, "host string produced a URI with unexpected port");
+    }
     if (!schemeAndPortValidated) {
       uri.toURL();
     }
@@ -522,8 +527,7 @@ public class AlternatorLiveNodes extends Thread {
                   query.isEmpty() ? null : query,
                   null);
         } catch (URISyntaxException e) {
-          // base was validated at construction; this should not happen
-          continue;
+          throw new AssertionError("live-node URI " + base + " is already validated", e);
         }
         try {
           List<URI> nodes = getNodes(uri);
@@ -602,7 +606,7 @@ public class AlternatorLiveNodes extends Thread {
    * seeds permanently in rotation when the peer's view was newer than the binding's. The all-die
    * safety net is handled by the seed-restore branch in {@link #updateLiveNodes()} instead.
    */
-  private List<URI> mergePostRefresh(List<URI> discovered, URI source, Set<URI> deadInThisCycle) {
+  List<URI> mergePostRefresh(List<URI> discovered, URI source, Set<URI> deadInThisCycle) {
     LinkedHashSet<URI> result = new LinkedHashSet<>(discovered);
     result.removeAll(deadInThisCycle);
     if (source != null) {
@@ -659,7 +663,7 @@ public class AlternatorLiveNodes extends Thread {
    * empty array, and missing trailing newline. Skips entries that fail URI construction with a
    * warning rather than failing the whole refresh.
    */
-  private List<URI> parseLocalNodes(String json) {
+  List<URI> parseLocalNodes(String json) {
     if (json == null) {
       return Collections.emptyList();
     }

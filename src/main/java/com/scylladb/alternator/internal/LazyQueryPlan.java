@@ -173,7 +173,7 @@ public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
     }
 
     // First call — nothing used yet, no filter needed.
-    if (firstUsedNode == null && usedNodes == null) {
+    if (firstUsedNode == null) {
       nextNode =
           (size == 1)
               ? currentNodes.get(0)
@@ -202,7 +202,7 @@ public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
           return nextNode;
         }
       }
-      return null; // unreachable
+      throw new AssertionError("pick loop exhausted without match — remaining=" + remaining);
     }
 
     // Third+ call — full filter against the used set.
@@ -225,7 +225,7 @@ public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
         return nextNode;
       }
     }
-    return null; // unreachable
+    throw new AssertionError("pick loop exhausted without match — remaining=" + remaining);
   }
 
   @Override
