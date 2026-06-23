@@ -28,8 +28,8 @@ public enum KeyRouteAffinity {
    *   <li>DeleteItem with ConditionExpression, Expected, or non-NONE ReturnValues
    * </ul>
    *
-   * <p>Note: BatchWriteItem is intentionally excluded because it does not support conditional
-   * expressions and would require single-table batch handling for proper affinity routing.
+   * <p>Note: BatchWriteItem is intentionally excluded because it is write-only and does not use LWT
+   * in {@code only_rmw_uses_lwt} mode.
    */
   RMW,
 

@@ -1,16 +1,19 @@
 package com.scylladb.alternator.keyrouting;
 
+import java.util.List;
 import java.util.Map;
 import software.amazon.awssdk.core.SdkRequest;
 import software.amazon.awssdk.services.dynamodb.model.AttributeAction;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValueUpdate;
+import software.amazon.awssdk.services.dynamodb.model.BatchWriteItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.DeleteItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 import software.amazon.awssdk.services.dynamodb.model.ReturnValue;
 import software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest;
+import software.amazon.awssdk.services.dynamodb.model.WriteRequest;
 
 /**
  * Determines if a DynamoDB request qualifies for key route affinity.
@@ -43,10 +46,9 @@ public final class KeyAffinityRequestClassifier {
     if (request instanceof DeleteItemRequest) {
       return shouldApplyDeleteItem(mode, (DeleteItemRequest) request);
     }
-    // Note: BatchWriteItemRequest is intentionally not supported for key route affinity.
-    // It can contain items for multiple tables with different partition keys, making it
-    // impossible to route deterministically to a single node. These requests will use
-    // the default round-robin routing.
+    if (request instanceof BatchWriteItemRequest) {
+      return shouldApplyBatchWriteItem(mode, (BatchWriteItemRequest) request);
+    }
 
     // Read operations and unsupported operations don't qualify
     return false;
@@ -126,6 +128,11 @@ public final class KeyAffinityRequestClassifier {
     return false;
   }
 
+  private static boolean shouldApplyBatchWriteItem(
+      KeyRouteAffinity mode, BatchWriteItemRequest request) {
+    return mode == KeyRouteAffinity.ANY_WRITE && findBatchWriteRoutingTarget(request) != null;
+  }
+
   /**
    * Extracts the table name from a DynamoDB request.
    *
@@ -161,10 +168,10 @@ public final class KeyAffinityRequestClassifier {
     if (request instanceof QueryRequest) {
       return ((QueryRequest) request).tableName();
     }
-    // BatchWriteItem can contain items for multiple tables.
-    // Key route affinity for BatchWriteItem is not implemented - would require either:
-    // 1. Single-table batches only (limiting functionality)
-    // 2. Splitting batches by partition key (complex, changes semantics)
+    if (request instanceof BatchWriteItemRequest) {
+      BatchWriteRoutingTarget target = findBatchWriteRoutingTarget((BatchWriteItemRequest) request);
+      return target == null ? null : target.tableName;
+    }
     return null;
   }
 
@@ -186,11 +193,47 @@ public final class KeyAffinityRequestClassifier {
       key = ((DeleteItemRequest) request).key();
     } else if (request instanceof GetItemRequest) {
       key = ((GetItemRequest) request).key();
+    } else if (request instanceof BatchWriteItemRequest) {
+      BatchWriteRoutingTarget target = findBatchWriteRoutingTarget((BatchWriteItemRequest) request);
+      key = target == null ? null : target.key;
     }
 
     if (key != null && pkAttributeName != null) {
       return key.get(pkAttributeName);
     }
     return null;
+  }
+
+  private static BatchWriteRoutingTarget findBatchWriteRoutingTarget(
+      BatchWriteItemRequest request) {
+    if (request.requestItems() == null || request.requestItems().isEmpty()) {
+      return null;
+    }
+
+    for (Map.Entry<String, List<WriteRequest>> entry : request.requestItems().entrySet()) {
+      List<WriteRequest> writes = entry.getValue();
+      if (writes == null) {
+        continue;
+      }
+      for (WriteRequest write : writes) {
+        if (write.putRequest() != null) {
+          return new BatchWriteRoutingTarget(entry.getKey(), write.putRequest().item());
+        }
+        if (write.deleteRequest() != null) {
+          return new BatchWriteRoutingTarget(entry.getKey(), write.deleteRequest().key());
+        }
+      }
+    }
+    return null;
+  }
+
+  private static final class BatchWriteRoutingTarget {
+    private final String tableName;
+    private final Map<String, AttributeValue> key;
+
+    private BatchWriteRoutingTarget(String tableName, Map<String, AttributeValue> key) {
+      this.tableName = tableName;
+      this.key = key;
+    }
   }
 }

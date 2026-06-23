@@ -320,9 +320,17 @@ public class KeyAffinityRequestClassifierTest {
 
   @Test
   public void testRmwModeBatchWriteItem() {
-    // BatchWriteItem is not supported for key route affinity because it can contain
-    // items for multiple tables with different partition keys
-    BatchWriteItemRequest request = BatchWriteItemRequest.builder().build();
+    BatchWriteItemRequest request =
+        BatchWriteItemRequest.builder()
+            .requestItems(
+                Collections.singletonMap(
+                    "test",
+                    Collections.singletonList(
+                        WriteRequest.builder()
+                            .putRequest(
+                                PutRequest.builder().item(createItem("pk", "value")).build())
+                            .build())))
+            .build();
     assertFalse(KeyAffinityRequestClassifier.shouldApply(KeyRouteAffinity.RMW, request));
   }
 
@@ -354,8 +362,22 @@ public class KeyAffinityRequestClassifierTest {
 
   @Test
   public void testAnyWriteModeBatchWriteItem() {
-    // BatchWriteItem is not supported for key route affinity because it can contain
-    // items for multiple tables with different partition keys
+    BatchWriteItemRequest request =
+        BatchWriteItemRequest.builder()
+            .requestItems(
+                Collections.singletonMap(
+                    "test",
+                    Collections.singletonList(
+                        WriteRequest.builder()
+                            .putRequest(
+                                PutRequest.builder().item(createItem("pk", "value")).build())
+                            .build())))
+            .build();
+    assertTrue(KeyAffinityRequestClassifier.shouldApply(KeyRouteAffinity.ANY_WRITE, request));
+  }
+
+  @Test
+  public void testAnyWriteModeEmptyBatchWriteItem() {
     BatchWriteItemRequest request = BatchWriteItemRequest.builder().build();
     assertFalse(KeyAffinityRequestClassifier.shouldApply(KeyRouteAffinity.ANY_WRITE, request));
   }
@@ -420,6 +442,22 @@ public class KeyAffinityRequestClassifierTest {
 
   @Test
   public void testExtractTableNameFromBatchWriteItem() {
+    BatchWriteItemRequest request =
+        BatchWriteItemRequest.builder()
+            .requestItems(
+                Collections.singletonMap(
+                    "orders",
+                    Collections.singletonList(
+                        WriteRequest.builder()
+                            .putRequest(
+                                PutRequest.builder().item(createItem("order_id", "o456")).build())
+                            .build())))
+            .build();
+    assertEquals("orders", KeyAffinityRequestClassifier.extractTableName(request));
+  }
+
+  @Test
+  public void testExtractTableNameFromEmptyBatchWriteItem() {
     BatchWriteItemRequest request = BatchWriteItemRequest.builder().build();
     assertNull(KeyAffinityRequestClassifier.extractTableName(request));
   }
@@ -464,6 +502,46 @@ public class KeyAffinityRequestClassifierTest {
     AttributeValue pk = KeyAffinityRequestClassifier.extractPartitionKey(request, "product_id");
     assertNotNull(pk);
     assertEquals("p012", pk.s());
+  }
+
+  @Test
+  public void testExtractPartitionKeyFromBatchWriteItemPutRequest() {
+    BatchWriteItemRequest request =
+        BatchWriteItemRequest.builder()
+            .requestItems(
+                Collections.singletonMap(
+                    "orders",
+                    Collections.singletonList(
+                        WriteRequest.builder()
+                            .putRequest(
+                                PutRequest.builder().item(createItem("order_id", "o456")).build())
+                            .build())))
+            .build();
+
+    AttributeValue pk = KeyAffinityRequestClassifier.extractPartitionKey(request, "order_id");
+    assertNotNull(pk);
+    assertEquals("o456", pk.s());
+  }
+
+  @Test
+  public void testExtractPartitionKeyFromBatchWriteItemDeleteRequest() {
+    BatchWriteItemRequest request =
+        BatchWriteItemRequest.builder()
+            .requestItems(
+                Collections.singletonMap(
+                    "sessions",
+                    Collections.singletonList(
+                        WriteRequest.builder()
+                            .deleteRequest(
+                                DeleteRequest.builder()
+                                    .key(createKey("session_id", "s789"))
+                                    .build())
+                            .build())))
+            .build();
+
+    AttributeValue pk = KeyAffinityRequestClassifier.extractPartitionKey(request, "session_id");
+    assertNotNull(pk);
+    assertEquals("s789", pk.s());
   }
 
   @Test
