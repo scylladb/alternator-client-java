@@ -1509,7 +1509,7 @@ public class AffinityQueryPlanInterceptorTest {
   // --- BatchWriteItem ---
 
   @Test
-  public void testBatchWriteItem_AnyWrite_RoundRobin() {
+  public void testBatchWriteItem_AnyWrite_Affinity() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.ANY_WRITE));
     try {
       Map<String, List<WriteRequest>> requestItems = new HashMap<>();
@@ -1518,7 +1518,7 @@ public class AffinityQueryPlanInterceptorTest {
           WriteRequest.builder().putRequest(PutRequest.builder().item(makeItem()).build()).build());
       requestItems.put(TABLE_NAME, writes);
 
-      assertRoundRobinRouting(
+      assertAffinityRouting(
           () ->
               client.batchWriteItem(
                   BatchWriteItemRequest.builder().requestItems(requestItems).build()));
@@ -1568,7 +1568,7 @@ public class AffinityQueryPlanInterceptorTest {
   // --- BatchWriteItem with DeleteRequest ---
 
   @Test
-  public void testBatchWriteItemDelete_AnyWrite_RoundRobin() {
+  public void testBatchWriteItemDelete_AnyWrite_Affinity() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.ANY_WRITE));
     try {
       Map<String, List<WriteRequest>> requestItems = new HashMap<>();
@@ -1579,7 +1579,7 @@ public class AffinityQueryPlanInterceptorTest {
               .build());
       requestItems.put(TABLE_NAME, writes);
 
-      assertRoundRobinRouting(
+      assertAffinityRouting(
           () ->
               client.batchWriteItem(
                   BatchWriteItemRequest.builder().requestItems(requestItems).build()));
