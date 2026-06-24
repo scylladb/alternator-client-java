@@ -4,6 +4,7 @@ import com.scylladb.alternator.internal.AlternatorLiveNodes;
 import com.scylladb.alternator.internal.LazyQueryPlan;
 import com.scylladb.alternator.keyrouting.AttributeValueHasher;
 import com.scylladb.alternator.keyrouting.KeyAffinityRequestClassifier;
+import com.scylladb.alternator.keyrouting.KeyAffinityRequestClassifier.BatchWriteRoutingTarget;
 import com.scylladb.alternator.keyrouting.KeyRouteAffinityConfig;
 import com.scylladb.alternator.keyrouting.PartitionKeyResolver;
 import software.amazon.awssdk.core.SdkRequest;
@@ -11,6 +12,7 @@ import software.amazon.awssdk.core.interceptor.Context;
 import software.amazon.awssdk.core.interceptor.ExecutionAttributes;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
+import software.amazon.awssdk.services.dynamodb.model.BatchWriteItemRequest;
 
 /**
  * Execution interceptor that implements key-based route affinity.
@@ -92,6 +94,10 @@ public class AffinityQueryPlanInterceptor extends BasicQueryPlanInterceptor {
       return null;
     }
 
+    if (request instanceof BatchWriteItemRequest) {
+      return getBatchWriteQueryPlan((BatchWriteItemRequest) request);
+    }
+
     // Extract table name
     String tableName = KeyAffinityRequestClassifier.extractTableName(request);
     if (tableName == null) {
@@ -120,6 +126,33 @@ public class AffinityQueryPlanInterceptor extends BasicQueryPlanInterceptor {
     // Hash the partition key and create a deterministic query plan
     long hash = AttributeValueHasher.hash(pkValue);
     return new LazyQueryPlan(liveNodes, hash);
+  }
+
+  private LazyQueryPlan getBatchWriteQueryPlan(BatchWriteItemRequest request) {
+    for (BatchWriteRoutingTarget target :
+        KeyAffinityRequestClassifier.extractBatchWriteRoutingTargets(request)) {
+      String tableName = target.tableName();
+      String pkName = pkResolver.getPartitionKeyName(tableName);
+      if (pkName == null) {
+        if (clientForDiscovery != null) {
+          pkResolver.triggerDiscovery(tableName, clientForDiscovery);
+        }
+        return null;
+      }
+
+      AttributeValue pkValue = target.partitionKeyValue(pkName);
+      if (pkValue == null) {
+        continue;
+      }
+
+      try {
+        long hash = AttributeValueHasher.hash(pkValue);
+        return new LazyQueryPlan(liveNodes, hash);
+      } catch (IllegalArgumentException e) {
+        // Unsupported partition-key shapes cannot be routed by key affinity.
+      }
+    }
+    return null;
   }
 
   @Override
