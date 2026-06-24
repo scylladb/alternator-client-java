@@ -3,6 +3,8 @@ package com.scylladb.alternator;
 import static org.junit.Assert.*;
 
 import com.scylladb.alternator.internal.AlternatorLiveNodes;
+import com.scylladb.alternator.internal.LazyQueryPlan;
+import com.scylladb.alternator.keyrouting.AttributeValueHasher;
 import com.scylladb.alternator.keyrouting.KeyRouteAffinity;
 import com.scylladb.alternator.keyrouting.KeyRouteAffinityConfig;
 import com.scylladb.alternator.queryplan.AffinityQueryPlanInterceptor;
@@ -140,10 +142,39 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   private Map<String, AttributeValue> makeItem() {
+    return makeItem(PK_VALUE);
+  }
+
+  private Map<String, AttributeValue> makeItem(String pkValue) {
     Map<String, AttributeValue> item = new HashMap<>();
-    item.put(PK_NAME, AttributeValue.builder().s(PK_VALUE).build());
+    item.put(PK_NAME, AttributeValue.builder().s(pkValue).build());
     item.put("data", AttributeValue.builder().s("value").build());
     return item;
+  }
+
+  private URI firstAffinityRouteForPk(String pkValue) {
+    long hash = AttributeValueHasher.hash(AttributeValue.builder().s(pkValue).build());
+    LazyQueryPlan plan = new LazyQueryPlan(new MockAlternatorLiveNodes(testNodeUris), hash);
+    return plan.next();
+  }
+
+  private String findPkValueWithDifferentRoute(String prefix, String otherPkValue) {
+    URI otherRoute = firstAffinityRouteForPk(otherPkValue);
+    for (int i = 0; i < 100; i++) {
+      String candidate = prefix + i;
+      if (!firstAffinityRouteForPk(candidate).equals(otherRoute)) {
+        return candidate;
+      }
+    }
+    fail("Could not find test partition key with a different affinity route");
+    return null;
+  }
+
+  private void assertSameRoute(String message, URI expected, URI actual) {
+    assertNotNull(message + ": actual route should not be null", actual);
+    assertEquals(message + ": scheme", expected.getScheme(), actual.getScheme());
+    assertEquals(message + ": host", expected.getHost(), actual.getHost());
+    assertEquals(message + ": port", expected.getPort(), actual.getPort());
   }
 
   // ========== PutItem variants ==========
@@ -1583,6 +1614,59 @@ public class AffinityQueryPlanInterceptorTest {
           () ->
               client.batchWriteItem(
                   BatchWriteItemRequest.builder().requestItems(requestItems).build()));
+    } finally {
+      client.close();
+    }
+  }
+
+  @Test
+  public void testBatchWriteItemReorderedWritesRouteDeterministically() {
+    String selectedPk = "a-route";
+    String otherPk = findPkValueWithDifferentRoute("z-route-", selectedPk);
+    DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.ANY_WRITE));
+    try {
+      Map<String, List<WriteRequest>> firstRequestItems = new HashMap<>();
+      firstRequestItems.put(
+          TABLE_NAME,
+          Arrays.asList(
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(makeItem(otherPk)).build())
+                  .build(),
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(makeItem(selectedPk)).build())
+                  .build()));
+
+      Map<String, List<WriteRequest>> secondRequestItems = new HashMap<>();
+      secondRequestItems.put(
+          TABLE_NAME,
+          Arrays.asList(
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(makeItem(selectedPk)).build())
+                  .build(),
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(makeItem(otherPk)).build())
+                  .build()));
+
+      URI expectedRoute = firstAffinityRouteForPk(selectedPk);
+
+      mockHttpClient.clearCapturedRequests();
+      client.batchWriteItem(
+          BatchWriteItemRequest.builder().requestItems(firstRequestItems).build());
+      URI firstRoute = mockHttpClient.getLastRequestUri();
+
+      mockHttpClient.clearCapturedRequests();
+      client.batchWriteItem(
+          BatchWriteItemRequest.builder().requestItems(secondRequestItems).build());
+      URI secondRoute = mockHttpClient.getLastRequestUri();
+
+      assertSameRoute(
+          "First request should route by deterministic BatchWrite target",
+          expectedRoute,
+          firstRoute);
+      assertSameRoute(
+          "Second request should route by deterministic BatchWrite target",
+          expectedRoute,
+          secondRoute);
     } finally {
       client.close();
     }

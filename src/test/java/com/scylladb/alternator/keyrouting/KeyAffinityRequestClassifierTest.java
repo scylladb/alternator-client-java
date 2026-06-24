@@ -2,8 +2,11 @@ package com.scylladb.alternator.keyrouting;
 
 import static org.junit.Assert.*;
 
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import org.junit.Test;
 import software.amazon.awssdk.services.dynamodb.model.*;
@@ -545,6 +548,45 @@ public class KeyAffinityRequestClassifierTest {
   }
 
   @Test
+  public void testBatchWriteItemExtractionIsTableOrderIndependent() {
+    BatchWriteItemRequest first = batchWriteRequest("orders", "z-order", "audit", "a-audit");
+    BatchWriteItemRequest second = batchWriteRequest("audit", "a-audit", "orders", "z-order");
+
+    assertEquals("audit", KeyAffinityRequestClassifier.extractTableName(first));
+    assertEquals("audit", KeyAffinityRequestClassifier.extractTableName(second));
+
+    AttributeValue firstPk = KeyAffinityRequestClassifier.extractPartitionKey(first, "pk");
+    AttributeValue secondPk = KeyAffinityRequestClassifier.extractPartitionKey(second, "pk");
+    assertNotNull(firstPk);
+    assertNotNull(secondPk);
+    assertEquals("a-audit", firstPk.s());
+    assertEquals("a-audit", secondPk.s());
+  }
+
+  @Test
+  public void testBatchWriteItemExtractionIsWriteOrderIndependent() {
+    BatchWriteItemRequest first =
+        BatchWriteItemRequest.builder()
+            .requestItems(
+                Collections.singletonMap(
+                    "orders", Arrays.asList(batchPut("z-route"), batchPut("a-route"))))
+            .build();
+    BatchWriteItemRequest second =
+        BatchWriteItemRequest.builder()
+            .requestItems(
+                Collections.singletonMap(
+                    "orders", Arrays.asList(batchPut("a-route"), batchPut("z-route"))))
+            .build();
+
+    AttributeValue firstPk = KeyAffinityRequestClassifier.extractPartitionKey(first, "pk");
+    AttributeValue secondPk = KeyAffinityRequestClassifier.extractPartitionKey(second, "pk");
+    assertNotNull(firstPk);
+    assertNotNull(secondPk);
+    assertEquals("a-route", firstPk.s());
+    assertEquals("a-route", secondPk.s());
+  }
+
+  @Test
   public void testExtractPartitionKeyWithWrongKeyName() {
     Map<String, AttributeValue> key = createKey("user_id", "u123");
     UpdateItemRequest request = UpdateItemRequest.builder().tableName("users").key(key).build();
@@ -575,5 +617,19 @@ public class KeyAffinityRequestClassifierTest {
     item.put(keyName, AttributeValue.builder().s(keyValue).build());
     item.put("data", AttributeValue.builder().s("some data").build());
     return item;
+  }
+
+  private BatchWriteItemRequest batchWriteRequest(
+      String firstTable, String firstPk, String secondTable, String secondPk) {
+    Map<String, List<WriteRequest>> requestItems = new LinkedHashMap<>();
+    requestItems.put(firstTable, Collections.singletonList(batchPut(firstPk)));
+    requestItems.put(secondTable, Collections.singletonList(batchPut(secondPk)));
+    return BatchWriteItemRequest.builder().requestItems(requestItems).build();
+  }
+
+  private WriteRequest batchPut(String pk) {
+    return WriteRequest.builder()
+        .putRequest(PutRequest.builder().item(createItem("pk", pk)).build())
+        .build();
   }
 }
