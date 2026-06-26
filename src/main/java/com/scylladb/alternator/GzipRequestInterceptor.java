@@ -3,8 +3,11 @@ package com.scylladb.alternator;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.ByteBuffer;
 import java.util.Optional;
+import java.util.concurrent.CompletionException;
 import java.util.zip.GZIPOutputStream;
+import software.amazon.awssdk.core.async.AsyncRequestBody;
 import software.amazon.awssdk.core.interceptor.Context;
 import software.amazon.awssdk.core.interceptor.ExecutionAttribute;
 import software.amazon.awssdk.core.interceptor.ExecutionAttributes;
@@ -46,32 +49,32 @@ public class GzipRequestInterceptor implements ExecutionInterceptor {
   public SdkHttpRequest modifyHttpRequest(
       Context.ModifyHttpRequest context, ExecutionAttributes executionAttributes) {
 
-    Optional<RequestBody> requestBody = context.requestBody();
-    if (!requestBody.isPresent()) {
-      executionAttributes.putAttribute(SHOULD_COMPRESS, false);
-      return context.httpRequest();
-    }
-
+    byte[] originalContent;
     try {
-      // Read the original content and cache it for modifyHttpContent
-      byte[] originalContent = readAllBytes(requestBody.get().contentStreamProvider().newStream());
-      executionAttributes.putAttribute(ORIGINAL_BODY_BYTES, originalContent);
-
-      // Check if we should compress based on size
-      boolean shouldCompress = originalContent.length >= minCompressionSizeBytes;
-      executionAttributes.putAttribute(SHOULD_COMPRESS, shouldCompress);
-
-      if (shouldCompress) {
-        // Add Content-Encoding header
-        return context.httpRequest().toBuilder().putHeader("Content-Encoding", "gzip").build();
-      }
-
-      return context.httpRequest();
-
-    } catch (IOException e) {
+      originalContent = readOriginalBody(context);
+    } catch (IOException | CompletionException e) {
       executionAttributes.putAttribute(SHOULD_COMPRESS, false);
       return context.httpRequest();
     }
+
+    if (originalContent == null) {
+      executionAttributes.putAttribute(SHOULD_COMPRESS, false);
+      return context.httpRequest();
+    }
+
+    // Cache the original content for modifyHttpContent / modifyAsyncHttpContent.
+    executionAttributes.putAttribute(ORIGINAL_BODY_BYTES, originalContent);
+
+    // Check if we should compress based on size.
+    boolean shouldCompress = originalContent.length >= minCompressionSizeBytes;
+    executionAttributes.putAttribute(SHOULD_COMPRESS, shouldCompress);
+
+    if (shouldCompress) {
+      // Add Content-Encoding header.
+      return context.httpRequest().toBuilder().putHeader("Content-Encoding", "gzip").build();
+    }
+
+    return context.httpRequest();
   }
 
   @Override
@@ -104,6 +107,46 @@ public class GzipRequestInterceptor implements ExecutionInterceptor {
     }
   }
 
+  @Override
+  public Optional<AsyncRequestBody> modifyAsyncHttpContent(
+      Context.ModifyHttpRequest context, ExecutionAttributes executionAttributes) {
+
+    Boolean shouldCompress = executionAttributes.getAttribute(SHOULD_COMPRESS);
+    if (shouldCompress == null || !shouldCompress) {
+      byte[] cachedBytes = executionAttributes.getAttribute(ORIGINAL_BODY_BYTES);
+      if (cachedBytes != null) {
+        return Optional.of(AsyncRequestBody.fromBytes(cachedBytes));
+      }
+      return context.asyncRequestBody();
+    }
+
+    byte[] originalContent = executionAttributes.getAttribute(ORIGINAL_BODY_BYTES);
+    if (originalContent == null) {
+      return context.asyncRequestBody();
+    }
+
+    try {
+      byte[] compressedContent = gzipCompress(originalContent);
+      return Optional.of(AsyncRequestBody.fromBytes(compressedContent));
+    } catch (IOException e) {
+      return Optional.of(AsyncRequestBody.fromBytes(originalContent));
+    }
+  }
+
+  private byte[] readOriginalBody(Context.ModifyHttpRequest context) throws IOException {
+    Optional<RequestBody> requestBody = context.requestBody();
+    if (requestBody.isPresent()) {
+      return readAllBytes(requestBody.get().contentStreamProvider().newStream());
+    }
+
+    Optional<AsyncRequestBody> asyncRequestBody = context.asyncRequestBody();
+    if (asyncRequestBody.isPresent()) {
+      return readAllBytes(asyncRequestBody.get());
+    }
+
+    return null;
+  }
+
   private byte[] readAllBytes(InputStream is) throws IOException {
     try {
       ByteArrayOutputStream buffer = new ByteArrayOutputStream();
@@ -116,6 +159,20 @@ public class GzipRequestInterceptor implements ExecutionInterceptor {
     } finally {
       is.close();
     }
+  }
+
+  private byte[] readAllBytes(AsyncRequestBody requestBody) {
+    ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+    requestBody
+        .subscribe(
+            byteBuffer -> {
+              ByteBuffer copy = byteBuffer.asReadOnlyBuffer();
+              byte[] data = new byte[copy.remaining()];
+              copy.get(data);
+              buffer.write(data, 0, data.length);
+            })
+        .join();
+    return buffer.toByteArray();
   }
 
   private byte[] gzipCompress(byte[] data) throws IOException {

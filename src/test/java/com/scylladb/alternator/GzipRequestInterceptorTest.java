@@ -5,6 +5,7 @@ import static org.junit.Assert.*;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
@@ -65,6 +66,31 @@ public class GzipRequestInterceptorTest {
     };
   }
 
+  private Context.ModifyHttpRequest createAsyncMockContext(
+      SdkHttpRequest httpRequest, AsyncRequestBody body) {
+    return new Context.ModifyHttpRequest() {
+      @Override
+      public SdkHttpRequest httpRequest() {
+        return httpRequest;
+      }
+
+      @Override
+      public Optional<RequestBody> requestBody() {
+        return Optional.empty();
+      }
+
+      @Override
+      public Optional<AsyncRequestBody> asyncRequestBody() {
+        return Optional.ofNullable(body);
+      }
+
+      @Override
+      public SdkRequest request() {
+        return ListTablesRequest.builder().build();
+      }
+    };
+  }
+
   private byte[] gzipDecompress(byte[] compressed) throws IOException {
     ByteArrayInputStream bis = new ByteArrayInputStream(compressed);
     GZIPInputStream gis = new GZIPInputStream(bis);
@@ -92,6 +118,21 @@ public class GzipRequestInterceptorTest {
     while ((len = is.read(buf)) != -1) {
       bos.write(buf, 0, len);
     }
+    return bos.toByteArray();
+  }
+
+  private byte[] readAsyncRequestBody(Optional<AsyncRequestBody> body) {
+    assertTrue("Async request body should be present", body.isPresent());
+    ByteArrayOutputStream bos = new ByteArrayOutputStream();
+    body.get()
+        .subscribe(
+            byteBuffer -> {
+              ByteBuffer copy = byteBuffer.asReadOnlyBuffer();
+              byte[] bytes = new byte[copy.remaining()];
+              copy.get(bytes);
+              bos.write(bytes, 0, bytes.length);
+            })
+        .join();
     return bos.toByteArray();
   }
 
@@ -127,6 +168,45 @@ public class GzipRequestInterceptorTest {
     byte[] compressedBytes = readRequestBody(modifiedBody);
     byte[] decompressed = gzipDecompress(compressedBytes);
     assertArrayEquals("Decompressed body should match original", testData, decompressed);
+  }
+
+  @Test
+  public void testAsyncCompressedBodyIsValidGzip() throws IOException {
+    GzipRequestInterceptor interceptor = new GzipRequestInterceptor(DEFAULT_MIN_COMPRESSION_SIZE);
+    byte[] testData = generateTestData(1024);
+    SdkHttpRequest httpRequest = createHttpRequest();
+    AsyncRequestBody requestBody = AsyncRequestBody.fromBytes(testData);
+    Context.ModifyHttpRequest context = createAsyncMockContext(httpRequest, requestBody);
+    ExecutionAttributes attrs = new ExecutionAttributes();
+
+    SdkHttpRequest modifiedRequest = interceptor.modifyHttpRequest(context, attrs);
+    Optional<AsyncRequestBody> modifiedBody = interceptor.modifyAsyncHttpContent(context, attrs);
+
+    assertTrue(
+        "Content-Encoding header should be present",
+        modifiedRequest.headers().containsKey("Content-Encoding"));
+    byte[] compressedBytes = readAsyncRequestBody(modifiedBody);
+    byte[] decompressed = gzipDecompress(compressedBytes);
+    assertArrayEquals("Decompressed async body should match original", testData, decompressed);
+  }
+
+  @Test
+  public void testAsyncBodyBelowMinCompressionSizeIsNotCompressed() {
+    int minSize = 512;
+    GzipRequestInterceptor interceptor = new GzipRequestInterceptor(minSize);
+    byte[] testData = generateTestData(256);
+    SdkHttpRequest httpRequest = createHttpRequest();
+    AsyncRequestBody requestBody = AsyncRequestBody.fromBytes(testData);
+    Context.ModifyHttpRequest context = createAsyncMockContext(httpRequest, requestBody);
+    ExecutionAttributes attrs = new ExecutionAttributes();
+
+    SdkHttpRequest modifiedRequest = interceptor.modifyHttpRequest(context, attrs);
+    Optional<AsyncRequestBody> modifiedBody = interceptor.modifyAsyncHttpContent(context, attrs);
+
+    assertFalse(
+        "Content-Encoding header should NOT be present for small async body",
+        modifiedRequest.headers().containsKey("Content-Encoding"));
+    assertArrayEquals(testData, readAsyncRequestBody(modifiedBody));
   }
 
   @Test
