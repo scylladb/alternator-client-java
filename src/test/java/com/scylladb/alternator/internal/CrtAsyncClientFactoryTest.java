@@ -172,6 +172,16 @@ public class CrtAsyncClientFactoryTest {
     CrtAsyncClientFactory.create(null, null, tlsConfig);
   }
 
+  @Test(expected = UnsupportedOperationException.class)
+  public void testCreateWithClientCertificateThrows() {
+    TlsConfig tlsConfig =
+        TlsConfig.builder()
+            .withTrustAllCertificates(true)
+            .withClientCertificate(Path.of("/client.crt"), Path.of("/client.key"))
+            .build();
+    CrtAsyncClientFactory.create(null, null, tlsConfig);
+  }
+
   @Test(expected = RuntimeException.class)
   public void testCreateWithInvalidCaCertContentThrows() throws Exception {
     Path tempFile = Files.createTempFile("invalid-ca-", ".pem");

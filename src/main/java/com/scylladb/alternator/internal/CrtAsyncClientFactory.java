@@ -78,9 +78,10 @@ public final class CrtAsyncClientFactory {
     }
 
     // Validate CRT limitations
-    if (tlsConfig != null && !tlsConfig.getCustomCaCertPaths().isEmpty()) {
+    if (tlsConfig != null
+        && (!tlsConfig.getCustomCaCertPaths().isEmpty() || tlsConfig.hasClientCertificate())) {
       throw new UnsupportedOperationException(
-          "Custom CA certificates are not supported with the CRT async HTTP client. "
+          "Custom CA certificates and client TLS certificates are not supported with the CRT async HTTP client. "
               + "Use Netty HTTP client instead, or use TlsConfig.trustAll() for testing.");
     }
 

@@ -133,6 +133,17 @@ public class NettyAsyncClientFactoryTest {
   }
 
   @Test(expected = RuntimeException.class)
+  public void testCreateWithInvalidClientCertificatePathThrows() {
+    TlsConfig tlsConfig =
+        TlsConfig.builder()
+            .withTrustAllCertificates(true)
+            .withClientCertificate(
+                Path.of("/non/existent/client.crt"), Path.of("/non/existent/client.key"))
+            .build();
+    NettyAsyncClientFactory.create(null, null, tlsConfig);
+  }
+
+  @Test(expected = RuntimeException.class)
   public void testCreateWithInvalidCaCertContentThrows() throws Exception {
     Path tempFile = Files.createTempFile("invalid-ca-", ".pem");
     try {

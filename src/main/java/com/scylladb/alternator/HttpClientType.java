@@ -14,11 +14,11 @@ import com.scylladb.alternator.internal.SyncClientDetector;
  *
  * <table>
  * <caption>HTTP client compatibility matrix</caption>
- * <tr><th>Type</th><th>Sync</th><th>Async</th><th>Custom CA certs</th><th>Connection TTL</th></tr>
- * <tr><td>{@link #APACHE}</td><td>Yes</td><td>No</td><td>Yes</td><td>Yes</td></tr>
- * <tr><td>{@link #NETTY}</td><td>No</td><td>Yes</td><td>Yes</td><td>Yes</td></tr>
- * <tr><td>{@link #CRT}</td><td>Yes</td><td>Yes</td><td>No</td><td>No</td></tr>
- * <tr><td>{@link #AUTO}</td><td>Yes</td><td>Yes</td><td>Depends</td><td>Depends</td></tr>
+ * <tr><th>Type</th><th>Sync</th><th>Async</th><th>Custom CA certs</th><th>Client certs</th><th>Connection TTL</th></tr>
+ * <tr><td>{@link #APACHE}</td><td>Yes</td><td>No</td><td>Yes</td><td>Yes</td><td>Yes</td></tr>
+ * <tr><td>{@link #NETTY}</td><td>No</td><td>Yes</td><td>Yes</td><td>Yes</td><td>Yes</td></tr>
+ * <tr><td>{@link #CRT}</td><td>Yes</td><td>Yes</td><td>No</td><td>No</td><td>No</td></tr>
+ * <tr><td>{@link #AUTO}</td><td>Yes</td><td>Yes</td><td>Depends</td><td>Depends</td><td>Depends</td></tr>
  * </table>
  *
  * <p>Example usage:
@@ -53,24 +53,26 @@ public enum HttpClientType {
   /**
    * Apache HTTP Client ({@code software.amazon.awssdk:apache-client}).
    *
-   * <p>Sync only. Supports custom CA certificates and connection time-to-live. Using this type on
-   * an async client builder will throw {@link IllegalStateException}.
+   * <p>Sync only. Supports custom CA certificates, client TLS certificates, and connection
+   * time-to-live. Using this type on an async client builder will throw {@link
+   * IllegalStateException}.
    */
   APACHE(true, false),
 
   /**
    * Netty NIO HTTP Client ({@code software.amazon.awssdk:netty-nio-client}).
    *
-   * <p>Async only. Supports custom CA certificates and connection time-to-live. Using this type on
-   * a sync client builder will throw {@link IllegalStateException}.
+   * <p>Async only. Supports custom CA certificates, client TLS certificates, and connection
+   * time-to-live. Using this type on a sync client builder will throw {@link
+   * IllegalStateException}.
    */
   NETTY(false, true),
 
   /**
    * AWS CRT HTTP Client ({@code software.amazon.awssdk:aws-crt-client}).
    *
-   * <p>Supports both sync and async clients. Does not support custom CA certificates or connection
-   * time-to-live.
+   * <p>Supports both sync and async clients. Does not support custom CA certificates, client TLS
+   * certificates, or connection time-to-live.
    */
   CRT(true, true);
 

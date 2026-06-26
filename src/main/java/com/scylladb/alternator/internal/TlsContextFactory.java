@@ -5,19 +5,28 @@ import com.scylladb.alternator.TlsSessionCacheConfig;
 import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.KeyFactory;
 import java.security.KeyManagementException;
 import java.security.KeyStore;
 import java.security.KeyStoreException;
 import java.security.NoSuchAlgorithmException;
+import java.security.PrivateKey;
+import java.security.UnrecoverableKeyException;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
+import java.security.spec.InvalidKeySpecException;
+import java.security.spec.PKCS8EncodedKeySpec;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collection;
 import java.util.List;
+import javax.net.ssl.KeyManager;
+import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSessionContext;
 import javax.net.ssl.TrustManager;
@@ -33,6 +42,7 @@ import javax.net.ssl.X509TrustManager;
  *   <li>Modern TLS protocols (TLS 1.2+) that support session tickets
  *   <li>Configurable session caching for TLS session resumption
  *   <li>Custom CA certificate support for production deployments
+ *   <li>Client certificate support for mutual TLS authentication
  *   <li>Trust-all certificate validation (for development/testing with self-signed certs)
  * </ul>
  *
@@ -57,6 +67,7 @@ public final class TlsContextFactory {
    *
    * <ul>
    *   <li>Custom CA certificates from PEM files
+   *   <li>Client certificate and private key from PEM files
    *   <li>System CA certificates (JVM default trust store)
    *   <li>Combination of custom and system CAs
    *   <li>Trust-all mode for development/testing
@@ -79,13 +90,48 @@ public final class TlsContextFactory {
       trustManagers = createTrustManagers(config);
     }
 
+    KeyManager[] keyManagers = createKeyManagers(config);
+
     try {
       SSLContext sslContext = createBaseContext();
-      sslContext.init(null, trustManagers, new java.security.SecureRandom());
+      sslContext.init(keyManagers, trustManagers, new java.security.SecureRandom());
       configureSessionCache(sslContext, config.getSessionCacheConfig());
       return sslContext;
     } catch (NoSuchAlgorithmException | KeyManagementException e) {
       throw new RuntimeException("Failed to create SSL context", e);
+    }
+  }
+
+  /**
+   * Creates key managers for client certificate authentication.
+   *
+   * @param config the TLS configuration
+   * @return key managers, or null if no client certificate is configured
+   */
+  static KeyManager[] createKeyManagers(TlsConfig config) {
+    if (config == null || !config.hasClientCertificate()) {
+      return null;
+    }
+
+    char[] keyPassword = new char[0];
+    try {
+      Certificate[] certificateChain = loadCertificateChain(config.getClientCertificatePath());
+      PrivateKey privateKey = loadPrivateKey(config.getClientPrivateKeyPath());
+
+      KeyStore keyStore = KeyStore.getInstance(KeyStore.getDefaultType());
+      keyStore.load(null, null);
+      keyStore.setKeyEntry("alternator-client", privateKey, keyPassword, certificateChain);
+
+      KeyManagerFactory keyManagerFactory =
+          KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+      keyManagerFactory.init(keyStore, keyPassword);
+      return keyManagerFactory.getKeyManagers();
+    } catch (CertificateException
+        | IOException
+        | KeyStoreException
+        | NoSuchAlgorithmException
+        | UnrecoverableKeyException e) {
+      throw new RuntimeException("Failed to load client certificate key material", e);
     }
   }
 
@@ -145,16 +191,13 @@ public final class TlsContextFactory {
       KeyStore keyStore = KeyStore.getInstance(KeyStore.getDefaultType());
       keyStore.load(null, null); // Initialize empty keystore
 
-      CertificateFactory certFactory = CertificateFactory.getInstance("X.509");
       int certIndex = 0;
 
       for (Path certPath : certPaths) {
-        try (InputStream is = new BufferedInputStream(Files.newInputStream(certPath))) {
-          Collection<? extends Certificate> certs = certFactory.generateCertificates(is);
-          for (Certificate cert : certs) {
-            String alias = "custom-ca-" + certIndex++;
-            keyStore.setCertificateEntry(alias, cert);
-          }
+        Certificate[] certs = loadCertificateChain(certPath);
+        for (Certificate cert : certs) {
+          String alias = "custom-ca-" + certIndex++;
+          keyStore.setCertificateEntry(alias, cert);
         }
       }
 
@@ -162,6 +205,66 @@ public final class TlsContextFactory {
     } catch (KeyStoreException | CertificateException | NoSuchAlgorithmException | IOException e) {
       throw new RuntimeException("Failed to load CA certificates", e);
     }
+  }
+
+  private static Certificate[] loadCertificateChain(Path certPath) {
+    try (InputStream is = new BufferedInputStream(Files.newInputStream(certPath))) {
+      CertificateFactory certFactory = CertificateFactory.getInstance("X.509");
+      Collection<? extends Certificate> certs = certFactory.generateCertificates(is);
+      if (certs.isEmpty()) {
+        throw new RuntimeException("No certificates found in " + certPath);
+      }
+      return certs.toArray(new Certificate[0]);
+    } catch (CertificateException | IOException e) {
+      throw new RuntimeException("Failed to load certificate chain from " + certPath, e);
+    }
+  }
+
+  private static PrivateKey loadPrivateKey(Path privateKeyPath) {
+    try {
+      String pem = new String(Files.readAllBytes(privateKeyPath), StandardCharsets.US_ASCII);
+      if (pem.contains("-----BEGIN ENCRYPTED PRIVATE KEY-----")) {
+        throw new RuntimeException(
+            "Encrypted client private keys are not supported; provide an unencrypted PKCS#8 key");
+      }
+      if (pem.contains("-----BEGIN RSA PRIVATE KEY-----")
+          || pem.contains("-----BEGIN EC PRIVATE KEY-----")) {
+        throw new RuntimeException(
+            "PKCS#1 client private keys are not supported; convert the key to unencrypted PKCS#8");
+      }
+
+      String base64 = extractPemBody(pem, "PRIVATE KEY");
+      byte[] keyBytes = Base64.getMimeDecoder().decode(base64);
+      return parsePkcs8PrivateKey(new PKCS8EncodedKeySpec(keyBytes));
+    } catch (IOException e) {
+      throw new RuntimeException("Failed to load client private key from " + privateKeyPath, e);
+    } catch (IllegalArgumentException e) {
+      throw new RuntimeException("Invalid client private key PEM in " + privateKeyPath, e);
+    }
+  }
+
+  private static String extractPemBody(String pem, String type) {
+    String beginMarker = "-----BEGIN " + type + "-----";
+    String endMarker = "-----END " + type + "-----";
+    int begin = pem.indexOf(beginMarker);
+    int end = pem.indexOf(endMarker);
+    if (begin < 0 || end < 0 || end <= begin) {
+      throw new IllegalArgumentException("Missing PEM block: " + type);
+    }
+    begin += beginMarker.length();
+    return pem.substring(begin, end).replaceAll("\\s", "");
+  }
+
+  private static PrivateKey parsePkcs8PrivateKey(PKCS8EncodedKeySpec keySpec) {
+    Exception lastException = null;
+    for (String algorithm : new String[] {"RSA", "EC", "DSA"}) {
+      try {
+        return KeyFactory.getInstance(algorithm).generatePrivate(keySpec);
+      } catch (NoSuchAlgorithmException | InvalidKeySpecException e) {
+        lastException = e;
+      }
+    }
+    throw new RuntimeException("Failed to parse client private key as PKCS#8", lastException);
   }
 
   /**

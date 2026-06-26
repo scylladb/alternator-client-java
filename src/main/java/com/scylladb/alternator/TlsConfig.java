@@ -14,6 +14,7 @@ import java.util.Objects;
  *
  * <ul>
  *   <li>Custom CA certificates from file paths (PEM format)
+ *   <li>Client certificate and private key files for mutual TLS authentication
  *   <li>Option to trust system CA certificates
  *   <li>Trust-all mode for development/testing
  *   <li>Hostname verification control
@@ -38,6 +39,7 @@ import java.util.Objects;
  * // Combine custom CA with system CAs
  * TlsConfig config = TlsConfig.builder()
  *     .withCaCertPath(Paths.get("/path/to/ca.pem"))
+ *     .withClientCertificate(Paths.get("/path/to/client.crt"), Paths.get("/path/to/client.key"))
  *     .withTrustSystemCaCerts(true)
  *     .build();
  * }</pre>
@@ -49,13 +51,27 @@ public final class TlsConfig {
 
   private static final TlsConfig TRUST_ALL_INSTANCE =
       new TlsConfig(
-          Collections.<Path>emptyList(), false, true, false, TlsSessionCacheConfig.getDefault());
+          Collections.<Path>emptyList(),
+          null,
+          null,
+          false,
+          true,
+          false,
+          TlsSessionCacheConfig.getDefault());
 
   private static final TlsConfig SYSTEM_DEFAULT_INSTANCE =
       new TlsConfig(
-          Collections.<Path>emptyList(), true, false, true, TlsSessionCacheConfig.getDefault());
+          Collections.<Path>emptyList(),
+          null,
+          null,
+          true,
+          false,
+          true,
+          TlsSessionCacheConfig.getDefault());
 
   private final List<Path> customCaCertPaths;
+  private final Path clientCertificatePath;
+  private final Path clientPrivateKeyPath;
   private final boolean trustSystemCaCerts;
   private final boolean trustAllCertificates;
   private final boolean verifyHostname;
@@ -63,6 +79,8 @@ public final class TlsConfig {
 
   private TlsConfig(
       List<Path> customCaCertPaths,
+      Path clientCertificatePath,
+      Path clientPrivateKeyPath,
       boolean trustSystemCaCerts,
       boolean trustAllCertificates,
       boolean verifyHostname,
@@ -71,6 +89,8 @@ public final class TlsConfig {
         customCaCertPaths != null
             ? Collections.unmodifiableList(new ArrayList<>(customCaCertPaths))
             : Collections.<Path>emptyList();
+    this.clientCertificatePath = clientCertificatePath;
+    this.clientPrivateKeyPath = clientPrivateKeyPath;
     this.trustSystemCaCerts = trustSystemCaCerts;
     this.trustAllCertificates = trustAllCertificates;
     this.verifyHostname = verifyHostname;
@@ -141,6 +161,37 @@ public final class TlsConfig {
   }
 
   /**
+   * Returns the PEM-encoded client certificate chain path used for mutual TLS authentication.
+   *
+   * @return the client certificate path, or null if client certificate authentication is not
+   *     configured
+   */
+  public Path getClientCertificatePath() {
+    return clientCertificatePath;
+  }
+
+  /**
+   * Returns the PEM-encoded client private key path used for mutual TLS authentication.
+   *
+   * <p>The private key must be an unencrypted PKCS#8 PEM key.
+   *
+   * @return the client private key path, or null if client certificate authentication is not
+   *     configured
+   */
+  public Path getClientPrivateKeyPath() {
+    return clientPrivateKeyPath;
+  }
+
+  /**
+   * Returns whether client certificate authentication is configured.
+   *
+   * @return true if both a client certificate and private key path are configured
+   */
+  public boolean hasClientCertificate() {
+    return clientCertificatePath != null && clientPrivateKeyPath != null;
+  }
+
+  /**
    * Returns whether system CA certificates should be trusted.
    *
    * <p>When true, the JVM's default trust store is included in certificate validation along with
@@ -190,6 +241,10 @@ public final class TlsConfig {
     return "TlsConfig{"
         + "customCaCertPaths="
         + customCaCertPaths
+        + ", clientCertificatePath="
+        + clientCertificatePath
+        + ", clientPrivateKeyPath="
+        + clientPrivateKeyPath
         + ", trustSystemCaCerts="
         + trustSystemCaCerts
         + ", trustAllCertificates="
@@ -214,6 +269,8 @@ public final class TlsConfig {
         && trustAllCertificates == tlsConfig.trustAllCertificates
         && verifyHostname == tlsConfig.verifyHostname
         && Objects.equals(customCaCertPaths, tlsConfig.customCaCertPaths)
+        && Objects.equals(clientCertificatePath, tlsConfig.clientCertificatePath)
+        && Objects.equals(clientPrivateKeyPath, tlsConfig.clientPrivateKeyPath)
         && Objects.equals(sessionCacheConfig, tlsConfig.sessionCacheConfig);
   }
 
@@ -221,6 +278,8 @@ public final class TlsConfig {
   public int hashCode() {
     return Objects.hash(
         customCaCertPaths,
+        clientCertificatePath,
+        clientPrivateKeyPath,
         trustSystemCaCerts,
         trustAllCertificates,
         verifyHostname,
@@ -230,6 +289,8 @@ public final class TlsConfig {
   /** Builder for creating {@link TlsConfig} instances. */
   public static class Builder {
     private List<Path> customCaCertPaths = new ArrayList<>();
+    private Path clientCertificatePath = null;
+    private Path clientPrivateKeyPath = null;
     private boolean trustSystemCaCerts = true;
     private boolean trustAllCertificates = false;
     private boolean verifyHostname = true;
@@ -266,6 +327,29 @@ public final class TlsConfig {
      */
     public Builder withCaCertPaths(Collection<Path> paths) {
       this.customCaCertPaths = paths != null ? new ArrayList<>(paths) : new ArrayList<Path>();
+      return this;
+    }
+
+    /**
+     * Sets the client certificate and private key used for mutual TLS authentication.
+     *
+     * <p>The certificate file should be PEM-encoded and may contain the full certificate chain. The
+     * private key file must be an unencrypted PKCS#8 PEM key.
+     *
+     * @param certificatePath the path to a PEM-encoded client certificate chain
+     * @param privateKeyPath the path to a PEM-encoded unencrypted PKCS#8 private key
+     * @return this builder instance
+     * @throws IllegalArgumentException if either path is null
+     */
+    public Builder withClientCertificate(Path certificatePath, Path privateKeyPath) {
+      if (certificatePath == null) {
+        throw new IllegalArgumentException("Client certificate path cannot be null");
+      }
+      if (privateKeyPath == null) {
+        throw new IllegalArgumentException("Client private key path cannot be null");
+      }
+      this.clientCertificatePath = certificatePath;
+      this.clientPrivateKeyPath = privateKeyPath;
       return this;
     }
 
@@ -357,6 +441,8 @@ public final class TlsConfig {
 
       return new TlsConfig(
           customCaCertPaths,
+          clientCertificatePath,
+          clientPrivateKeyPath,
           trustSystemCaCerts,
           trustAllCertificates,
           effectiveVerifyHostname,

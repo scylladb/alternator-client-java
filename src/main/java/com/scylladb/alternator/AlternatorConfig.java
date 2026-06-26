@@ -442,8 +442,8 @@ public class AlternatorConfig {
   /**
    * Gets the TLS configuration.
    *
-   * <p>The TLS configuration controls certificate validation, custom CA certificates, hostname
-   * verification, and session caching settings.
+   * <p>The TLS configuration controls certificate validation, custom CA certificates, client TLS
+   * certificates, hostname verification, and session caching settings.
    *
    * @return the TLS configuration, never null
    * @since 1.0.9
@@ -948,6 +948,18 @@ public class AlternatorConfig {
      *     .withSeedNode(URI.create("https://localhost:8043"))
      *     .withTlsConfig(TlsConfig.builder()
      *         .withCaCertPath(Paths.get("/path/to/ca.pem"))
+     *         .withTrustSystemCaCerts(false)
+     *         .build())
+     *     .build();
+     *
+     * // Use mutual TLS client certificate authentication
+     * AlternatorConfig config = AlternatorConfig.builder()
+     *     .withSeedNode(URI.create("https://localhost:8043"))
+     *     .withTlsConfig(TlsConfig.builder()
+     *         .withCaCertPath(Paths.get("/path/to/ca.pem"))
+     *         .withClientCertificate(
+     *             Paths.get("/path/to/client.crt"),
+     *             Paths.get("/path/to/client.key"))
      *         .withTrustSystemCaCerts(false)
      *         .build())
      *     .build();
