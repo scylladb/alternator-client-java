@@ -488,8 +488,9 @@ When headers optimization is enabled, only the following headers are preserved b
 - `Content-Encoding` - For request compression (when enabled)
 - `Authorization` - AWS SigV4 signature (when authentication is enabled)
 - `X-Amz-Date` - Timestamp for AWS signature (when authentication is enabled)
+- `User-Agent` - Reports the AWS SDK and ScyllaDB Alternator client versions
 
-All other headers (such as `User-Agent`, `X-Amz-Sdk-Invocation-Id`, `amz-sdk-request`, `X-Amz-Content-Sha256`) are removed.
+All other headers (such as `X-Amz-Sdk-Invocation-Id`, `amz-sdk-request`, `X-Amz-Content-Sha256`) are removed.
 
 #### Custom headers whitelist
 
@@ -504,13 +505,13 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
     .withOptimizeHeaders(true)
     .withHeadersWhitelist(Arrays.asList(
         "Host", "X-Amz-Target", "Content-Type", "Content-Length",
-        "Authorization", "X-Amz-Date", "X-Custom-Header"))
+        "Authorization", "X-Amz-Date", "User-Agent", "X-Custom-Header"))
     .build();
 ```
 
 **Important:** When using a custom whitelist, make sure to include all headers required for
-authentication (`Authorization`, `X-Amz-Date`) and operation (`Host`, `X-Amz-Target`,
-`Content-Type`, `Content-Length`).
+authentication (`Authorization`, `X-Amz-Date`), operation (`Host`, `X-Amz-Target`,
+`Content-Type`, `Content-Length`), and client reporting (`User-Agent`).
 
 #### Combining with compression
 

@@ -12,8 +12,8 @@ import software.amazon.awssdk.http.SdkHttpRequest;
  * A wrapper around SdkHttpClient that filters HTTP headers to a specified whitelist.
  *
  * <p>This wrapper intercepts requests before they are executed and removes headers not in the
- * configured whitelist. This runs after all AWS SDK processing, ensuring complete header filtering
- * including SDK-internal headers like User-Agent and amz-sdk-request.
+ * configured whitelist. This runs after all AWS SDK processing, ensuring complete filtering of
+ * SDK-internal headers like amz-sdk-request.
  *
  * @author dmitry.kropachev
  * @since 2.0.0

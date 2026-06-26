@@ -631,6 +631,7 @@ public class AlternatorDynamoDbAsyncClient {
       } else {
         overrideBuilder.addExecutionInterceptor(new BasicQueryPlanInterceptor(liveNodes));
       }
+      AlternatorUserAgent.applyTo(overrideBuilder);
       delegate.overrideConfiguration(overrideBuilder.build());
 
       delegate.endpointOverride(seedUri);

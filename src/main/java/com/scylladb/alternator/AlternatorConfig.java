@@ -129,6 +129,7 @@ public class AlternatorConfig {
    *   <li>{@code Content-Length} - Required for request body
    *   <li>{@code Accept-Encoding} - For response compression negotiation
    *   <li>{@code Connection} - HTTP keep-alive for connection reuse
+   *   <li>{@code User-Agent} - Reports the AWS SDK and ScyllaDB Alternator client versions
    * </ul>
    *
    * @since 2.0.0
@@ -142,7 +143,8 @@ public class AlternatorConfig {
                   "Content-Type",
                   "Content-Length",
                   "Accept-Encoding",
-                  "Connection")));
+                  "Connection",
+                  "User-Agent")));
 
   /**
    * HTTP headers required when compression is enabled.
