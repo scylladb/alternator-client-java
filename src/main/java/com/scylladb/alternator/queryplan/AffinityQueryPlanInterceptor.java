@@ -7,6 +7,12 @@ import com.scylladb.alternator.keyrouting.KeyAffinityRequestClassifier;
 import com.scylladb.alternator.keyrouting.KeyAffinityRequestClassifier.BatchWriteRoutingTarget;
 import com.scylladb.alternator.keyrouting.KeyRouteAffinityConfig;
 import com.scylladb.alternator.keyrouting.PartitionKeyResolver;
+import java.net.URI;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import software.amazon.awssdk.core.SdkRequest;
 import software.amazon.awssdk.core.interceptor.Context;
 import software.amazon.awssdk.core.interceptor.ExecutionAttributes;
@@ -124,11 +130,17 @@ public class AffinityQueryPlanInterceptor extends BasicQueryPlanInterceptor {
     }
 
     // Hash the partition key and create a deterministic query plan
-    long hash = AttributeValueHasher.hash(pkValue);
-    return new LazyQueryPlan(liveNodes, hash);
+    try {
+      long hash = AttributeValueHasher.hash(pkValue);
+      return new LazyQueryPlan(liveNodes, hash);
+    } catch (IllegalArgumentException e) {
+      // Unsupported partition-key shapes cannot be routed by key affinity.
+      return null;
+    }
   }
 
   private LazyQueryPlan getBatchWriteQueryPlan(BatchWriteItemRequest request) {
+    Map<URI, Integer> votes = new HashMap<>();
     for (BatchWriteRoutingTarget target :
         KeyAffinityRequestClassifier.extractBatchWriteRoutingTargets(request)) {
       String tableName = target.tableName();
@@ -137,7 +149,7 @@ public class AffinityQueryPlanInterceptor extends BasicQueryPlanInterceptor {
         if (clientForDiscovery != null) {
           pkResolver.triggerDiscovery(tableName, clientForDiscovery);
         }
-        return null;
+        continue;
       }
 
       AttributeValue pkValue = target.partitionKeyValue(pkName);
@@ -147,12 +159,34 @@ public class AffinityQueryPlanInterceptor extends BasicQueryPlanInterceptor {
 
       try {
         long hash = AttributeValueHasher.hash(pkValue);
-        return new LazyQueryPlan(liveNodes, hash);
+        URI preferredNode = LazyQueryPlan.preferredNodeForHash(liveNodes, hash);
+        if (preferredNode == null) {
+          return null;
+        }
+        votes.merge(preferredNode, 1, Integer::sum);
       } catch (IllegalArgumentException e) {
         // Unsupported partition-key shapes cannot be routed by key affinity.
       }
     }
-    return null;
+    List<URI> preferredNodes = votePreferenceOrder(votes);
+    if (preferredNodes.isEmpty()) {
+      return null;
+    }
+    return new LazyQueryPlan(liveNodes, preferredNodes);
+  }
+
+  private static List<URI> votePreferenceOrder(Map<URI, Integer> votes) {
+    List<Map.Entry<URI, Integer>> votedNodes = new ArrayList<>(votes.entrySet());
+    votedNodes.sort(
+        Comparator.<Map.Entry<URI, Integer>, Integer>comparing(Map.Entry::getValue)
+            .reversed()
+            .thenComparing(entry -> entry.getKey().toString()));
+
+    List<URI> preferredNodes = new ArrayList<>(votedNodes.size());
+    for (Map.Entry<URI, Integer> entry : votedNodes) {
+      preferredNodes.add(entry.getKey());
+    }
+    return preferredNodes;
   }
 
   @Override

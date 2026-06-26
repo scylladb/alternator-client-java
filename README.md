@@ -755,9 +755,9 @@ Key route affinity is an optimization for Lightweight Transactions (LWT) that us
 consensus. By routing all requests with the same partition key to the same coordinator node,
 it reduces Paxos round-trips and improves latency for conditional writes.
 
-**Note:** Key route affinity only works reliably with synchronous DynamoDB clients
-(`DynamoDbClient`). Do not use it with `DynamoDbAsyncClient` due to cross-thread
-execution limitations.
+**Note:** Synchronous clients automatically discover missing partition-key names via
+`DescribeTable`. Async clients can use key route affinity with pre-configured partition-key
+names; requests for tables without pre-configured metadata fall back to round-robin routing.
 
 #### Quick start
 
@@ -784,8 +784,9 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
 
 #### Pre-configuring partition key names
 
-By default, the library auto-discovers partition key names via `DescribeTable` on first
-use of each table. To avoid this initial lookup, you can pre-configure them:
+For synchronous clients, the library auto-discovers partition key names via `DescribeTable`
+on first use of each table. To avoid this initial lookup, or when using an async client,
+pre-configure them:
 
 ```java
 import com.scylladb.alternator.keyrouting.KeyRouteAffinityConfig;
@@ -806,10 +807,12 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
 #### How it works
 
 1. The `AffinityQueryPlanInterceptor` intercepts each DynamoDB request
-2. For qualifying operations, it extracts the partition key value from the request
+2. For qualifying single-item operations, it extracts the partition key value from the request
 3. A deterministic hash (MurmurHash3) of the partition key selects a consistent node
-4. All requests for the same partition key are routed to the same Alternator node
-5. Non-qualifying operations continue to use round-robin load balancing
+4. For `BatchWriteItem`, each usable write votes for its preferred node; voted nodes are tried by
+   vote count, then by node URL
+5. Non-qualifying operations and requests without usable partition keys continue to use
+   round-robin load balancing
 
 #### When to use key route affinity
 
@@ -821,4 +824,4 @@ Key route affinity is recommended for:
 Key route affinity may not be beneficial for:
 - Read-heavy workloads (reads don't use Paxos)
 - Workloads with uniformly distributed writes across many keys
-- Async clients (use sync clients only)
+- Async clients where partition-key names cannot be pre-configured

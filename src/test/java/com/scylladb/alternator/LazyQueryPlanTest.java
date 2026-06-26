@@ -209,4 +209,50 @@ public class LazyQueryPlanTest {
     assertEquals("For-each should iterate all nodes", nodes.size(), collectedNodes.size());
     assertEquals("For-each should return all nodes", new HashSet<>(nodes), collectedNodes);
   }
+
+  @Test
+  public void testPreferredNodesAreReturnedBeforeSortedRemaining() {
+    LazyQueryPlan plan = new LazyQueryPlan(liveNodes, Arrays.asList(nodes.get(2), nodes.get(4)));
+
+    List<URI> actual = new ArrayList<>();
+    while (plan.hasNext()) {
+      actual.add(plan.next());
+    }
+
+    assertEquals(
+        Arrays.asList(nodes.get(2), nodes.get(4), nodes.get(0), nodes.get(1), nodes.get(3)),
+        actual);
+  }
+
+  @Test
+  public void testSeededAffinityUsesSortedNodeOrder() throws URISyntaxException {
+    List<URI> unsortedNodes =
+        Arrays.asList(
+            new URI("http", null, "node3.example.com", 8000, null, null, null),
+            new URI("http", null, "node1.example.com", 8000, null, null, null),
+            new URI("http", null, "node2.example.com", 8000, null, null, null));
+    AlternatorLiveNodes unsortedLiveNodes =
+        new AlternatorLiveNodes(unsortedNodes, "http", 8000, "", "");
+    AlternatorLiveNodes sortedLiveNodes =
+        new AlternatorLiveNodes(
+            Arrays.asList(unsortedNodes.get(1), unsortedNodes.get(2), unsortedNodes.get(0)),
+            "http",
+            8000,
+            "",
+            "");
+
+    LazyQueryPlan unsortedPlan = new LazyQueryPlan(unsortedLiveNodes, 42L);
+    LazyQueryPlan sortedPlan = new LazyQueryPlan(sortedLiveNodes, 42L);
+
+    List<URI> unsortedSequence = new ArrayList<>();
+    List<URI> sortedSequence = new ArrayList<>();
+    while (unsortedPlan.hasNext()) {
+      unsortedSequence.add(unsortedPlan.next());
+    }
+    while (sortedPlan.hasNext()) {
+      sortedSequence.add(sortedPlan.next());
+    }
+
+    assertEquals(sortedSequence, unsortedSequence);
+  }
 }

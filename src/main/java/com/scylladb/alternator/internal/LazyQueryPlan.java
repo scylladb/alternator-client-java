@@ -2,6 +2,7 @@ package com.scylladb.alternator.internal;
 
 import java.net.URI;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
 import java.util.NoSuchElementException;
@@ -54,6 +55,7 @@ import java.util.concurrent.ThreadLocalRandom;
 public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
   private final AlternatorLiveNodes liveNodes;
   private final GoRand goRand;
+  private final List<URI> preferredNodes;
 
   /**
    * Mutable list of remaining nodes for pick-and-remove. Initialized lazily on first access when
@@ -82,6 +84,7 @@ public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
     }
     this.liveNodes = liveNodes;
     this.goRand = null;
+    this.preferredNodes = null;
     this.usedNodes = new java.util.HashSet<>();
   }
 
@@ -99,6 +102,26 @@ public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
     }
     this.liveNodes = liveNodes;
     this.goRand = new GoRand(seed);
+    this.preferredNodes = null;
+  }
+
+  /**
+   * Creates a LazyQueryPlan that tries the given preferred nodes first, then the remaining live
+   * nodes in canonical affinity order.
+   *
+   * @param liveNodes the {@link AlternatorLiveNodes} instance to pull nodes from
+   * @param preferredNodes nodes to try first, in preference order
+   */
+  public LazyQueryPlan(AlternatorLiveNodes liveNodes, List<URI> preferredNodes) {
+    if (liveNodes == null) {
+      throw new IllegalArgumentException("liveNodes cannot be null");
+    }
+    if (preferredNodes == null) {
+      throw new IllegalArgumentException("preferredNodes cannot be null");
+    }
+    this.liveNodes = liveNodes;
+    this.goRand = null;
+    this.preferredNodes = new ArrayList<>(preferredNodes);
   }
 
   /**
@@ -107,9 +130,56 @@ public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
    */
   private void ensureInitialized() {
     if (!initialized) {
-      remaining = new ArrayList<>(liveNodes.getLiveNodesInternal());
+      remaining = sortedAffinityNodes(liveNodes);
+      if (preferredNodes != null) {
+        remaining = orderPreferredNodesFirst(remaining, preferredNodes);
+      }
       initialized = true;
     }
+  }
+
+  /**
+   * Returns the current live nodes in the canonical order used by affinity routing.
+   *
+   * @param liveNodes the live nodes manager
+   * @return a sorted copy of current live nodes
+   */
+  public static List<URI> sortedAffinityNodes(AlternatorLiveNodes liveNodes) {
+    if (liveNodes == null) {
+      throw new IllegalArgumentException("liveNodes cannot be null");
+    }
+    List<URI> nodes = new ArrayList<>(liveNodes.getLiveNodesInternal());
+    nodes.sort(Comparator.comparing(URI::toString));
+    return nodes;
+  }
+
+  /**
+   * Returns the first node selected by the seeded affinity plan without consuming a full query
+   * plan.
+   *
+   * @param liveNodes the live nodes manager
+   * @param seed deterministic seed
+   * @return the preferred node, or null when no live nodes exist
+   */
+  public static URI preferredNodeForHash(AlternatorLiveNodes liveNodes, long seed) {
+    List<URI> nodes = sortedAffinityNodes(liveNodes);
+    if (nodes.isEmpty()) {
+      return null;
+    }
+    return nodes.get(new GoRand(seed).intn(nodes.size()));
+  }
+
+  private static List<URI> orderPreferredNodesFirst(List<URI> sortedNodes, List<URI> preferred) {
+    List<URI> ordered = new ArrayList<>(sortedNodes.size());
+    List<URI> remainingNodes = new ArrayList<>(sortedNodes);
+    for (URI preferredNode : preferred) {
+      int index = remainingNodes.indexOf(preferredNode);
+      if (index >= 0) {
+        ordered.add(remainingNodes.remove(index));
+      }
+    }
+    ordered.addAll(remainingNodes);
+    return ordered;
   }
 
   /**
@@ -160,7 +230,7 @@ public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
 
   @Override
   public boolean hasNext() {
-    if (goRand != null) {
+    if (goRand != null || preferredNodes != null) {
       ensureInitialized();
       return !remaining.isEmpty();
     }
@@ -175,6 +245,14 @@ public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
         throw new NoSuchElementException("No more nodes available in query plan");
       }
       return node;
+    }
+
+    if (preferredNodes != null) {
+      ensureInitialized();
+      if (remaining.isEmpty()) {
+        throw new NoSuchElementException("No more nodes available in query plan");
+      }
+      return remaining.remove(0);
     }
 
     URI node = computeNextNonSeeded();

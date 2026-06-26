@@ -11,10 +11,10 @@ import java.util.Map;
  * table. If partition key info is not provided for a table, it will be discovered automatically via
  * DescribeTable.
  *
- * <p><strong>Important:</strong> Key route affinity only works reliably with synchronous DynamoDB
- * clients ({@link software.amazon.awssdk.services.dynamodb.DynamoDbClient}). With async clients,
- * the ThreadLocal-based context passing mechanism may fail due to cross-thread execution. Do not
- * use key route affinity with {@link software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient}.
+ * <p><strong>Important:</strong> Automatic partition-key discovery uses a synchronous {@link
+ * software.amazon.awssdk.services.dynamodb.DynamoDbClient}. Synchronous Alternator clients wire
+ * discovery automatically. Async clients can use key route affinity when partition-key names are
+ * pre-configured via {@link Builder#withPkInfo(String, String)}.
  *
  * <p>Example usage:
  *
