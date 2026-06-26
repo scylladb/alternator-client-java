@@ -93,6 +93,22 @@ public class ConnectionLeakTest {
     assertEquals(2, liveNodes.getLiveNodes().size());
   }
 
+  /** Verifies malformed successful /localnodes responses do not terminate discovery. */
+  @Test(timeout = 10000)
+  public void testMalformedSuccessfulResponsesDoNotThrowOrLeakConnections() throws Exception {
+    responseCode = 200;
+    String[] malformedBodies = {"", "not-json", "[", "[\"127.0.0.1\",bad]", "[bad]"};
+    AlternatorLiveNodes liveNodes = createLiveNodes();
+
+    for (int i = 0; i < 30; i++) {
+      responseBody = malformedBodies[i % malformedBodies.length];
+      liveNodes.updateLiveNodes();
+    }
+
+    assertEquals(1, liveNodes.getLiveNodes().size());
+    assertEquals("127.0.0.1", liveNodes.getLiveNodes().get(0).getHost());
+  }
+
   /** Verifies no leaks when alternating between error and success responses. */
   @Test(timeout = 10000)
   public void testNoConnectionLeakOnAlternatingResponses() throws Exception {

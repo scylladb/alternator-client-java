@@ -631,29 +631,46 @@ public class AlternatorLiveNodes extends Thread {
         responseStr = streamToString(body);
       }
 
-      // response looks like: ["127.0.0.2","127.0.0.3","127.0.0.1"]
-      responseStr = responseStr.trim();
-      responseStr = responseStr.substring(1, responseStr.length() - 1);
-      String[] list = responseStr.split(",");
-      List<URI> newHosts = new ArrayList<>();
-      for (String host : list) {
-        if (host.isEmpty()) {
-          continue;
-        }
-        host = host.trim();
-        host = host.substring(1, host.length() - 1);
-        try {
-          newHosts.add(this.hostToURI(host));
-        } catch (URISyntaxException | MalformedURLException e) {
-          logger.log(Level.WARNING, "Invalid host: " + host, e);
-        }
-      }
-      return newHosts;
+      return parseLocalNodesResponse(responseStr);
     } catch (IOException e) {
       // Ensure the response body is consumed on error
       response.responseBody().ifPresent(this::consumeAndClose);
       throw e;
     }
+  }
+
+  private List<URI> parseLocalNodesResponse(String responseStr) {
+    // response looks like: ["127.0.0.2","127.0.0.3","127.0.0.1"]
+    responseStr = responseStr.trim();
+    if (!responseStr.startsWith("[") || !responseStr.endsWith("]")) {
+      logger.log(Level.WARNING, "Malformed /localnodes response: " + responseStr);
+      return Collections.emptyList();
+    }
+
+    String responseBody = responseStr.substring(1, responseStr.length() - 1).trim();
+    if (responseBody.isEmpty()) {
+      return Collections.emptyList();
+    }
+
+    String[] list = responseBody.split(",");
+    List<URI> newHosts = new ArrayList<>();
+    for (String host : list) {
+      host = host.trim();
+      if (host.isEmpty()) {
+        continue;
+      }
+      if (host.length() < 2 || !host.startsWith("\"") || !host.endsWith("\"")) {
+        logger.log(Level.WARNING, "Malformed host entry in /localnodes response: " + host);
+        continue;
+      }
+      host = host.substring(1, host.length() - 1);
+      try {
+        newHosts.add(this.hostToURI(host));
+      } catch (URISyntaxException | MalformedURLException e) {
+        logger.log(Level.WARNING, "Invalid host: " + host, e);
+      }
+    }
+    return newHosts;
   }
 
   /**
