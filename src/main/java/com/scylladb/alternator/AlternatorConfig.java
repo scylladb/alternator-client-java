@@ -129,7 +129,6 @@ public class AlternatorConfig {
    *   <li>{@code Content-Length} - Required for request body
    *   <li>{@code Accept-Encoding} - For response compression negotiation
    *   <li>{@code Connection} - HTTP keep-alive for connection reuse
-   *   <li>{@code User-Agent} - Reports the AWS SDK and ScyllaDB Alternator client versions
    * </ul>
    *
    * @since 2.0.0
@@ -143,8 +142,19 @@ public class AlternatorConfig {
                   "Content-Type",
                   "Content-Length",
                   "Accept-Encoding",
-                  "Connection",
-                  "User-Agent")));
+                  "Connection")));
+
+  /**
+   * HTTP headers required when user-agent reporting is enabled.
+   *
+   * <ul>
+   *   <li>{@code User-Agent} - Reports the AWS SDK and ScyllaDB Alternator client versions
+   * </ul>
+   *
+   * @since 2.0.5
+   */
+  public static final Set<String> USER_AGENT_HEADERS =
+      Collections.unmodifiableSet(new HashSet<>(Arrays.asList("User-Agent")));
 
   /**
    * HTTP headers required when compression is enabled.
@@ -179,6 +189,7 @@ public class AlternatorConfig {
   private final int minCompressionSizeBytes;
   private final boolean optimizeHeaders;
   private final Set<String> headersWhitelist;
+  private final boolean userAgentEnabled;
   private final boolean authenticationEnabled;
   private final TlsSessionCacheConfig tlsSessionCacheConfig;
   private final TlsConfig tlsConfig;
@@ -202,6 +213,7 @@ public class AlternatorConfig {
    * @param minCompressionSizeBytes minimum request size in bytes to trigger compression
    * @param optimizeHeaders whether to enable HTTP header optimization
    * @param headersWhitelist the set of headers to preserve when optimization is enabled
+   * @param userAgentEnabled whether user-agent reporting is enabled
    * @param authenticationEnabled whether authentication is enabled
    * @param tlsSessionCacheConfig the TLS session cache configuration for quick TLS renegotiation
    * @param tlsConfig the TLS configuration including CA certificates and verification settings
@@ -226,6 +238,7 @@ public class AlternatorConfig {
       int minCompressionSizeBytes,
       boolean optimizeHeaders,
       Set<String> headersWhitelist,
+      boolean userAgentEnabled,
       boolean authenticationEnabled,
       TlsSessionCacheConfig tlsSessionCacheConfig,
       TlsConfig tlsConfig,
@@ -249,6 +262,7 @@ public class AlternatorConfig {
     this.minCompressionSizeBytes =
         minCompressionSizeBytes >= 0 ? minCompressionSizeBytes : DEFAULT_MIN_COMPRESSION_SIZE_BYTES;
     this.optimizeHeaders = optimizeHeaders;
+    this.userAgentEnabled = userAgentEnabled;
     this.authenticationEnabled = authenticationEnabled;
 
     // Compute default whitelist based on configuration if not provided
@@ -378,6 +392,20 @@ public class AlternatorConfig {
    */
   public Set<String> getHeadersWhitelist() {
     return headersWhitelist;
+  }
+
+  /**
+   * Checks if user-agent reporting is enabled.
+   *
+   * <p>When enabled, the client sends a {@code User-Agent} header that includes AWS SDK metadata
+   * and the ScyllaDB Alternator client version. When disabled, optimized header whitelists do not
+   * require {@code User-Agent}.
+   *
+   * @return true if user-agent reporting is enabled, false otherwise
+   * @since 2.0.5
+   */
+  public boolean isUserAgentEnabled() {
+    return userAgentEnabled;
   }
 
   /**
@@ -544,6 +572,9 @@ public class AlternatorConfig {
     if (compressionAlgorithm != null && compressionAlgorithm != RequestCompressionAlgorithm.NONE) {
       required.addAll(COMPRESSION_HEADERS);
     }
+    if (userAgentEnabled) {
+      required.addAll(USER_AGENT_HEADERS);
+    }
     if (authenticationEnabled) {
       required.addAll(AUTHENTICATION_HEADERS);
     }
@@ -569,6 +600,7 @@ public class AlternatorConfig {
     private boolean optimizeHeaders = false;
     private Set<String> headersWhitelist = null; // null means use default based on config
     private boolean headersWhitelistWasSet = false;
+    private boolean userAgentEnabled = true;
     private boolean authenticationEnabled = true;
     private TlsSessionCacheConfig tlsSessionCacheConfig = null; // null means use default
     private TlsConfig tlsConfig = null; // null means use default (trust-all for backwards compat)
@@ -594,6 +626,11 @@ public class AlternatorConfig {
      */
     Builder authenticationEnabled(boolean authenticationEnabled) {
       this.authenticationEnabled = authenticationEnabled;
+      return this;
+    }
+
+    Builder withUserAgentEnabled(boolean userAgentEnabled) {
+      this.userAgentEnabled = userAgentEnabled;
       return this;
     }
 
@@ -699,6 +736,9 @@ public class AlternatorConfig {
       Set<String> required = new HashSet<>(BASE_REQUIRED_HEADERS);
       if (compressionAlgorithm != null && compressionAlgorithm.isEnabled()) {
         required.addAll(COMPRESSION_HEADERS);
+      }
+      if (userAgentEnabled) {
+        required.addAll(USER_AGENT_HEADERS);
       }
       if (authenticationEnabled) {
         required.addAll(AUTHENTICATION_HEADERS);
@@ -1223,6 +1263,7 @@ public class AlternatorConfig {
           minCompressionSizeBytes,
           optimizeHeaders,
           headersWhitelist,
+          userAgentEnabled,
           authenticationEnabled,
           tlsSessionCacheConfig,
           effectiveTlsConfig,

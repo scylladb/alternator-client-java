@@ -222,13 +222,10 @@ public class HeadersFilteringSdkHttpClientTest {
   public void testAlternatorUserAgentSuffixIsAddedToOverrideConfiguration() {
     ClientOverrideConfiguration.Builder overrideBuilder = ClientOverrideConfiguration.builder();
 
-    AlternatorUserAgent.applyTo(overrideBuilder);
+    AlternatorUserAgent.applyDefaultSuffixTo(overrideBuilder);
 
     String suffix =
-        overrideBuilder
-            .build()
-            .advancedOption(SdkAdvancedClientOption.USER_AGENT_SUFFIX)
-            .get();
+        overrideBuilder.build().advancedOption(SdkAdvancedClientOption.USER_AGENT_SUFFIX).get();
     assertEquals(AlternatorUserAgent.userAgentToken(), suffix);
   }
 

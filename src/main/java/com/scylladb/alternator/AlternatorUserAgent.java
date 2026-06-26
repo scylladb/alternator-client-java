@@ -4,11 +4,14 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.Objects;
 import java.util.Properties;
+import java.util.function.UnaryOperator;
 import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
 import software.amazon.awssdk.core.client.config.SdkAdvancedClientOption;
+import software.amazon.awssdk.http.SdkHttpRequest;
 
 /** Adds this Alternator wrapper's identity to AWS SDK user-agent strings. */
 final class AlternatorUserAgent {
+  static final String HEADER_NAME = "User-Agent";
   static final String PRODUCT_NAME = "scylladb-alternator-client-java";
   private static final String VERSION_RESOURCE =
       "META-INF/maven/com.scylladb.alternator/load-balancing/pom.properties";
@@ -17,7 +20,7 @@ final class AlternatorUserAgent {
 
   private AlternatorUserAgent() {}
 
-  static void applyTo(ClientOverrideConfiguration.Builder overrideBuilder) {
+  static void applyDefaultSuffixTo(ClientOverrideConfiguration.Builder overrideBuilder) {
     Objects.requireNonNull(overrideBuilder, "overrideBuilder");
 
     String existingSuffix =
@@ -30,6 +33,28 @@ final class AlternatorUserAgent {
     return USER_AGENT_TOKEN;
   }
 
+  static UnaryOperator<String> replaceWith(String userAgent) {
+    requireValidUserAgent(userAgent);
+    return current -> userAgent;
+  }
+
+  static UnaryOperator<String> disable() {
+    return current -> null;
+  }
+
+  static void requireValidUserAgent(String userAgent) {
+    if (userAgent == null || userAgent.trim().isEmpty()) {
+      throw new IllegalArgumentException("userAgent cannot be null or blank");
+    }
+  }
+
+  static <T> T requireUserAgentTransformer(T userAgentTransformer) {
+    if (userAgentTransformer == null) {
+      throw new IllegalArgumentException("userAgentTransformer cannot be null");
+    }
+    return userAgentTransformer;
+  }
+
   static String appendToken(String existingSuffix, String token) {
     if (existingSuffix == null || existingSuffix.trim().isEmpty()) {
       return token;
@@ -40,6 +65,27 @@ final class AlternatorUserAgent {
       return trimmed;
     }
     return trimmed + " " + token;
+  }
+
+  static SdkHttpRequest transform(SdkHttpRequest request, UnaryOperator<String> transformer) {
+    String currentUserAgent = request.firstMatchingHeader(HEADER_NAME).orElse("");
+    String replacement = transformer.apply(currentUserAgent);
+
+    SdkHttpRequest.Builder requestBuilder = request.toBuilder();
+    requestBuilder.clearHeaders();
+    request
+        .headers()
+        .forEach(
+            (headerName, values) -> {
+              if (!HEADER_NAME.equalsIgnoreCase(headerName)) {
+                values.forEach(value -> requestBuilder.appendHeader(headerName, value));
+              }
+            });
+
+    if (replacement != null && !replacement.trim().isEmpty()) {
+      requestBuilder.appendHeader(HEADER_NAME, replacement);
+    }
+    return requestBuilder.build();
   }
 
   private static String resolveVersion() {

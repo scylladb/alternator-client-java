@@ -157,6 +157,36 @@ public class AlternatorConfigHeadersTest {
   }
 
   @Test
+  public void testUserAgentDisabledRemovesUserAgentFromRequiredHeaders() {
+    AlternatorConfig config =
+        AlternatorConfig.builder().withOptimizeHeaders(true).withUserAgentEnabled(false).build();
+
+    assertFalse(config.isUserAgentEnabled());
+    assertFalse(config.getRequiredHeaders().contains("User-Agent"));
+    assertFalse(config.getHeadersWhitelist().contains("User-Agent"));
+  }
+
+  @Test
+  public void testCustomWhitelistWithoutUserAgentSucceedsWhenUserAgentDisabled() {
+    AlternatorConfig.Builder builder =
+        AlternatorConfig.builder().withOptimizeHeaders(true).withUserAgentEnabled(false);
+    Set<String> whitelist = new HashSet<>(builder.getRequiredHeaders());
+
+    AlternatorConfig config = builder.withHeadersWhitelist(whitelist).build();
+
+    assertFalse(config.getHeadersWhitelist().contains("User-Agent"));
+    assertEquals(whitelist, config.getHeadersWhitelist());
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testCustomWhitelistWithoutUserAgentFailsWhenUserAgentEnabled() {
+    Set<String> whitelist = new HashSet<>(AlternatorConfig.builder().getRequiredHeaders());
+    whitelist.remove("User-Agent");
+
+    AlternatorConfig.builder().withOptimizeHeaders(true).withHeadersWhitelist(whitelist).build();
+  }
+
+  @Test
   public void testRequiredHeadersIsImmutable() {
     AlternatorConfig config = AlternatorConfig.builder().build();
     try {

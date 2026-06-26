@@ -513,6 +513,48 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
 authentication (`Authorization`, `X-Amz-Date`), operation (`Host`, `X-Amz-Target`,
 `Content-Type`, `Content-Length`), and client reporting (`User-Agent`).
 
+#### User-Agent customization
+
+By default, the library appends the ScyllaDB Alternator client identity to the AWS SDK user-agent:
+
+```text
+<AWS SDK User-Agent> scylladb-alternator-client-java/<version>
+```
+
+You can replace it completely:
+
+```java
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://127.0.0.1:8043"))
+    .credentialsProvider(myCredentials)
+    .withUserAgent("my-client/1.2.3")
+    .build();
+```
+
+You can transform the generated value. The function receives the AWS SDK user-agent with the
+default ScyllaDB Alternator token already appended:
+
+```java
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://127.0.0.1:8043"))
+    .credentialsProvider(myCredentials)
+    .withUserAgent(userAgent -> userAgent + " my-app/4.5.6")
+    .build();
+```
+
+You can also remove the header entirely:
+
+```java
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://127.0.0.1:8043"))
+    .credentialsProvider(myCredentials)
+    .withoutUserAgent()
+    .build();
+```
+
+When `withoutUserAgent()` is used with headers optimization, `User-Agent` is removed from the
+effective required whitelist as well.
+
 #### Combining with compression
 
 Headers optimization can be combined with request compression for maximum bandwidth savings:
