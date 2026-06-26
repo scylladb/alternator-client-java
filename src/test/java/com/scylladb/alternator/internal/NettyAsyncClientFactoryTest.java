@@ -97,6 +97,12 @@ public class NettyAsyncClientFactoryTest {
     client.close();
   }
 
+  @Test(expected = UnsupportedOperationException.class)
+  public void testCreateWithHostnameVerificationDisabledThrows() {
+    TlsConfig tlsConfig = TlsConfig.builder().withVerifyHostname(false).build();
+    NettyAsyncClientFactory.create(null, null, tlsConfig);
+  }
+
   @Test
   public void testCreateWithConfigAndTls() {
     AlternatorConfig config =

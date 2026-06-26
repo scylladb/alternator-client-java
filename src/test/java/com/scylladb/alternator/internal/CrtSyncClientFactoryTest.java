@@ -102,6 +102,12 @@ public class CrtSyncClientFactoryTest {
     client.close();
   }
 
+  @Test(expected = UnsupportedOperationException.class)
+  public void testCreateWithHostnameVerificationDisabledThrows() {
+    TlsConfig tlsConfig = TlsConfig.builder().withVerifyHostname(false).build();
+    CrtSyncClientFactory.create(null, null, tlsConfig);
+  }
+
   @Test
   public void testCreateWithConfigAndTls() {
     AlternatorConfig config =
@@ -146,6 +152,12 @@ public class CrtSyncClientFactoryTest {
     SdkHttpClient client = CrtSyncClientFactory.createPollingClient(TlsConfig.systemDefault());
     assertNotNull("Should create polling client with system-default TLS", client);
     client.close();
+  }
+
+  @Test(expected = UnsupportedOperationException.class)
+  public void testCreatePollingClientWithHostnameVerificationDisabledThrows() {
+    TlsConfig tlsConfig = TlsConfig.builder().withVerifyHostname(false).build();
+    CrtSyncClientFactory.createPollingClient(tlsConfig);
   }
 
   @Test

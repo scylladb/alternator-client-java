@@ -4,8 +4,12 @@ import com.scylladb.alternator.AlternatorConfig;
 import com.scylladb.alternator.TlsConfig;
 import java.time.Duration;
 import java.util.function.Consumer;
+import javax.net.ssl.HostnameVerifier;
 import javax.net.ssl.KeyManager;
+import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
+import org.apache.http.conn.ssl.NoopHostnameVerifier;
+import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
 import software.amazon.awssdk.http.SdkHttpClient;
 import software.amazon.awssdk.http.SdkHttpConfigurationOption;
 import software.amazon.awssdk.http.apache.ApacheHttpClient;
@@ -99,6 +103,12 @@ public final class ApacheSyncClientFactory {
 
   private static void applyTlsManagers(ApacheHttpClient.Builder builder, TlsConfig tlsConfig) {
     if (tlsConfig == null) {
+      return;
+    }
+    if (TlsHttpClientSupport.requiresHostnameVerificationDisabled(tlsConfig)) {
+      SSLContext sslContext = TlsContextFactory.createSslContext(tlsConfig);
+      HostnameVerifier hostnameVerifier = NoopHostnameVerifier.INSTANCE;
+      builder.socketFactory(new SSLConnectionSocketFactory(sslContext, hostnameVerifier));
       return;
     }
     if (tlsConfig.hasClientCertificate()) {

@@ -4,11 +4,16 @@ import static org.junit.Assert.*;
 
 import com.scylladb.alternator.AlternatorConfig;
 import com.scylladb.alternator.TlsConfig;
+import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import org.apache.http.conn.socket.ConnectionSocketFactory;
+import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
 import org.junit.Test;
 import software.amazon.awssdk.http.SdkHttpClient;
+import software.amazon.awssdk.http.apache.ApacheHttpClient;
 
 /**
  * Unit tests for {@link ApacheSyncClientFactory}.
@@ -99,6 +104,20 @@ public class ApacheSyncClientFactoryTest {
   }
 
   @Test
+  public void testCreateWithHostnameVerificationDisabledUsesCustomSocketFactory() {
+    TlsConfig tlsConfig = TlsConfig.builder().withVerifyHostname(false).build();
+    AtomicReference<ConnectionSocketFactory> socketFactory = new AtomicReference<>();
+    SdkHttpClient client =
+        ApacheSyncClientFactory.create(
+            builder -> socketFactory.set(readSocketFactory(builder)), null, tlsConfig);
+
+    assertTrue(
+        "Should use a custom SSL socket factory when hostname verification is disabled",
+        socketFactory.get() instanceof SSLConnectionSocketFactory);
+    client.close();
+  }
+
+  @Test
   public void testCreateWithConfigAndTls() {
     AlternatorConfig config =
         AlternatorConfig.builder()
@@ -141,6 +160,14 @@ public class ApacheSyncClientFactoryTest {
   public void testCreatePollingClientWithSystemDefaultTls() {
     SdkHttpClient client = ApacheSyncClientFactory.createPollingClient(TlsConfig.systemDefault());
     assertNotNull("Should create polling client with system-default TLS", client);
+    client.close();
+  }
+
+  @Test
+  public void testCreatePollingClientWithHostnameVerificationDisabled() {
+    TlsConfig tlsConfig = TlsConfig.builder().withVerifyHostname(false).build();
+    SdkHttpClient client = ApacheSyncClientFactory.createPollingClient(tlsConfig);
+    assertNotNull("Should create polling client with hostname verification disabled", client);
     client.close();
   }
 
@@ -206,5 +233,15 @@ public class ApacheSyncClientFactoryTest {
     SdkHttpClient client = ApacheSyncClientFactory.create(null, null, tlsConfig);
     assertNotNull("Should create client with system CAs", client);
     client.close();
+  }
+
+  private static ConnectionSocketFactory readSocketFactory(ApacheHttpClient.Builder builder) {
+    try {
+      Field socketFactoryField = builder.getClass().getDeclaredField("socketFactory");
+      socketFactoryField.setAccessible(true);
+      return (ConnectionSocketFactory) socketFactoryField.get(builder);
+    } catch (ReflectiveOperationException e) {
+      throw new AssertionError(e);
+    }
   }
 }

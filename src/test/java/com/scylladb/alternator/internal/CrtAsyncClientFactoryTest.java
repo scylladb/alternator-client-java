@@ -102,6 +102,12 @@ public class CrtAsyncClientFactoryTest {
     client.close();
   }
 
+  @Test(expected = UnsupportedOperationException.class)
+  public void testCreateWithHostnameVerificationDisabledThrows() {
+    TlsConfig tlsConfig = TlsConfig.builder().withVerifyHostname(false).build();
+    CrtAsyncClientFactory.create(null, null, tlsConfig);
+  }
+
   @Test
   public void testCreateWithConfigAndTls() {
     AlternatorConfig config =
