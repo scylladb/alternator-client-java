@@ -488,7 +488,7 @@ When headers optimization is enabled, only the following headers are preserved b
 - `Content-Encoding` - For request compression (when enabled)
 - `Authorization` - AWS SigV4 signature (when authentication is enabled)
 - `X-Amz-Date` - Timestamp for AWS signature (when authentication is enabled)
-- `User-Agent` - Reports the AWS SDK and ScyllaDB Alternator client versions
+- `User-Agent` - Reports the ScyllaDB Alternator client version
 
 All other headers (such as `X-Amz-Sdk-Invocation-Id`, `amz-sdk-request`, `X-Amz-Content-Sha256`) are removed.
 
@@ -515,10 +515,10 @@ authentication (`Authorization`, `X-Amz-Date`), operation (`Host`, `X-Amz-Target
 
 #### User-Agent customization
 
-By default, the library appends the ScyllaDB Alternator client identity to the AWS SDK user-agent:
+By default, the library sends only the ScyllaDB Alternator client identity:
 
 ```text
-<AWS SDK User-Agent> scylladb-alternator-client-java/<version>
+scylladb-alternator-client-java/<version>
 ```
 
 You can replace it completely:
@@ -531,8 +531,8 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
     .build();
 ```
 
-You can transform the generated value. The function receives the AWS SDK user-agent with the
-default ScyllaDB Alternator token already appended:
+You can transform the generated value. The function receives the default ScyllaDB Alternator
+user-agent:
 
 ```java
 DynamoDbClient client = AlternatorDynamoDbClient.builder()

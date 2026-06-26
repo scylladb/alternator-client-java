@@ -101,8 +101,7 @@ public class AlternatorDynamoDbClient {
     private Consumer<ApacheHttpClient.Builder> apacheCustomizer;
     private Consumer<AwsCrtHttpClient.Builder> crtCustomizer;
     private HttpClientType httpClientType;
-    private UnaryOperator<String> userAgentTransformer;
-    private boolean defaultUserAgentSuffixEnabled = true;
+    private UnaryOperator<String> userAgentTransformer = AlternatorUserAgent.defaultUserAgent();
 
     private AlternatorDynamoDbClientBuilder() {
       this.delegate = DynamoDbClient.builder();
@@ -203,7 +202,6 @@ public class AlternatorDynamoDbClient {
      */
     public AlternatorDynamoDbClientBuilder withUserAgent(String userAgent) {
       this.userAgentTransformer = AlternatorUserAgent.replaceWith(userAgent);
-      this.defaultUserAgentSuffixEnabled = false;
       configBuilder.withUserAgentEnabled(true);
       return this;
     }
@@ -211,8 +209,8 @@ public class AlternatorDynamoDbClient {
     /**
      * Transforms the final {@code User-Agent} header before the request is sent.
      *
-     * <p>The function receives the AWS SDK user-agent with the default ScyllaDB Alternator client
-     * token appended. Returning null or blank removes the {@code User-Agent} header.
+     * <p>The function receives the default ScyllaDB Alternator client user-agent. Returning null or
+     * blank removes the {@code User-Agent} header.
      *
      * @param userAgentTransformer function that maps the generated user-agent to the value to send
      * @return this builder instance
@@ -221,9 +219,7 @@ public class AlternatorDynamoDbClient {
      */
     public AlternatorDynamoDbClientBuilder withUserAgent(
         UnaryOperator<String> userAgentTransformer) {
-      this.userAgentTransformer =
-          AlternatorUserAgent.requireUserAgentTransformer(userAgentTransformer);
-      this.defaultUserAgentSuffixEnabled = true;
+      this.userAgentTransformer = AlternatorUserAgent.transformDefault(userAgentTransformer);
       configBuilder.withUserAgentEnabled(true);
       return this;
     }
@@ -239,7 +235,6 @@ public class AlternatorDynamoDbClient {
      */
     public AlternatorDynamoDbClientBuilder withoutUserAgent() {
       this.userAgentTransformer = AlternatorUserAgent.disable();
-      this.defaultUserAgentSuffixEnabled = false;
       configBuilder.withUserAgentEnabled(false);
       return this;
     }
@@ -705,9 +700,6 @@ public class AlternatorDynamoDbClient {
         overrideBuilder.addExecutionInterceptor(affinityInterceptor);
       } else {
         overrideBuilder.addExecutionInterceptor(new BasicQueryPlanInterceptor(liveNodes));
-      }
-      if (defaultUserAgentSuffixEnabled) {
-        AlternatorUserAgent.applyDefaultSuffixTo(overrideBuilder);
       }
       delegate.overrideConfiguration(overrideBuilder.build());
 
