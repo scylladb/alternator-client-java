@@ -711,11 +711,12 @@ public class AlternatorDynamoDbAsyncClient {
               : ClientOverrideConfiguration.builder();
 
       KeyRouteAffinityConfig keyAffinityConfig = alternatorConfig.getKeyRouteAffinityConfig();
+      AffinityQueryPlanInterceptor affinityInterceptor = null;
       if (keyAffinityConfig != null
           && keyAffinityConfig.getType() != null
           && keyAffinityConfig.getType() != KeyRouteAffinity.NONE) {
-        overrideBuilder.addExecutionInterceptor(
-            new AffinityQueryPlanInterceptor(keyAffinityConfig, liveNodes));
+        affinityInterceptor = new AffinityQueryPlanInterceptor(keyAffinityConfig, liveNodes);
+        overrideBuilder.addExecutionInterceptor(affinityInterceptor);
       } else {
         overrideBuilder.addExecutionInterceptor(new BasicQueryPlanInterceptor(liveNodes));
       }
@@ -729,7 +730,7 @@ public class AlternatorDynamoDbAsyncClient {
 
       DynamoDbAsyncClient client = delegate.build();
       return new AlternatorDynamoDbAsyncClientWrapper(
-          client, liveNodes, alternatorConfig, pollingClient);
+          client, liveNodes, alternatorConfig, affinityInterceptor, pollingClient);
     }
 
     /**

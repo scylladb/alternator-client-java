@@ -3,8 +3,11 @@ package com.scylladb.alternator;
 import static org.junit.Assert.assertEquals;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.scylladb.alternator.internal.AlternatorLiveNodes;
+import com.scylladb.alternator.keyrouting.PartitionKeyResolver;
+import com.scylladb.alternator.queryplan.AffinityQueryPlanInterceptor;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -60,6 +63,39 @@ public class AlternatorDynamoDbClientWrapperShutdownTest {
     wrapper.close();
 
     assertEquals(Arrays.asList("live-nodes", "polling-client", "client"), events);
+  }
+
+  @Test
+  public void testAsyncWrapperShutsDownAffinityResolverBeforeClosingClients() {
+    List<String> events = new ArrayList<>();
+    TrackingLiveNodes liveNodes = new TrackingLiveNodes(events);
+    TrackingPollingClient pollingClient = new TrackingPollingClient(events);
+    DynamoDbAsyncClient client = mock(DynamoDbAsyncClient.class);
+    AffinityQueryPlanInterceptor affinityInterceptor = mock(AffinityQueryPlanInterceptor.class);
+    PartitionKeyResolver resolver = mock(PartitionKeyResolver.class);
+    when(affinityInterceptor.getPartitionKeyResolver()).thenReturn(resolver);
+    doAnswer(
+            invocation -> {
+              events.add("resolver");
+              return null;
+            })
+        .when(resolver)
+        .shutdown();
+    doAnswer(
+            invocation -> {
+              events.add("client");
+              return null;
+            })
+        .when(client)
+        .close();
+
+    AlternatorDynamoDbAsyncClientWrapper wrapper =
+        new AlternatorDynamoDbAsyncClientWrapper(
+            client, liveNodes, null, affinityInterceptor, pollingClient);
+
+    wrapper.close();
+
+    assertEquals(Arrays.asList("resolver", "live-nodes", "polling-client", "client"), events);
   }
 
   private static final class TrackingLiveNodes extends AlternatorLiveNodes {

@@ -1,6 +1,7 @@
 package com.scylladb.alternator;
 
 import com.scylladb.alternator.internal.AlternatorLiveNodes;
+import com.scylladb.alternator.queryplan.AffinityQueryPlanInterceptor;
 import java.net.URI;
 import java.util.List;
 import software.amazon.awssdk.http.SdkHttpClient;
@@ -38,6 +39,7 @@ public class AlternatorDynamoDbAsyncClientWrapper implements AutoCloseable {
   private final DynamoDbAsyncClient client;
   private final AlternatorLiveNodes liveNodes;
   private final AlternatorConfig config;
+  private final AffinityQueryPlanInterceptor affinityInterceptor;
   private final SdkHttpClient pollingHttpClient;
 
   /**
@@ -48,7 +50,7 @@ public class AlternatorDynamoDbAsyncClientWrapper implements AutoCloseable {
    */
   public AlternatorDynamoDbAsyncClientWrapper(
       DynamoDbAsyncClient client, AlternatorLiveNodes liveNodes) {
-    this(client, liveNodes, null, null);
+    this(client, liveNodes, null, null, null);
   }
 
   /**
@@ -60,7 +62,7 @@ public class AlternatorDynamoDbAsyncClientWrapper implements AutoCloseable {
    */
   public AlternatorDynamoDbAsyncClientWrapper(
       DynamoDbAsyncClient client, AlternatorLiveNodes liveNodes, AlternatorConfig config) {
-    this(client, liveNodes, config, null);
+    this(client, liveNodes, config, null, null);
   }
 
   /**
@@ -77,9 +79,30 @@ public class AlternatorDynamoDbAsyncClientWrapper implements AutoCloseable {
       AlternatorLiveNodes liveNodes,
       AlternatorConfig config,
       SdkHttpClient pollingHttpClient) {
+    this(client, liveNodes, config, null, pollingHttpClient);
+  }
+
+  /**
+   * Creates a new wrapper with the given client, live nodes, config, interceptor, and polling
+   * client.
+   *
+   * @param client the underlying DynamoDbAsyncClient
+   * @param liveNodes the AlternatorLiveNodes instance managing node discovery
+   * @param config the AlternatorConfig used for this client
+   * @param affinityInterceptor the AffinityQueryPlanInterceptor (may be null)
+   * @param pollingHttpClient the SdkHttpClient used for LiveNodes polling (may be null)
+   * @since 2.1.0
+   */
+  public AlternatorDynamoDbAsyncClientWrapper(
+      DynamoDbAsyncClient client,
+      AlternatorLiveNodes liveNodes,
+      AlternatorConfig config,
+      AffinityQueryPlanInterceptor affinityInterceptor,
+      SdkHttpClient pollingHttpClient) {
     this.client = client;
     this.liveNodes = liveNodes;
     this.config = config;
+    this.affinityInterceptor = affinityInterceptor;
     this.pollingHttpClient = pollingHttpClient;
   }
 
@@ -145,6 +168,8 @@ public class AlternatorDynamoDbAsyncClientWrapper implements AutoCloseable {
    * <p>This includes:
    *
    * <ul>
+   *   <li>Shutting down the partition key resolver's discovery executor if key route affinity is
+   *       enabled
    *   <li>Stopping the LiveNodes background thread
    *   <li>Closing the polling HTTP client
    *   <li>Closing the underlying async DynamoDB client
@@ -152,6 +177,9 @@ public class AlternatorDynamoDbAsyncClientWrapper implements AutoCloseable {
    */
   @Override
   public void close() {
+    if (affinityInterceptor != null) {
+      affinityInterceptor.getPartitionKeyResolver().shutdown();
+    }
     liveNodes.shutdownAndWait();
     if (pollingHttpClient != null) {
       pollingHttpClient.close();
