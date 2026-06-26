@@ -351,16 +351,7 @@ public class AlternatorLiveNodes extends Thread {
     }
     this.alternatorScheme = config.getScheme();
     this.alternatorPort = config.getPort();
-    // Build URIs from hosts, scheme, and port
-    List<URI> seedUris = new ArrayList<>();
-    for (String host : seedHosts) {
-      try {
-        seedUris.add(new URI(alternatorScheme, null, host, alternatorPort, null, null, null));
-      } catch (URISyntaxException e) {
-        throw new RuntimeException("Invalid host: " + host, e);
-      }
-    }
-    this.initialNodes = seedUris;
+    this.initialNodes = hostsToUris(seedHosts);
     this.liveNodes = new AtomicReference<>();
     this.nextLiveNodeIndex = new AtomicInteger(0);
     this.config = config;
@@ -463,6 +454,18 @@ public class AlternatorLiveNodes extends Thread {
     return uri;
   }
 
+  private List<URI> hostsToUris(List<String> hosts) {
+    List<URI> uris = new ArrayList<>();
+    for (String host : hosts) {
+      try {
+        uris.add(hostToURI(host));
+      } catch (URISyntaxException | MalformedURLException e) {
+        throw new RuntimeException("Invalid host: " + host, e);
+      }
+    }
+    return uris;
+  }
+
   /**
    * nextAsURI.
    *
@@ -488,11 +491,15 @@ public class AlternatorLiveNodes extends Thread {
   public URI nextAsURI(String path, String query) {
     try {
       URI uri = this.nextAsURI();
-      return new URI(uri.getScheme(), null, uri.getHost(), uri.getPort(), path, query, null);
+      return withPathAndQuery(uri, path, query);
     } catch (URISyntaxException e) {
       // Should never happen, nextAsURI content is already validated
       throw new RuntimeException(e);
     }
+  }
+
+  private URI withPathAndQuery(URI uri, String path, String query) throws URISyntaxException {
+    return new URI(uri.getScheme(), null, uri.getHost(), uri.getPort(), path, query, null);
   }
 
   // Utility function for reading the entire contents of an input stream
@@ -511,10 +518,8 @@ public class AlternatorLiveNodes extends Thread {
     RoutingScope scope = this.config.getRoutingScope();
     IOException lastException = null;
     while (scope != null) {
-      String query = scope.getLocalNodesQuery();
-      URI uri = nextAsURI("/localnodes", query.isEmpty() ? null : query);
       try {
-        List<URI> nodes = getNodes(uri);
+        List<URI> nodes = getNodesForScope(scope);
         if (!nodes.isEmpty()) {
           liveNodes.set(mergeWithInitialNodes(nodes));
           logger.log(
@@ -522,8 +527,7 @@ public class AlternatorLiveNodes extends Thread {
           return;
         }
       } catch (IOException e) {
-        logger.log(
-            Level.WARNING, "Failed to contact node " + uri + " for " + scope.getDescription(), e);
+        logger.log(Level.WARNING, "Failed to discover nodes for " + scope.getDescription(), e);
         lastException = e;
       }
       RoutingScope fallback = scope.getFallback();
@@ -546,6 +550,39 @@ public class AlternatorLiveNodes extends Thread {
     } else {
       logger.log(Level.WARNING, "No nodes found in any routing scope, keeping existing node list");
     }
+  }
+
+  private List<URI> getNodesForScope(RoutingScope scope) throws IOException {
+    String query = scope.getLocalNodesQuery();
+    String requestQuery = query.isEmpty() ? null : query;
+    IOException lastException = null;
+    Set<URI> nodes = new LinkedHashSet<>();
+    for (URI seedNode : initialNodes) {
+      try {
+        List<URI> seedNodes = getNodes(withPathAndQuery(seedNode, "/localnodes", requestQuery));
+        if (!seedNodes.isEmpty()) {
+          if (!(scope instanceof ClusterScope)) {
+            return seedNodes;
+          }
+          nodes.addAll(seedNodes);
+        }
+      } catch (IOException e) {
+        logger.log(
+            Level.WARNING,
+            "Failed to contact seed node " + seedNode + " for " + scope.getDescription(),
+            e);
+        lastException = e;
+      } catch (URISyntaxException e) {
+        throw new RuntimeException(e);
+      }
+    }
+    if (!nodes.isEmpty()) {
+      return new ArrayList<>(nodes);
+    }
+    if (lastException != null) {
+      throw lastException;
+    }
+    return Collections.emptyList();
   }
 
   /**
@@ -689,8 +726,7 @@ public class AlternatorLiveNodes extends Thread {
       return;
     }
     try {
-      URI uri = nextAsURI("/localnodes", query);
-      List<URI> nodes = getNodes(uri);
+      List<URI> nodes = getNodesForScope(scope);
       if (nodes.isEmpty()) {
         throw new ValidationError(
             "node returned empty list for "
