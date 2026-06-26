@@ -400,12 +400,29 @@ complete example. After building with `mvn package`, you can run this demo with:
 mvn exec:java -Dexec.mainClass=com.scylladb.alternator.demo.Demo5 -Dexec.classpathScope=test
 ```
 
-### Request Compression
+### HTTP Compression
+
+#### Response compression
+
+The library automatically negotiates compressed responses by sending
+`Accept-Encoding: gzip, deflate` on DynamoDB requests. When Alternator returns
+`Content-Encoding: gzip` or `Content-Encoding: deflate`, the response body is
+decompressed before it reaches the AWS SDK response parser. This works for both
+synchronous and asynchronous clients and does not require any application
+configuration.
+
+Response compression support:
+- `gzip` - supported
+- `deflate` - supported
+
+Request compression is separate and remains opt-in.
+
+#### Request compression
 
 The library supports optional GZIP compression for HTTP request bodies, which can
 reduce network bandwidth usage when sending large payloads to Alternator.
 
-#### Why not use AWS SDK's built-in compression?
+##### Why not use AWS SDK's built-in compression?
 
 AWS SDK for Java v2 includes a `CompressionConfiguration` feature, but it **only works
 for AWS services that have the `@requestCompression` trait** in their service model
@@ -415,7 +432,7 @@ SDK's built-in compression cannot be used for DynamoDB or Alternator requests.
 This library provides its own compression implementation using an `ExecutionInterceptor`
 that works with any DynamoDB/Alternator operation.
 
-#### Enabling compression
+##### Enabling request compression
 
 To enable request compression, configure the builder with a compression algorithm:
 
@@ -430,7 +447,7 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
     .build();
 ```
 
-#### Compression threshold
+##### Compression threshold
 
 By default, only requests with bodies >= 1024 bytes (1 KB) are compressed. This avoids
 the overhead of compressing small payloads that may not benefit from compression.
@@ -445,7 +462,7 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
     .build();
 ```
 
-#### When to use compression
+##### When to use request compression
 
 Request compression is recommended for:
 - Large item attributes (documents, JSON blobs)
@@ -505,13 +522,15 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
     .withOptimizeHeaders(true)
     .withHeadersWhitelist(Arrays.asList(
         "Host", "X-Amz-Target", "Content-Type", "Content-Length",
-        "Authorization", "X-Amz-Date", "User-Agent", "X-Custom-Header"))
+        "Accept-Encoding", "Authorization", "X-Amz-Date", "Connection",
+        "User-Agent", "X-Custom-Header"))
     .build();
 ```
 
 **Important:** When using a custom whitelist, make sure to include all headers required for
 authentication (`Authorization`, `X-Amz-Date`), operation (`Host`, `X-Amz-Target`,
-`Content-Type`, `Content-Length`), and client reporting (`User-Agent`).
+`Content-Type`, `Content-Length`), response compression (`Accept-Encoding`), connection
+reuse (`Connection`), and client reporting (`User-Agent`).
 
 #### User-Agent customization
 
