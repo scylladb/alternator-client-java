@@ -3,6 +3,7 @@ package com.scylladb.alternator;
 import static org.junit.Assert.*;
 
 import com.scylladb.alternator.internal.AsyncClientDetector;
+import java.lang.reflect.Field;
 import java.net.URI;
 import java.util.Arrays;
 import java.util.function.UnaryOperator;
@@ -370,6 +371,28 @@ public class AlternatorDynamoDbAsyncClientCustomizerTest {
     builder.validateAndDetectAsyncClientType();
   }
 
+  @Test
+  @SuppressWarnings("deprecation")
+  public void testWithAlternatorConfigDisablesUserAgentTransformer() throws Exception {
+    AlternatorConfig config =
+        AlternatorConfig.builder().withOptimizeHeaders(true).withUserAgentEnabled(false).build();
+    var builder = AlternatorDynamoDbAsyncClient.builder().withAlternatorConfig(config);
+
+    assertNull(userAgentTransformer(builder).apply("aws-sdk-java/2.x"));
+  }
+
+  @Test
+  @SuppressWarnings("deprecation")
+  public void testWithAlternatorConfigEnablesDefaultUserAgentTransformer() throws Exception {
+    AlternatorConfig config = AlternatorConfig.builder().withUserAgentEnabled(true).build();
+    var builder =
+        AlternatorDynamoDbAsyncClient.builder().withoutUserAgent().withAlternatorConfig(config);
+
+    assertEquals(
+        AlternatorUserAgent.userAgentToken(),
+        userAgentTransformer(builder).apply("aws-sdk-java/2.x"));
+  }
+
   @Test(expected = IllegalStateException.class)
   public void testHttpClientTypeConflictsWithHttpClientBuilder() {
     AlternatorDynamoDbAsyncClient.builder()
@@ -387,5 +410,13 @@ public class AlternatorDynamoDbAsyncClientCustomizerTest {
             .withTlsConfig(TlsConfig.trustAll())
             .withNettyHttpClientCustomizer(b -> {});
     assertNotNull("Builder with TLS and customizer should be valid", builder);
+  }
+
+  @SuppressWarnings("unchecked")
+  private UnaryOperator<String> userAgentTransformer(
+      AlternatorDynamoDbAsyncClient.AlternatorDynamoDbAsyncClientBuilder builder) throws Exception {
+    Field field = builder.getClass().getDeclaredField("userAgentTransformer");
+    field.setAccessible(true);
+    return (UnaryOperator<String>) field.get(builder);
   }
 }

@@ -450,6 +450,10 @@ public class AlternatorDynamoDbClient {
         configBuilder.withOptimizeHeaders(config.isOptimizeHeaders());
         configBuilder.withHeadersWhitelist(config.getHeadersWhitelist());
         configBuilder.withUserAgentEnabled(config.isUserAgentEnabled());
+        userAgentTransformer =
+            config.isUserAgentEnabled()
+                ? AlternatorUserAgent.defaultUserAgent()
+                : AlternatorUserAgent.disable();
         configBuilder.withTlsConfig(config.getTlsConfig());
         configBuilder.withTlsSessionCacheConfig(config.getTlsSessionCacheConfig());
         configBuilder.withKeyRouteAffinity(config.getKeyRouteAffinityConfig());
