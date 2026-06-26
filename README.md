@@ -619,10 +619,35 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
 - **DatacenterScope** - Use only nodes in a specific datacenter
 - **RackScope** - Use only nodes in a specific rack within a datacenter
 
+#### Cluster-Wide Discovery Across Datacenters
+
+For cluster-wide routing, the client queries the configured seed hosts and merges the returned node
+lists. Some Scylla versions return only the contacted node's datacenter from `/localnodes`, even
+with cluster scope. When using those versions across multiple datacenters, configure seed hosts
+from every datacenter that should participate in cluster-wide routing:
+
+```java
+import java.util.Arrays;
+
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://dc1-node.example.com:8043"))
+    .credentialsProvider(myCredentials)
+    .withRoutingScope(ClusterScope.create())
+    .withSeedHosts(Arrays.asList(
+        "dc1-node.example.com",
+        "dc2-node.example.com",
+        "dc3-node.example.com"))
+    .build();
+```
+
 #### Fallback Chains
 
 Each scope can have a fallback scope. When no nodes are available in the current scope,
 the client automatically falls back to the next scope in the chain:
+
+For datacenter or rack scoped routing in a multi-datacenter cluster, include a seed host from the
+target datacenter. The client queries configured seeds with the scope filter and only falls back
+after no seed returns nodes for that scope.
 
 ```java
 // Rack -> Datacenter -> Cluster fallback chain

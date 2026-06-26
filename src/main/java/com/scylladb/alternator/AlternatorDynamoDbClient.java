@@ -93,6 +93,7 @@ public class AlternatorDynamoDbClient {
     private final AlternatorConfig.Builder configBuilder;
     private URI seedUri;
     private Region region;
+    private boolean seedHostsSet = false;
     private boolean disableCertificateChecks = false;
     private boolean httpClientSet = false;
     private boolean credentialsProviderSet = false;
@@ -133,6 +134,42 @@ public class AlternatorDynamoDbClient {
      */
     public AlternatorDynamoDbClientBuilder withRoutingScope(RoutingScope routingScope) {
       configBuilder.withRoutingScope(routingScope);
+      return this;
+    }
+
+    /**
+     * Sets the seed host addresses used for Alternator node discovery.
+     *
+     * <p>{@link #endpointOverride(URI)} is still required and supplies the scheme and port for
+     * these hosts. When {@code ClusterScope} is used, each configured seed is queried for {@code
+     * /localnodes}; provide seeds from every datacenter that should participate in cluster-wide
+     * routing. For datacenter or rack scoped routing in a multi-datacenter cluster, provide a seed
+     * from the target datacenter.
+     *
+     * @param hosts collection of seed host addresses (IP or hostname)
+     * @return this builder instance
+     * @since 2.0.6
+     */
+    public AlternatorDynamoDbClientBuilder withSeedHosts(Collection<String> hosts) {
+      if (hosts != null) {
+        configBuilder.withSeedHosts(hosts);
+        seedHostsSet = true;
+      }
+      return this;
+    }
+
+    /**
+     * Sets a single seed host address used for Alternator node discovery.
+     *
+     * @param host seed host address (IP or hostname)
+     * @return this builder instance
+     * @since 2.0.6
+     */
+    public AlternatorDynamoDbClientBuilder withSeedHost(String host) {
+      if (host != null) {
+        configBuilder.withSeedHost(host);
+        seedHostsSet = true;
+      }
       return this;
     }
 
@@ -403,6 +440,10 @@ public class AlternatorDynamoDbClient {
     @Deprecated
     public AlternatorDynamoDbClientBuilder withAlternatorConfig(AlternatorConfig config) {
       if (config != null) {
+        if (!config.getSeedHosts().isEmpty()) {
+          configBuilder.withSeedHosts(config.getSeedHosts());
+          seedHostsSet = true;
+        }
         configBuilder.withRoutingScope(config.getRoutingScope());
         configBuilder.withCompressionAlgorithm(config.getCompressionAlgorithm());
         configBuilder.withMinCompressionSizeBytes(config.getMinCompressionSizeBytes());
@@ -652,7 +693,7 @@ public class AlternatorDynamoDbClient {
         delegate.credentialsProvider(AnonymousCredentialsProvider.create());
       }
 
-      configBuilder.withSeedNode(seedUri);
+      applyEndpointToConfig();
 
       if (disableCertificateChecks) {
         configBuilder.withTlsConfig(TlsConfig.trustAll());
@@ -830,6 +871,15 @@ public class AlternatorDynamoDbClient {
 
     private boolean needsHttpClientWrapper(AlternatorConfig alternatorConfig) {
       return userAgentTransformer != null || alternatorConfig.isOptimizeHeaders();
+    }
+
+    private void applyEndpointToConfig() {
+      if (seedHostsSet) {
+        configBuilder.withScheme(seedUri.getScheme());
+        configBuilder.withPort(seedUri.getPort());
+        return;
+      }
+      configBuilder.withSeedNode(seedUri);
     }
   }
 }

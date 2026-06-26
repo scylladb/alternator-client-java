@@ -4,6 +4,7 @@ import static org.junit.Assert.*;
 
 import com.scylladb.alternator.internal.SyncClientDetector;
 import java.net.URI;
+import java.util.Arrays;
 import java.util.function.UnaryOperator;
 import org.junit.Test;
 import software.amazon.awssdk.http.SdkHttpClient;
@@ -168,6 +169,23 @@ public class AlternatorDynamoDbClientCustomizerTest {
     assertSame(builder, builder.withUserAgent("custom/1"));
     assertSame(builder, builder.withUserAgent(userAgent -> userAgent + " app/1"));
     assertSame(builder, builder.withoutUserAgent());
+  }
+
+  @Test
+  public void testSeedHostsBuilderPreservesExplicitSeeds() {
+    AlternatorDynamoDbClientWrapper wrapper =
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(SEED_URI)
+            .withSeedHosts(Arrays.asList("127.0.0.1", "127.0.0.2"))
+            .buildWithAlternatorAPI();
+    try {
+      AlternatorConfig config = wrapper.getAlternatorConfig();
+      assertEquals(Arrays.asList("127.0.0.1", "127.0.0.2"), config.getSeedHosts());
+      assertEquals(SEED_URI.getScheme(), config.getScheme());
+      assertEquals(SEED_URI.getPort(), config.getPort());
+    } finally {
+      wrapper.close();
+    }
   }
 
   @Test(expected = IllegalArgumentException.class)
