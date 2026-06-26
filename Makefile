@@ -16,6 +16,7 @@ DOCKER_COMPOSE_VERSION := 2.34.0
 
 MAVEN_GPG_PASSPHRASE ?=
 MAVEN_OPTS ?=
+FMT_MAVEN_PLUGIN := com.spotify.fmt:fmt-maven-plugin:2.25
 
 SONATYPE_TOKEN_USERNAME ?=
 SONATYPE_TOKEN_PASSWORD ?=
@@ -50,7 +51,7 @@ verify:
 	${mvn} verify
 
 lint:
-	${mvn} com.spotify.fmt:fmt-maven-plugin:check
+	${mvn} ${FMT_MAVEN_PLUGIN}:check
 	${mvn} checkstyle:check
 	${mvn} compile test-compile
 	$(MAKE) lint-docs
@@ -60,7 +61,7 @@ lint-docs:
 	${mvn} javadoc:jar javadoc:aggregate javadoc:aggregate-jar javadoc:resource-bundle
 
 lint-fix:
-	${mvn} com.spotify.fmt:fmt-maven-plugin:format
+	${mvn} ${FMT_MAVEN_PLUGIN}:format
 
 compile:
 	${mvn} compile
