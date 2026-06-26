@@ -415,6 +415,29 @@ Response compression support:
 - `gzip` - supported
 - `deflate` - supported
 
+You can restrict response compression to a supported subset, and the configured
+order is used for `Accept-Encoding`:
+
+```java
+import com.scylladb.alternator.ResponseCompressionAlgorithm;
+
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://127.0.0.1:8043"))
+    .credentialsProvider(myCredentials)
+    .withResponseCompressionAlgorithms(ResponseCompressionAlgorithm.DEFLATE)
+    .build();
+```
+
+To disable response compression negotiation and decompression:
+
+```java
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://127.0.0.1:8043"))
+    .credentialsProvider(myCredentials)
+    .withResponseCompressionDisabled()
+    .build();
+```
+
 Request compression is separate and remains opt-in.
 
 #### Request compression
@@ -529,8 +552,8 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
 
 **Important:** When using a custom whitelist, make sure to include all headers required for
 authentication (`Authorization`, `X-Amz-Date`), operation (`Host`, `X-Amz-Target`,
-`Content-Type`, `Content-Length`), response compression (`Accept-Encoding`), connection
-reuse (`Connection`), and client reporting (`User-Agent`).
+`Content-Type`, `Content-Length`), response compression when enabled (`Accept-Encoding`),
+connection reuse (`Connection`), and client reporting (`User-Agent`).
 
 #### User-Agent customization
 

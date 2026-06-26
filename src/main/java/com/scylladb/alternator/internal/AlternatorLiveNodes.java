@@ -222,17 +222,24 @@ public class AlternatorLiveNodes extends Thread {
    */
   @Deprecated
   public AlternatorLiveNodes(URI seedUri, AlternatorConfig config) {
-    this(
-        config.getSeedHosts().isEmpty()
-            ? AlternatorConfig.builder()
-                .withSeedNode(seedUri)
-                .withRoutingScope(config.getRoutingScope())
-                .withCompressionAlgorithm(config.getCompressionAlgorithm())
-                .withMinCompressionSizeBytes(config.getMinCompressionSizeBytes())
-                .withOptimizeHeaders(config.isOptimizeHeaders())
-                .withHeadersWhitelist(config.getHeadersWhitelist())
-                .build()
-            : config);
+    this(config.getSeedHosts().isEmpty() ? configWithSeedUri(seedUri, config) : config);
+  }
+
+  private static AlternatorConfig configWithSeedUri(URI seedUri, AlternatorConfig config) {
+    AlternatorConfig.Builder builder =
+        AlternatorConfig.builder()
+            .withSeedNode(seedUri)
+            .withRoutingScope(config.getRoutingScope())
+            .withCompressionAlgorithm(config.getCompressionAlgorithm())
+            .withMinCompressionSizeBytes(config.getMinCompressionSizeBytes())
+            .withOptimizeHeaders(config.isOptimizeHeaders())
+            .withHeadersWhitelist(config.getHeadersWhitelist());
+    if (config.isResponseCompressionEnabled()) {
+      builder.withResponseCompressionAlgorithms(config.getResponseCompressionAlgorithms());
+    } else {
+      builder.withResponseCompressionDisabled();
+    }
+    return builder.build();
   }
 
   /**

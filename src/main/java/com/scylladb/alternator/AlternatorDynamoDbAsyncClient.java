@@ -183,6 +183,49 @@ public class AlternatorDynamoDbAsyncClient {
     }
 
     /**
+     * Sets the HTTP response compression algorithms to advertise and decode.
+     *
+     * <p>The configured order is used for the {@code Accept-Encoding} header.
+     *
+     * @param algorithms the response compression algorithms to enable
+     * @return this builder instance
+     * @throws IllegalArgumentException if algorithms is null, empty, or contains null
+     * @since 2.0.6
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withResponseCompressionAlgorithms(
+        ResponseCompressionAlgorithm... algorithms) {
+      configBuilder.withResponseCompressionAlgorithms(algorithms);
+      return this;
+    }
+
+    /**
+     * Sets the HTTP response compression algorithms to advertise and decode.
+     *
+     * <p>The configured order is used for the {@code Accept-Encoding} header.
+     *
+     * @param algorithms the response compression algorithms to enable
+     * @return this builder instance
+     * @throws IllegalArgumentException if algorithms is null, empty, or contains null
+     * @since 2.0.6
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withResponseCompressionAlgorithms(
+        Collection<ResponseCompressionAlgorithm> algorithms) {
+      configBuilder.withResponseCompressionAlgorithms(algorithms);
+      return this;
+    }
+
+    /**
+     * Disables HTTP response compression negotiation and decompression.
+     *
+     * @return this builder instance
+     * @since 2.0.6
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withResponseCompressionDisabled() {
+      configBuilder.withResponseCompressionDisabled();
+      return this;
+    }
+
+    /**
      * Enables or disables HTTP header optimization.
      *
      * @param optimizeHeaders true to enable header filtering, false to disable
@@ -410,6 +453,12 @@ public class AlternatorDynamoDbAsyncClient {
         configBuilder.withRoutingScope(config.getRoutingScope());
         configBuilder.withCompressionAlgorithm(config.getCompressionAlgorithm());
         configBuilder.withMinCompressionSizeBytes(config.getMinCompressionSizeBytes());
+        if (config.isResponseCompressionEnabled()) {
+          configBuilder.withResponseCompressionAlgorithms(
+              config.getResponseCompressionAlgorithms());
+        } else {
+          configBuilder.withResponseCompressionDisabled();
+        }
         configBuilder.withOptimizeHeaders(config.isOptimizeHeaders());
         configBuilder.withHeadersWhitelist(config.getHeadersWhitelist());
         configBuilder.withUserAgentEnabled(config.isUserAgentEnabled());
@@ -688,7 +737,11 @@ public class AlternatorDynamoDbAsyncClient {
           delegate.overrideConfiguration() != null
               ? delegate.overrideConfiguration().toBuilder()
               : ClientOverrideConfiguration.builder();
-      compressionOverrideBuilder.addExecutionInterceptor(new ResponseCompressionInterceptor());
+      if (alternatorConfig.isResponseCompressionEnabled()) {
+        compressionOverrideBuilder.addExecutionInterceptor(
+            new ResponseCompressionInterceptor(
+                alternatorConfig.getResponseCompressionAlgorithms()));
+      }
       if (alternatorConfig.getCompressionAlgorithm().isEnabled()) {
         compressionOverrideBuilder.addExecutionInterceptor(
             new GzipRequestInterceptor(alternatorConfig.getMinCompressionSizeBytes()));

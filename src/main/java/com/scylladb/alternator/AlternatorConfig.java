@@ -127,7 +127,6 @@ public class AlternatorConfig {
    *   <li>{@code X-Amz-Target} - Specifies the DynamoDB operation
    *   <li>{@code Content-Type} - MIME type for DynamoDB API (application/x-amz-json-1.0)
    *   <li>{@code Content-Length} - Required for request body
-   *   <li>{@code Accept-Encoding} - For response compression negotiation
    *   <li>{@code Connection} - HTTP keep-alive for connection reuse
    * </ul>
    *
@@ -137,12 +136,19 @@ public class AlternatorConfig {
       Collections.unmodifiableSet(
           new HashSet<>(
               Arrays.asList(
-                  "Host",
-                  "X-Amz-Target",
-                  "Content-Type",
-                  "Content-Length",
-                  "Accept-Encoding",
-                  "Connection")));
+                  "Host", "X-Amz-Target", "Content-Type", "Content-Length", "Connection")));
+
+  /**
+   * HTTP headers required when response compression is enabled.
+   *
+   * <ul>
+   *   <li>{@code Accept-Encoding} - For response compression negotiation
+   * </ul>
+   *
+   * @since 2.0.6
+   */
+  public static final Set<String> RESPONSE_COMPRESSION_HEADERS =
+      Collections.unmodifiableSet(new HashSet<>(Arrays.asList("Accept-Encoding")));
 
   /**
    * HTTP headers required when user-agent reporting is enabled.
@@ -187,6 +193,7 @@ public class AlternatorConfig {
   private final RoutingScope routingScope;
   private final RequestCompressionAlgorithm compressionAlgorithm;
   private final int minCompressionSizeBytes;
+  private final List<ResponseCompressionAlgorithm> responseCompressionAlgorithms;
   private final boolean optimizeHeaders;
   private final Set<String> headersWhitelist;
   private final boolean userAgentEnabled;
@@ -211,6 +218,7 @@ public class AlternatorConfig {
    * @param routingScope the routing scope for node targeting
    * @param compressionAlgorithm the compression algorithm to use
    * @param minCompressionSizeBytes minimum request size in bytes to trigger compression
+   * @param responseCompressionAlgorithms response compression algorithms to advertise and decode
    * @param optimizeHeaders whether to enable HTTP header optimization
    * @param headersWhitelist the set of headers to preserve when optimization is enabled
    * @param userAgentEnabled whether user-agent reporting is enabled
@@ -236,6 +244,7 @@ public class AlternatorConfig {
       RoutingScope routingScope,
       RequestCompressionAlgorithm compressionAlgorithm,
       int minCompressionSizeBytes,
+      List<ResponseCompressionAlgorithm> responseCompressionAlgorithms,
       boolean optimizeHeaders,
       Set<String> headersWhitelist,
       boolean userAgentEnabled,
@@ -261,6 +270,10 @@ public class AlternatorConfig {
         compressionAlgorithm != null ? compressionAlgorithm : RequestCompressionAlgorithm.NONE;
     this.minCompressionSizeBytes =
         minCompressionSizeBytes >= 0 ? minCompressionSizeBytes : DEFAULT_MIN_COMPRESSION_SIZE_BYTES;
+    this.responseCompressionAlgorithms =
+        responseCompressionAlgorithms != null
+            ? Collections.unmodifiableList(new ArrayList<>(responseCompressionAlgorithms))
+            : ResponseCompressionAlgorithm.defaultAlgorithms();
     this.optimizeHeaders = optimizeHeaders;
     this.userAgentEnabled = userAgentEnabled;
     this.authenticationEnabled = authenticationEnabled;
@@ -364,6 +377,30 @@ public class AlternatorConfig {
    */
   public int getMinCompressionSizeBytes() {
     return minCompressionSizeBytes;
+  }
+
+  /**
+   * Gets the configured HTTP response compression algorithms.
+   *
+   * <p>The algorithms are ordered as they will be sent in the {@code Accept-Encoding} header. The
+   * default is {@link ResponseCompressionAlgorithm#GZIP} followed by {@link
+   * ResponseCompressionAlgorithm#DEFLATE}. An empty list means response compression is disabled.
+   *
+   * @return response compression algorithms, never null
+   * @since 2.0.6
+   */
+  public List<ResponseCompressionAlgorithm> getResponseCompressionAlgorithms() {
+    return responseCompressionAlgorithms;
+  }
+
+  /**
+   * Checks if HTTP response compression negotiation and decompression are enabled.
+   *
+   * @return true if at least one response compression algorithm is configured
+   * @since 2.0.6
+   */
+  public boolean isResponseCompressionEnabled() {
+    return !responseCompressionAlgorithms.isEmpty();
   }
 
   /**
@@ -569,6 +606,9 @@ public class AlternatorConfig {
    */
   public Set<String> getRequiredHeaders() {
     Set<String> required = new HashSet<>(BASE_REQUIRED_HEADERS);
+    if (isResponseCompressionEnabled()) {
+      required.addAll(RESPONSE_COMPRESSION_HEADERS);
+    }
     if (compressionAlgorithm != null && compressionAlgorithm != RequestCompressionAlgorithm.NONE) {
       required.addAll(COMPRESSION_HEADERS);
     }
@@ -597,6 +637,8 @@ public class AlternatorConfig {
     private RoutingScope routingScope = null;
     private RequestCompressionAlgorithm compressionAlgorithm = RequestCompressionAlgorithm.NONE;
     private int minCompressionSizeBytes = DEFAULT_MIN_COMPRESSION_SIZE_BYTES;
+    private List<ResponseCompressionAlgorithm> responseCompressionAlgorithms =
+        ResponseCompressionAlgorithm.defaultAlgorithms();
     private boolean optimizeHeaders = false;
     private Set<String> headersWhitelist = null; // null means use default based on config
     private boolean headersWhitelistWasSet = false;
@@ -734,6 +776,9 @@ public class AlternatorConfig {
      */
     public Set<String> getRequiredHeaders() {
       Set<String> required = new HashSet<>(BASE_REQUIRED_HEADERS);
+      if (!responseCompressionAlgorithms.isEmpty()) {
+        required.addAll(RESPONSE_COMPRESSION_HEADERS);
+      }
       if (compressionAlgorithm != null && compressionAlgorithm.isEnabled()) {
         required.addAll(COMPRESSION_HEADERS);
       }
@@ -821,6 +866,57 @@ public class AlternatorConfig {
      */
     public Builder withMinCompressionSizeBytes(int minCompressionSizeBytes) {
       this.minCompressionSizeBytes = minCompressionSizeBytes;
+      return this;
+    }
+
+    /**
+     * Sets the HTTP response compression algorithms to advertise and decode.
+     *
+     * <p>The configured order is used for the {@code Accept-Encoding} header. The default is {@link
+     * ResponseCompressionAlgorithm#GZIP} followed by {@link ResponseCompressionAlgorithm#DEFLATE}.
+     *
+     * @param algorithms the response compression algorithms to enable
+     * @return this builder instance
+     * @throws IllegalArgumentException if algorithms is null, empty, or contains null
+     * @since 2.0.6
+     */
+    public Builder withResponseCompressionAlgorithms(ResponseCompressionAlgorithm... algorithms) {
+      if (algorithms == null) {
+        throw new IllegalArgumentException(
+            "responseCompressionAlgorithms cannot be null or empty. "
+                + "Use withResponseCompressionDisabled() to disable response compression.");
+      }
+      return withResponseCompressionAlgorithms(Arrays.asList(algorithms));
+    }
+
+    /**
+     * Sets the HTTP response compression algorithms to advertise and decode.
+     *
+     * <p>The configured order is used for the {@code Accept-Encoding} header. The default is {@link
+     * ResponseCompressionAlgorithm#GZIP} followed by {@link ResponseCompressionAlgorithm#DEFLATE}.
+     *
+     * @param algorithms the response compression algorithms to enable
+     * @return this builder instance
+     * @throws IllegalArgumentException if algorithms is null, empty, or contains null
+     * @since 2.0.6
+     */
+    public Builder withResponseCompressionAlgorithms(
+        Collection<ResponseCompressionAlgorithm> algorithms) {
+      this.responseCompressionAlgorithms = ResponseCompressionAlgorithm.validatedList(algorithms);
+      return this;
+    }
+
+    /**
+     * Disables HTTP response compression negotiation and decompression.
+     *
+     * <p>When disabled, the client does not set {@code Accept-Encoding} and does not decompress
+     * compressed response bodies.
+     *
+     * @return this builder instance
+     * @since 2.0.6
+     */
+    public Builder withResponseCompressionDisabled() {
+      this.responseCompressionAlgorithms = Collections.emptyList();
       return this;
     }
 
@@ -1273,6 +1369,7 @@ public class AlternatorConfig {
           effectiveRoutingScope,
           compressionAlgorithm,
           minCompressionSizeBytes,
+          responseCompressionAlgorithms,
           optimizeHeaders,
           headersWhitelist,
           userAgentEnabled,

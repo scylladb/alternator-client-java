@@ -14,6 +14,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -424,7 +425,7 @@ public class AlternatorDynamoDbAsyncClientIT {
 
   @Test
   public void testResponseCompressionNegotiatesAcceptEncoding() throws Exception {
-    AtomicBoolean acceptEncodingSeen = new AtomicBoolean(false);
+    AtomicReference<String> acceptEncoding = new AtomicReference<>();
 
     ExecutionInterceptor responseCompressionVerifier =
         new ExecutionInterceptor() {
@@ -434,12 +435,7 @@ public class AlternatorDynamoDbAsyncClientIT {
             context
                 .httpRequest()
                 .firstMatchingHeader("Accept-Encoding")
-                .ifPresent(
-                    value -> {
-                      if (value.contains("gzip") && value.contains("deflate")) {
-                        acceptEncodingSeen.set(true);
-                      }
-                    });
+                .ifPresent(acceptEncoding::set);
           }
         };
 
@@ -457,7 +453,44 @@ public class AlternatorDynamoDbAsyncClientIT {
 
     try {
       client.listTables(ListTablesRequest.builder().limit(1).build()).get();
-      assertTrue("Accept-Encoding should advertise gzip and deflate", acceptEncodingSeen.get());
+      assertEquals(ResponseCompressionInterceptor.ACCEPT_ENCODING, acceptEncoding.get());
+    } finally {
+      client.close();
+    }
+  }
+
+  @Test
+  public void testResponseCompressionNegotiatesCustomAcceptEncoding() throws Exception {
+    AtomicReference<String> acceptEncoding = new AtomicReference<>();
+
+    ExecutionInterceptor responseCompressionVerifier =
+        new ExecutionInterceptor() {
+          @Override
+          public void beforeTransmission(
+              Context.BeforeTransmission context, ExecutionAttributes executionAttributes) {
+            context
+                .httpRequest()
+                .firstMatchingHeader("Accept-Encoding")
+                .ifPresent(acceptEncoding::set);
+          }
+        };
+
+    ClientOverrideConfiguration overrideConfig =
+        ClientOverrideConfiguration.builder()
+            .addExecutionInterceptor(responseCompressionVerifier)
+            .build();
+
+    DynamoDbAsyncClient client =
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(seedUri)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
+            .overrideConfiguration(overrideConfig)
+            .withResponseCompressionAlgorithms(ResponseCompressionAlgorithm.DEFLATE)
+            .build();
+
+    try {
+      client.listTables(ListTablesRequest.builder().limit(1).build()).get();
+      assertEquals("deflate", acceptEncoding.get());
     } finally {
       client.close();
     }

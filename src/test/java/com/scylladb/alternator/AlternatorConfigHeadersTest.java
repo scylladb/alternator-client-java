@@ -157,6 +157,35 @@ public class AlternatorConfigHeadersTest {
   }
 
   @Test
+  public void testResponseCompressionDisabledRemovesAcceptEncodingFromRequiredHeaders() {
+    AlternatorConfig config = AlternatorConfig.builder().withResponseCompressionDisabled().build();
+
+    assertFalse(config.isResponseCompressionEnabled());
+    assertFalse(config.getRequiredHeaders().contains("Accept-Encoding"));
+    assertFalse(config.getHeadersWhitelist().contains("Accept-Encoding"));
+  }
+
+  @Test
+  public void testCustomWhitelistWithoutAcceptEncodingSucceedsWhenResponseCompressionDisabled() {
+    AlternatorConfig.Builder builder =
+        AlternatorConfig.builder().withResponseCompressionDisabled().withOptimizeHeaders(true);
+    Set<String> whitelist = new HashSet<>(builder.getRequiredHeaders());
+
+    AlternatorConfig config = builder.withHeadersWhitelist(whitelist).build();
+
+    assertFalse(config.getHeadersWhitelist().contains("Accept-Encoding"));
+    assertEquals(whitelist, config.getHeadersWhitelist());
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testCustomWhitelistWithoutAcceptEncodingFailsWhenResponseCompressionEnabled() {
+    Set<String> whitelist = new HashSet<>(AlternatorConfig.builder().getRequiredHeaders());
+    whitelist.remove("Accept-Encoding");
+
+    AlternatorConfig.builder().withOptimizeHeaders(true).withHeadersWhitelist(whitelist).build();
+  }
+
+  @Test
   public void testUserAgentDisabledRemovesUserAgentFromRequiredHeaders() {
     AlternatorConfig config =
         AlternatorConfig.builder().withOptimizeHeaders(true).withUserAgentEnabled(false).build();
