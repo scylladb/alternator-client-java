@@ -37,6 +37,8 @@ import software.amazon.awssdk.http.SdkHttpRequest;
  * @author dmitry.kropachev
  */
 public class AlternatorLiveNodes extends Thread {
+  private static final long DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
+
   private final String alternatorScheme;
   private final int alternatorPort;
   private final AtomicReference<List<URI>> liveNodes;
@@ -61,7 +63,17 @@ public class AlternatorLiveNodes extends Thread {
         try {
           updateLiveNodes();
         } catch (IOException e) {
+          if (shutdownRequested.get()) {
+            logger.log(Level.FINE, "AlternatorLiveNodes polling stopped during shutdown", e);
+            return;
+          }
           logger.log(Level.SEVERE, "AlternatorLiveNodes failed to sync nodes list", e);
+        } catch (RuntimeException e) {
+          if (shutdownRequested.get()) {
+            logger.log(Level.FINE, "AlternatorLiveNodes polling stopped during shutdown", e);
+            return;
+          }
+          throw e;
         }
         try {
           Thread.sleep(getRefreshInterval());
@@ -96,6 +108,40 @@ public class AlternatorLiveNodes extends Thread {
   public void shutdown() {
     shutdownRequested.set(true);
     this.interrupt();
+  }
+
+  /**
+   * Initiates shutdown and waits for the background thread to stop.
+   *
+   * @return true if the thread stopped before the default timeout, false otherwise
+   * @since 2.0.5
+   */
+  public boolean shutdownAndWait() {
+    return shutdownAndWait(DEFAULT_SHUTDOWN_TIMEOUT_MS);
+  }
+
+  /**
+   * Initiates shutdown and waits up to the requested timeout for the background thread to stop.
+   *
+   * @param timeoutMs maximum time to wait in milliseconds
+   * @return true if the thread stopped before the timeout, false otherwise
+   * @since 2.0.5
+   */
+  public boolean shutdownAndWait(long timeoutMs) {
+    shutdown();
+    if (Thread.currentThread() == this) {
+      return false;
+    }
+    if (timeoutMs <= 0) {
+      return !isAlive();
+    }
+    try {
+      join(timeoutMs);
+      return !isAlive();
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      return false;
+    }
   }
 
   /**

@@ -173,7 +173,7 @@ public class AlternatorDynamoDbClientWrapper implements AutoCloseable {
    * <ul>
    *   <li>Shutting down the partition key resolver's discovery executor if key route affinity is
    *       enabled
-   *   <li>Interrupting the LiveNodes background thread
+   *   <li>Stopping the LiveNodes background thread
    *   <li>Closing the polling HTTP client
    *   <li>Closing the underlying DynamoDB client
    * </ul>
@@ -183,9 +183,7 @@ public class AlternatorDynamoDbClientWrapper implements AutoCloseable {
     if (affinityInterceptor != null) {
       affinityInterceptor.getPartitionKeyResolver().shutdown();
     }
-    // Interrupt the LiveNodes thread to stop polling
-    liveNodes.interrupt();
-    // Close the polling HTTP client
+    liveNodes.shutdownAndWait();
     if (pollingHttpClient != null) {
       pollingHttpClient.close();
     }

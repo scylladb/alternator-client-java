@@ -145,16 +145,14 @@ public class AlternatorDynamoDbAsyncClientWrapper implements AutoCloseable {
    * <p>This includes:
    *
    * <ul>
-   *   <li>Interrupting the LiveNodes background thread
+   *   <li>Stopping the LiveNodes background thread
    *   <li>Closing the polling HTTP client
    *   <li>Closing the underlying async DynamoDB client
    * </ul>
    */
   @Override
   public void close() {
-    // Interrupt the LiveNodes thread to stop polling
-    liveNodes.interrupt();
-    // Close the polling HTTP client
+    liveNodes.shutdownAndWait();
     if (pollingHttpClient != null) {
       pollingHttpClient.close();
     }
