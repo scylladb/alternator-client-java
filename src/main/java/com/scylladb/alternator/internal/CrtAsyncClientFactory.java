@@ -77,13 +77,7 @@ public final class CrtAsyncClientFactory {
       }
     }
 
-    // Validate CRT limitations
-    if (tlsConfig != null
-        && (!tlsConfig.getCustomCaCertPaths().isEmpty() || tlsConfig.hasClientCertificate())) {
-      throw new UnsupportedOperationException(
-          "Custom CA certificates and client TLS certificates are not supported with the CRT async HTTP client. "
-              + "Use Netty HTTP client instead, or use TlsConfig.trustAll() for testing.");
-    }
+    validateTlsConfig(tlsConfig);
 
     // Apply user customizer last — allows overriding any defaults
     if (customizer != null) {
@@ -97,5 +91,17 @@ public final class CrtAsyncClientFactory {
               .build());
     }
     return builder.build();
+  }
+
+  private static void validateTlsConfig(TlsConfig tlsConfig) {
+    if (tlsConfig == null) {
+      return;
+    }
+    TlsHttpClientSupport.rejectUnsupportedHostnameVerification(tlsConfig, "CRT async");
+    if (!tlsConfig.getCustomCaCertPaths().isEmpty() || tlsConfig.hasClientCertificate()) {
+      throw new UnsupportedOperationException(
+          "Custom CA certificates and client TLS certificates are not supported with the CRT async HTTP client. "
+              + "Use Netty HTTP client instead, or use TlsConfig.trustAll() for testing.");
+    }
   }
 }
