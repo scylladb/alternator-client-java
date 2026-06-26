@@ -4,9 +4,11 @@ import static org.junit.Assert.*;
 
 import com.scylladb.alternator.internal.AlternatorLiveNodes;
 import com.scylladb.alternator.internal.LazyQueryPlan;
+import java.lang.reflect.Field;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.Test;
 
 /**
@@ -182,5 +184,26 @@ public class AlternatorLiveNodesTest {
 
     assertEquals("https", result.getScheme());
     assertEquals(8043, result.getPort());
+  }
+
+  @Test(expected = IllegalStateException.class)
+  public void nextAsURIThrowsWhenLiveListIsEmpty() throws Exception {
+    URI node = new URI("http://localhost:8000");
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(node, "", "");
+
+    Field f = AlternatorLiveNodes.class.getDeclaredField("liveNodes");
+    f.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    AtomicReference<List<URI>> ref = (AtomicReference<List<URI>>) f.get(liveNodes);
+    ref.set(Collections.emptyList());
+
+    liveNodes.nextAsURI();
+  }
+
+  @Test(expected = RuntimeException.class)
+  public void constructorThrowsForInvalidScheme() {
+    // "xyz" has no registered URL handler → validateConfig()'s toURL() throws MalformedURLException
+    new AlternatorLiveNodes(
+        AlternatorConfig.builder().withSeedNode(URI.create("xyz://10.0.0.1:8000")).build());
   }
 }
