@@ -168,7 +168,7 @@ public class HeadersFilteringSdkAsyncHttpClientTest {
   }
 
   @Test
-  public void testFiltersAllSdkMetadataHeaders() {
+  public void testFiltersSdkMetadataHeadersExceptUserAgent() {
     // Use the default required headers whitelist
     AlternatorConfig config = AlternatorConfig.builder().authenticationEnabled(true).build();
     Set<String> whitelist = config.getRequiredHeaders();
@@ -188,8 +188,8 @@ public class HeadersFilteringSdkAsyncHttpClientTest {
             .appendHeader("Authorization", "AWS4-HMAC-SHA256...")
             .appendHeader("X-Amz-Date", "20240101T000000Z")
             .appendHeader("Accept-Encoding", "gzip")
-            // SDK metadata headers that should be filtered
             .appendHeader("User-Agent", "aws-sdk-java/2.x")
+            // SDK metadata headers that should be filtered
             .appendHeader("X-Amz-Sdk-Invocation-Id", "some-id")
             .appendHeader("amz-sdk-request", "attempt=1")
             .build();
@@ -205,8 +205,10 @@ public class HeadersFilteringSdkAsyncHttpClientTest {
     assertTrue(mockClient.capturedRequest.headers().containsKey("X-Amz-Date"));
     assertTrue(mockClient.capturedRequest.headers().containsKey("Accept-Encoding"));
 
-    // SDK metadata headers should be filtered
-    assertFalse(mockClient.capturedRequest.headers().containsKey("User-Agent"));
+    // User-Agent should be preserved for driver reporting; other SDK metadata is filtered
+    assertTrue(mockClient.capturedRequest.headers().containsKey("User-Agent"));
+    assertEquals(
+        "aws-sdk-java/2.x", mockClient.capturedRequest.firstMatchingHeader("User-Agent").get());
     assertFalse(mockClient.capturedRequest.headers().containsKey("X-Amz-Sdk-Invocation-Id"));
     assertFalse(mockClient.capturedRequest.headers().containsKey("amz-sdk-request"));
   }

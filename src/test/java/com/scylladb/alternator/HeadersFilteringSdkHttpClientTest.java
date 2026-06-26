@@ -7,6 +7,8 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
 import org.junit.Test;
+import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
+import software.amazon.awssdk.core.client.config.SdkAdvancedClientOption;
 import software.amazon.awssdk.http.ExecutableHttpRequest;
 import software.amazon.awssdk.http.HttpExecuteRequest;
 import software.amazon.awssdk.http.HttpExecuteResponse;
@@ -168,7 +170,7 @@ public class HeadersFilteringSdkHttpClientTest {
   }
 
   @Test
-  public void testFiltersAllSdkMetadataHeaders() {
+  public void testFiltersSdkMetadataHeadersExceptUserAgent() {
     // Use the default required headers whitelist
     AlternatorConfig config = AlternatorConfig.builder().authenticationEnabled(true).build();
     Set<String> whitelist = config.getRequiredHeaders();
@@ -188,8 +190,8 @@ public class HeadersFilteringSdkHttpClientTest {
             .appendHeader("Authorization", "AWS4-HMAC-SHA256...")
             .appendHeader("X-Amz-Date", "20240101T000000Z")
             .appendHeader("Accept-Encoding", "gzip")
-            // SDK metadata headers that should be filtered
             .appendHeader("User-Agent", "aws-sdk-java/2.x")
+            // SDK metadata headers that should be filtered
             .appendHeader("X-Amz-Sdk-Invocation-Id", "some-id")
             .appendHeader("amz-sdk-request", "attempt=1")
             .build();
@@ -208,10 +210,30 @@ public class HeadersFilteringSdkHttpClientTest {
     assertTrue(mockClient.capturedRequest.headers().containsKey("X-Amz-Date"));
     assertTrue(mockClient.capturedRequest.headers().containsKey("Accept-Encoding"));
 
-    // SDK metadata headers should be filtered
-    assertFalse(mockClient.capturedRequest.headers().containsKey("User-Agent"));
+    // User-Agent should be preserved for driver reporting; other SDK metadata is filtered
+    assertTrue(mockClient.capturedRequest.headers().containsKey("User-Agent"));
+    assertEquals(
+        "aws-sdk-java/2.x", mockClient.capturedRequest.firstMatchingHeader("User-Agent").get());
     assertFalse(mockClient.capturedRequest.headers().containsKey("X-Amz-Sdk-Invocation-Id"));
     assertFalse(mockClient.capturedRequest.headers().containsKey("amz-sdk-request"));
+  }
+
+  @Test
+  public void testAlternatorUserAgentSuffixIsAddedToOverrideConfiguration() {
+    ClientOverrideConfiguration.Builder overrideBuilder = ClientOverrideConfiguration.builder();
+
+    AlternatorUserAgent.applyDefaultSuffixTo(overrideBuilder);
+
+    String suffix =
+        overrideBuilder.build().advancedOption(SdkAdvancedClientOption.USER_AGENT_SUFFIX).get();
+    assertEquals(AlternatorUserAgent.userAgentToken(), suffix);
+  }
+
+  @Test
+  public void testAlternatorUserAgentSuffixPreservesExistingSuffix() {
+    assertEquals(
+        "custom/1 " + AlternatorUserAgent.userAgentToken(),
+        AlternatorUserAgent.appendToken("custom/1", AlternatorUserAgent.userAgentToken()));
   }
 
   @Test

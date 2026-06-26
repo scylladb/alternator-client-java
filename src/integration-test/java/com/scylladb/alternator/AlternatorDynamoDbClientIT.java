@@ -472,7 +472,7 @@ public class AlternatorDynamoDbClientIT {
           }
         };
 
-    // Custom whitelist that includes User-Agent but excludes some default headers
+    // Custom whitelist that keeps User-Agent while filtering non-required SDK metadata
     Set<String> customWhitelist =
         new HashSet<>(
             java.util.Arrays.asList(

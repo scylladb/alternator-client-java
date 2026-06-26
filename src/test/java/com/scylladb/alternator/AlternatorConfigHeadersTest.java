@@ -152,7 +152,38 @@ public class AlternatorConfigHeadersTest {
     assertTrue(headers.contains("Authorization"));
     assertTrue(headers.contains("X-Amz-Date"));
     assertTrue(headers.contains("Connection"));
-    assertEquals(9, headers.size());
+    assertTrue(headers.contains("User-Agent"));
+    assertEquals(10, headers.size());
+  }
+
+  @Test
+  public void testUserAgentDisabledRemovesUserAgentFromRequiredHeaders() {
+    AlternatorConfig config =
+        AlternatorConfig.builder().withOptimizeHeaders(true).withUserAgentEnabled(false).build();
+
+    assertFalse(config.isUserAgentEnabled());
+    assertFalse(config.getRequiredHeaders().contains("User-Agent"));
+    assertFalse(config.getHeadersWhitelist().contains("User-Agent"));
+  }
+
+  @Test
+  public void testCustomWhitelistWithoutUserAgentSucceedsWhenUserAgentDisabled() {
+    AlternatorConfig.Builder builder =
+        AlternatorConfig.builder().withOptimizeHeaders(true).withUserAgentEnabled(false);
+    Set<String> whitelist = new HashSet<>(builder.getRequiredHeaders());
+
+    AlternatorConfig config = builder.withHeadersWhitelist(whitelist).build();
+
+    assertFalse(config.getHeadersWhitelist().contains("User-Agent"));
+    assertEquals(whitelist, config.getHeadersWhitelist());
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testCustomWhitelistWithoutUserAgentFailsWhenUserAgentEnabled() {
+    Set<String> whitelist = new HashSet<>(AlternatorConfig.builder().getRequiredHeaders());
+    whitelist.remove("User-Agent");
+
+    AlternatorConfig.builder().withOptimizeHeaders(true).withHeadersWhitelist(whitelist).build();
   }
 
   @Test
@@ -196,6 +227,7 @@ public class AlternatorConfigHeadersTest {
     assertFalse(whitelist.contains("X-Amz-Date"));
     // Without compression enabled, Content-Encoding is not included
     assertFalse(whitelist.contains("Content-Encoding"));
+    assertTrue(whitelist.contains("User-Agent"));
     assertEquals(config.getRequiredHeaders(), whitelist);
   }
 
@@ -237,7 +269,8 @@ public class AlternatorConfigHeadersTest {
     assertFalse(noAuthHeaders.contains("Authorization"));
     assertFalse(noAuthHeaders.contains("X-Amz-Date"));
     assertTrue(noAuthHeaders.contains("Connection"));
-    assertEquals(7, noAuthHeaders.size());
+    assertTrue(noAuthHeaders.contains("User-Agent"));
+    assertEquals(8, noAuthHeaders.size());
   }
 
   @Test
@@ -248,16 +281,17 @@ public class AlternatorConfigHeadersTest {
             .withCompressionAlgorithm(RequestCompressionAlgorithm.NONE)
             .authenticationEnabled(false)
             .build();
-    assertEquals(6, noCompressionNoAuth.getRequiredHeaders().size());
+    assertEquals(7, noCompressionNoAuth.getRequiredHeaders().size());
     assertFalse(noCompressionNoAuth.getRequiredHeaders().contains("Content-Encoding"));
     assertFalse(noCompressionNoAuth.getRequiredHeaders().contains("Authorization"));
+    assertTrue(noCompressionNoAuth.getRequiredHeaders().contains("User-Agent"));
 
     AlternatorConfig withCompressionNoAuth =
         AlternatorConfig.builder()
             .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
             .authenticationEnabled(false)
             .build();
-    assertEquals(7, withCompressionNoAuth.getRequiredHeaders().size());
+    assertEquals(8, withCompressionNoAuth.getRequiredHeaders().size());
     assertTrue(withCompressionNoAuth.getRequiredHeaders().contains("Content-Encoding"));
     assertFalse(withCompressionNoAuth.getRequiredHeaders().contains("Authorization"));
 
@@ -266,7 +300,7 @@ public class AlternatorConfigHeadersTest {
             .withCompressionAlgorithm(RequestCompressionAlgorithm.NONE)
             .authenticationEnabled(true)
             .build();
-    assertEquals(8, noCompressionWithAuth.getRequiredHeaders().size());
+    assertEquals(9, noCompressionWithAuth.getRequiredHeaders().size());
     assertFalse(noCompressionWithAuth.getRequiredHeaders().contains("Content-Encoding"));
     assertTrue(noCompressionWithAuth.getRequiredHeaders().contains("Authorization"));
 
@@ -275,7 +309,7 @@ public class AlternatorConfigHeadersTest {
             .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
             .authenticationEnabled(true)
             .build();
-    assertEquals(9, withCompressionWithAuth.getRequiredHeaders().size());
+    assertEquals(10, withCompressionWithAuth.getRequiredHeaders().size());
     assertTrue(withCompressionWithAuth.getRequiredHeaders().contains("Content-Encoding"));
     assertTrue(withCompressionWithAuth.getRequiredHeaders().contains("Authorization"));
   }
@@ -286,20 +320,21 @@ public class AlternatorConfigHeadersTest {
     AlternatorConfig.Builder builder = AlternatorConfig.builder();
     Set<String> defaultRequired = builder.getRequiredHeaders();
     // Default is no compression, with auth
-    assertEquals(8, defaultRequired.size());
+    assertEquals(9, defaultRequired.size());
     assertFalse(defaultRequired.contains("Content-Encoding"));
     assertTrue(defaultRequired.contains("Authorization"));
+    assertTrue(defaultRequired.contains("User-Agent"));
 
     // Enable compression
     builder.withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP);
     Set<String> withCompression = builder.getRequiredHeaders();
-    assertEquals(9, withCompression.size());
+    assertEquals(10, withCompression.size());
     assertTrue(withCompression.contains("Content-Encoding"));
 
     // Disable auth
     builder.authenticationEnabled(false);
     Set<String> noAuth = builder.getRequiredHeaders();
-    assertEquals(7, noAuth.size());
+    assertEquals(8, noAuth.size());
     assertTrue(noAuth.contains("Content-Encoding"));
     assertFalse(noAuth.contains("Authorization"));
   }
@@ -313,9 +348,10 @@ public class AlternatorConfigHeadersTest {
             .build();
 
     Set<String> required = config.getRequiredHeaders();
-    assertEquals(9, required.size());
+    assertEquals(10, required.size());
     assertTrue(required.contains("Content-Encoding"));
     assertTrue(required.contains("Authorization"));
+    assertTrue(required.contains("User-Agent"));
   }
 
   @Test(expected = IllegalArgumentException.class)

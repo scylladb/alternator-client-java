@@ -14,6 +14,7 @@ import java.net.URI;
 import java.util.Collection;
 import java.util.Objects;
 import java.util.function.Consumer;
+import java.util.function.UnaryOperator;
 import software.amazon.awssdk.auth.credentials.AnonymousCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
 import software.amazon.awssdk.awscore.endpoints.AccountIdEndpointMode;
@@ -95,9 +96,13 @@ public class AlternatorDynamoDbAsyncClient {
     private boolean disableCertificateChecks = false;
     private boolean httpClientSet = false;
     private boolean credentialsProviderSet = false;
+    private SdkAsyncHttpClient customHttpClient;
+    private SdkAsyncHttpClient.Builder customHttpClientBuilder;
     private Consumer<NettyNioAsyncHttpClient.Builder> nettyCustomizer;
     private Consumer<AwsCrtAsyncHttpClient.Builder> crtAsyncCustomizer;
     private HttpClientType httpClientType;
+    private UnaryOperator<String> userAgentTransformer;
+    private boolean defaultUserAgentSuffixEnabled = true;
 
     private AlternatorDynamoDbAsyncClientBuilder() {
       this.delegate = DynamoDbAsyncClient.builder();
@@ -161,6 +166,57 @@ public class AlternatorDynamoDbAsyncClient {
      */
     public AlternatorDynamoDbAsyncClientBuilder withHeadersWhitelist(Collection<String> headers) {
       configBuilder.withHeadersWhitelist(headers);
+      return this;
+    }
+
+    /**
+     * Replaces the final {@code User-Agent} header with the provided value.
+     *
+     * @param userAgent the exact user-agent value to send
+     * @return this builder instance
+     * @throws IllegalArgumentException if userAgent is null or blank
+     * @since 2.0.5
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withUserAgent(String userAgent) {
+      this.userAgentTransformer = AlternatorUserAgent.replaceWith(userAgent);
+      this.defaultUserAgentSuffixEnabled = false;
+      configBuilder.withUserAgentEnabled(true);
+      return this;
+    }
+
+    /**
+     * Transforms the final {@code User-Agent} header before the request is sent.
+     *
+     * <p>The function receives the AWS SDK user-agent with the default ScyllaDB Alternator client
+     * token appended. Returning null or blank removes the {@code User-Agent} header.
+     *
+     * @param userAgentTransformer function that maps the generated user-agent to the value to send
+     * @return this builder instance
+     * @throws IllegalArgumentException if userAgentTransformer is null
+     * @since 2.0.5
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withUserAgent(
+        UnaryOperator<String> userAgentTransformer) {
+      this.userAgentTransformer =
+          AlternatorUserAgent.requireUserAgentTransformer(userAgentTransformer);
+      this.defaultUserAgentSuffixEnabled = true;
+      configBuilder.withUserAgentEnabled(true);
+      return this;
+    }
+
+    /**
+     * Removes the {@code User-Agent} header from outgoing requests.
+     *
+     * <p>When header optimization is enabled, {@code User-Agent} is also removed from the required
+     * optimized header whitelist.
+     *
+     * @return this builder instance
+     * @since 2.0.5
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withoutUserAgent() {
+      this.userAgentTransformer = AlternatorUserAgent.disable();
+      this.defaultUserAgentSuffixEnabled = false;
+      configBuilder.withUserAgentEnabled(false);
       return this;
     }
 
@@ -320,6 +376,7 @@ public class AlternatorDynamoDbAsyncClient {
         configBuilder.withMinCompressionSizeBytes(config.getMinCompressionSizeBytes());
         configBuilder.withOptimizeHeaders(config.isOptimizeHeaders());
         configBuilder.withHeadersWhitelist(config.getHeadersWhitelist());
+        configBuilder.withUserAgentEnabled(config.isUserAgentEnabled());
         configBuilder.withTlsConfig(config.getTlsConfig());
         configBuilder.withTlsSessionCacheConfig(config.getTlsSessionCacheConfig());
         configBuilder.withKeyRouteAffinity(config.getKeyRouteAffinityConfig());
@@ -449,7 +506,8 @@ public class AlternatorDynamoDbAsyncClient {
     @Override
     public AlternatorDynamoDbAsyncClientBuilder httpClient(SdkAsyncHttpClient httpClient) {
       this.httpClientSet = true;
-      delegate.httpClient(httpClient);
+      this.customHttpClient = httpClient;
+      this.customHttpClientBuilder = null;
       return this;
     }
 
@@ -458,7 +516,8 @@ public class AlternatorDynamoDbAsyncClient {
     public AlternatorDynamoDbAsyncClientBuilder httpClientBuilder(
         SdkAsyncHttpClient.Builder httpClientBuilder) {
       this.httpClientSet = true;
-      delegate.httpClientBuilder(httpClientBuilder);
+      this.customHttpClient = null;
+      this.customHttpClientBuilder = httpClientBuilder;
       return this;
     }
 
@@ -596,19 +655,12 @@ public class AlternatorDynamoDbAsyncClient {
       }
 
       TlsConfig tlsConfig = alternatorConfig.getTlsConfig();
-      boolean optimizeHeaders = alternatorConfig.isOptimizeHeaders();
-
       if (!httpClientSet) {
         SdkAsyncHttpClient mainClient =
             createMainAsyncClient(asyncType, alternatorConfig, tlsConfig);
-
-        if (optimizeHeaders) {
-          delegate.httpClient(
-              new HeadersFilteringSdkAsyncHttpClient(
-                  mainClient, alternatorConfig.getHeadersWhitelist()));
-        } else {
-          delegate.httpClient(mainClient);
-        }
+        delegate.httpClient(configureMainAsyncClient(mainClient, alternatorConfig));
+      } else {
+        configureCustomAsyncClient(alternatorConfig);
       }
 
       SyncClientDetector.SyncClientType syncType = SyncClientDetector.detect();
@@ -630,6 +682,9 @@ public class AlternatorDynamoDbAsyncClient {
             new AffinityQueryPlanInterceptor(keyAffinityConfig, liveNodes));
       } else {
         overrideBuilder.addExecutionInterceptor(new BasicQueryPlanInterceptor(liveNodes));
+      }
+      if (defaultUserAgentSuffixEnabled) {
+        AlternatorUserAgent.applyDefaultSuffixTo(overrideBuilder);
       }
       delegate.overrideConfiguration(overrideBuilder.build());
 
@@ -725,6 +780,42 @@ public class AlternatorDynamoDbAsyncClient {
         default:
           throw new IllegalStateException("Unknown async client type: " + asyncType);
       }
+    }
+
+    private SdkAsyncHttpClient configureMainAsyncClient(
+        SdkAsyncHttpClient mainClient, AlternatorConfig alternatorConfig) {
+      SdkAsyncHttpClient configuredClient = mainClient;
+      if (userAgentTransformer != null) {
+        configuredClient = new UserAgentSdkAsyncHttpClient(configuredClient, userAgentTransformer);
+      }
+      if (alternatorConfig.isOptimizeHeaders()) {
+        configuredClient =
+            new HeadersFilteringSdkAsyncHttpClient(
+                configuredClient, alternatorConfig.getHeadersWhitelist());
+      }
+      return configuredClient;
+    }
+
+    private void configureCustomAsyncClient(AlternatorConfig alternatorConfig) {
+      if (customHttpClient != null) {
+        delegate.httpClient(configureMainAsyncClient(customHttpClient, alternatorConfig));
+        return;
+      }
+
+      if (customHttpClientBuilder == null) {
+        return;
+      }
+
+      if (needsHttpClientWrapper(alternatorConfig)) {
+        delegate.httpClient(
+            configureMainAsyncClient(customHttpClientBuilder.build(), alternatorConfig));
+      } else {
+        delegate.httpClientBuilder(customHttpClientBuilder);
+      }
+    }
+
+    private boolean needsHttpClientWrapper(AlternatorConfig alternatorConfig) {
+      return userAgentTransformer != null || alternatorConfig.isOptimizeHeaders();
     }
   }
 }

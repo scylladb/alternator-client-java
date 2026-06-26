@@ -4,6 +4,7 @@ import static org.junit.Assert.*;
 
 import com.scylladb.alternator.internal.AsyncClientDetector;
 import java.net.URI;
+import java.util.function.UnaryOperator;
 import org.junit.Test;
 import software.amazon.awssdk.http.async.SdkAsyncHttpClient;
 import software.amazon.awssdk.http.nio.netty.NettyNioAsyncHttpClient;
@@ -157,6 +158,33 @@ public class AlternatorDynamoDbAsyncClientCustomizerTest {
             .endpointOverride(SEED_URI)
             .withHttpClientType(HttpClientType.NETTY);
     assertNotNull("Builder should return itself for chaining", builder);
+  }
+
+  @Test
+  public void testUserAgentBuilderMethodsReturnThis() {
+    AlternatorDynamoDbAsyncClient.AlternatorDynamoDbAsyncClientBuilder builder =
+        AlternatorDynamoDbAsyncClient.builder().endpointOverride(SEED_URI);
+
+    assertSame(builder, builder.withUserAgent("custom/1"));
+    assertSame(builder, builder.withUserAgent(userAgent -> userAgent + " app/1"));
+    assertSame(builder, builder.withoutUserAgent());
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testWithUserAgentRejectsNullString() {
+    AlternatorDynamoDbAsyncClient.builder().endpointOverride(SEED_URI).withUserAgent((String) null);
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testWithUserAgentRejectsBlankString() {
+    AlternatorDynamoDbAsyncClient.builder().endpointOverride(SEED_URI).withUserAgent(" ");
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testWithUserAgentRejectsNullTransformer() {
+    AlternatorDynamoDbAsyncClient.builder()
+        .endpointOverride(SEED_URI)
+        .withUserAgent((UnaryOperator<String>) null);
   }
 
   @Test
