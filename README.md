@@ -657,6 +657,40 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
     .build();
 ```
 
+### TLS Client Certificate Authentication
+
+Alternator clusters that require TLS client certificates can be used by configuring client key
+material in `TlsConfig`. The certificate file must be PEM-encoded and may contain the full
+certificate chain. The private key file must be an unencrypted PKCS#8 PEM key.
+
+```java
+import com.scylladb.alternator.AlternatorDynamoDbClient;
+import com.scylladb.alternator.HttpClientType;
+import com.scylladb.alternator.TlsConfig;
+import java.nio.file.Paths;
+
+TlsConfig tlsConfig = TlsConfig.builder()
+    .withCaCertPath(Paths.get("/path/to/ca.pem"))
+    .withTrustSystemCaCerts(false)
+    .withClientCertificate(
+        Paths.get("/path/to/client.crt"),
+        Paths.get("/path/to/client.key"))
+    .build();
+
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://localhost:8043"))
+    .withHttpClientType(HttpClientType.APACHE)
+    .withTlsConfig(tlsConfig)
+    .build();
+```
+
+For async clients, use `HttpClientType.NETTY`. The CRT HTTP client does not expose key-manager
+configuration in the AWS SDK, so client certificates are not supported with `HttpClientType.CRT`.
+
+When the cluster authenticates clients by TLS certificate and SigV4 signing is not needed, omit
+`credentialsProvider(...)`. The Alternator builders automatically use anonymous credentials and do
+not generate authentication headers in that mode.
+
 ### TLS Session Tickets
 
 The library supports TLS session tickets (RFC 5077) for quick TLS renegotiation when using HTTPS

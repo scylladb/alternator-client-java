@@ -155,6 +155,17 @@ public class ApacheSyncClientFactoryTest {
   }
 
   @Test(expected = RuntimeException.class)
+  public void testCreateWithInvalidClientCertificatePathThrows() {
+    TlsConfig tlsConfig =
+        TlsConfig.builder()
+            .withTrustAllCertificates(true)
+            .withClientCertificate(
+                Path.of("/non/existent/client.crt"), Path.of("/non/existent/client.key"))
+            .build();
+    ApacheSyncClientFactory.create(null, null, tlsConfig);
+  }
+
+  @Test(expected = RuntimeException.class)
   public void testCreateWithInvalidCaCertContentThrows() throws Exception {
     Path tempFile = Files.createTempFile("invalid-ca-", ".pem");
     try {
@@ -173,6 +184,17 @@ public class ApacheSyncClientFactoryTest {
         TlsConfig.builder()
             .withCaCertPath(Path.of("/non/existent/ca.pem"))
             .withTrustSystemCaCerts(false)
+            .build();
+    ApacheSyncClientFactory.createPollingClient(tlsConfig);
+  }
+
+  @Test(expected = RuntimeException.class)
+  public void testCreatePollingClientWithInvalidClientCertificatePathThrows() {
+    TlsConfig tlsConfig =
+        TlsConfig.builder()
+            .withTrustAllCertificates(true)
+            .withClientCertificate(
+                Path.of("/non/existent/client.crt"), Path.of("/non/existent/client.key"))
             .build();
     ApacheSyncClientFactory.createPollingClient(tlsConfig);
   }

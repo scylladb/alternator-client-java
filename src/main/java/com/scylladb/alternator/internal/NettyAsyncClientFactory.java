@@ -5,6 +5,7 @@ import com.scylladb.alternator.TlsConfig;
 import java.time.Duration;
 import java.util.function.Consumer;
 import java.util.logging.Logger;
+import javax.net.ssl.KeyManager;
 import javax.net.ssl.TrustManager;
 import software.amazon.awssdk.http.SdkHttpConfigurationOption;
 import software.amazon.awssdk.http.async.SdkAsyncHttpClient;
@@ -70,13 +71,7 @@ public final class NettyAsyncClientFactory {
       }
     }
 
-    // Apply TLS trust manager settings (not buildWithDefaults — that happens at build time)
-    if (tlsConfig != null
-        && !tlsConfig.isTrustAllCertificates()
-        && (!tlsConfig.getCustomCaCertPaths().isEmpty() || !tlsConfig.isTrustSystemCaCerts())) {
-      TrustManager[] trustManagers = TlsContextFactory.createTrustManagers(tlsConfig);
-      builder.tlsTrustManagersProvider(() -> trustManagers);
-    }
+    applyTlsManagers(builder, tlsConfig);
 
     // Apply user customizer last — allows overriding any defaults including TLS
     if (customizer != null) {
@@ -91,5 +86,21 @@ public final class NettyAsyncClientFactory {
               .build());
     }
     return builder.build();
+  }
+
+  private static void applyTlsManagers(
+      NettyNioAsyncHttpClient.Builder builder, TlsConfig tlsConfig) {
+    if (tlsConfig == null) {
+      return;
+    }
+    if (tlsConfig.hasClientCertificate()) {
+      KeyManager[] keyManagers = TlsContextFactory.createKeyManagers(tlsConfig);
+      builder.tlsKeyManagersProvider(() -> keyManagers);
+    }
+    if (!tlsConfig.isTrustAllCertificates()
+        && (!tlsConfig.getCustomCaCertPaths().isEmpty() || !tlsConfig.isTrustSystemCaCerts())) {
+      TrustManager[] trustManagers = TlsContextFactory.createTrustManagers(tlsConfig);
+      builder.tlsTrustManagersProvider(() -> trustManagers);
+    }
   }
 }

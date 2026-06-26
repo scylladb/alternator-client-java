@@ -193,6 +193,16 @@ public class CrtSyncClientFactoryTest {
     CrtSyncClientFactory.create(null, null, tlsConfig);
   }
 
+  @Test(expected = UnsupportedOperationException.class)
+  public void testCreateWithClientCertificateThrows() {
+    TlsConfig tlsConfig =
+        TlsConfig.builder()
+            .withTrustAllCertificates(true)
+            .withClientCertificate(Path.of("/client.crt"), Path.of("/client.key"))
+            .build();
+    CrtSyncClientFactory.create(null, null, tlsConfig);
+  }
+
   @Test(expected = RuntimeException.class)
   public void testCreateWithInvalidCaCertContentThrows() throws Exception {
     Path tempFile = Files.createTempFile("invalid-ca-", ".pem");
@@ -212,6 +222,16 @@ public class CrtSyncClientFactoryTest {
         TlsConfig.builder()
             .withCaCertPath(Path.of("/non/existent/ca.pem"))
             .withTrustSystemCaCerts(false)
+            .build();
+    CrtSyncClientFactory.createPollingClient(tlsConfig);
+  }
+
+  @Test(expected = UnsupportedOperationException.class)
+  public void testCreatePollingClientWithClientCertificateThrows() {
+    TlsConfig tlsConfig =
+        TlsConfig.builder()
+            .withTrustAllCertificates(true)
+            .withClientCertificate(Path.of("/client.crt"), Path.of("/client.key"))
             .build();
     CrtSyncClientFactory.createPollingClient(tlsConfig);
   }

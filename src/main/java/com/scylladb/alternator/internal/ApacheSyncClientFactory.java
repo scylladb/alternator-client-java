@@ -4,6 +4,7 @@ import com.scylladb.alternator.AlternatorConfig;
 import com.scylladb.alternator.TlsConfig;
 import java.time.Duration;
 import java.util.function.Consumer;
+import javax.net.ssl.KeyManager;
 import javax.net.ssl.TrustManager;
 import software.amazon.awssdk.http.SdkHttpClient;
 import software.amazon.awssdk.http.SdkHttpConfigurationOption;
@@ -53,13 +54,7 @@ public final class ApacheSyncClientFactory {
       builder.connectionTimeout(Duration.ofMillis(config.getConnectionTimeoutMs()));
     }
 
-    // Apply TLS trust manager settings
-    if (tlsConfig != null
-        && !tlsConfig.isTrustAllCertificates()
-        && (!tlsConfig.getCustomCaCertPaths().isEmpty() || !tlsConfig.isTrustSystemCaCerts())) {
-      TrustManager[] trustManagers = TlsContextFactory.createTrustManagers(tlsConfig);
-      builder.tlsTrustManagersProvider(() -> trustManagers);
-    }
+    applyTlsManagers(builder, tlsConfig);
 
     // Apply user customizer last — allows overriding any defaults including TLS
     if (customizer != null) {
@@ -91,18 +86,29 @@ public final class ApacheSyncClientFactory {
 
   private static SdkHttpClient buildWithTls(ApacheHttpClient.Builder builder, TlsConfig tlsConfig) {
     if (tlsConfig != null) {
+      applyTlsManagers(builder, tlsConfig);
       if (tlsConfig.isTrustAllCertificates()) {
         return builder.buildWithDefaults(
             AttributeMap.builder()
                 .put(SdkHttpConfigurationOption.TRUST_ALL_CERTIFICATES, true)
                 .build());
       }
-      if (!tlsConfig.getCustomCaCertPaths().isEmpty() || !tlsConfig.isTrustSystemCaCerts()) {
-        // Eagerly validate to fail fast on invalid cert paths
-        TrustManager[] trustManagers = TlsContextFactory.createTrustManagers(tlsConfig);
-        builder.tlsTrustManagersProvider(() -> trustManagers);
-      }
     }
     return builder.build();
+  }
+
+  private static void applyTlsManagers(ApacheHttpClient.Builder builder, TlsConfig tlsConfig) {
+    if (tlsConfig == null) {
+      return;
+    }
+    if (tlsConfig.hasClientCertificate()) {
+      KeyManager[] keyManagers = TlsContextFactory.createKeyManagers(tlsConfig);
+      builder.tlsKeyManagersProvider(() -> keyManagers);
+    }
+    if (!tlsConfig.isTrustAllCertificates()
+        && (!tlsConfig.getCustomCaCertPaths().isEmpty() || !tlsConfig.isTrustSystemCaCerts())) {
+      TrustManager[] trustManagers = TlsContextFactory.createTrustManagers(tlsConfig);
+      builder.tlsTrustManagersProvider(() -> trustManagers);
+    }
   }
 }

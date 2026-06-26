@@ -76,9 +76,10 @@ public final class CrtSyncClientFactory {
     }
 
     // Validate CRT limitations before customizer
-    if (tlsConfig != null && !tlsConfig.getCustomCaCertPaths().isEmpty()) {
+    if (tlsConfig != null
+        && (!tlsConfig.getCustomCaCertPaths().isEmpty() || tlsConfig.hasClientCertificate())) {
       throw new UnsupportedOperationException(
-          "Custom CA certificates are not supported with the CRT HTTP client. "
+          "Custom CA certificates and client TLS certificates are not supported with the CRT HTTP client. "
               + "Use Apache or Netty HTTP client instead, or use TlsConfig.trustAll() for testing.");
     }
 
@@ -97,9 +98,10 @@ public final class CrtSyncClientFactory {
    * @return a configured SdkHttpClient with small pool size
    */
   public static SdkHttpClient createPollingClient(TlsConfig tlsConfig) {
-    if (tlsConfig != null && !tlsConfig.getCustomCaCertPaths().isEmpty()) {
+    if (tlsConfig != null
+        && (!tlsConfig.getCustomCaCertPaths().isEmpty() || tlsConfig.hasClientCertificate())) {
       throw new UnsupportedOperationException(
-          "Custom CA certificates are not supported with the CRT HTTP client. "
+          "Custom CA certificates and client TLS certificates are not supported with the CRT HTTP client. "
               + "Use Apache or Netty HTTP client instead, or use TlsConfig.trustAll() for testing.");
     }
     AwsCrtHttpClient.Builder builder = AwsCrtHttpClient.builder();
@@ -115,9 +117,9 @@ public final class CrtSyncClientFactory {
 
   private static SdkHttpClient buildWithTls(AwsCrtHttpClient.Builder builder, TlsConfig tlsConfig) {
     if (tlsConfig != null) {
-      if (!tlsConfig.getCustomCaCertPaths().isEmpty()) {
+      if (!tlsConfig.getCustomCaCertPaths().isEmpty() || tlsConfig.hasClientCertificate()) {
         throw new UnsupportedOperationException(
-            "Custom CA certificates are not supported with the CRT HTTP client. "
+            "Custom CA certificates and client TLS certificates are not supported with the CRT HTTP client. "
                 + "Use Apache or Netty HTTP client instead, or use TlsConfig.trustAll() for testing.");
       }
       if (tlsConfig.isTrustAllCertificates()) {
