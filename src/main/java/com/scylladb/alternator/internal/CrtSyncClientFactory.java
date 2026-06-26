@@ -122,6 +122,7 @@ public final class CrtSyncClientFactory {
       return;
     }
     TlsHttpClientSupport.rejectUnsupportedHostnameVerification(tlsConfig, "CRT sync");
+    TlsSessionCacheSupport.rejectUnsupportedSessionCacheConfig(tlsConfig, "CRT sync");
     if (!tlsConfig.getCustomCaCertPaths().isEmpty() || tlsConfig.hasClientCertificate()) {
       throw new UnsupportedOperationException(
           "Custom CA certificates and client TLS certificates are not supported with the CRT HTTP client. "

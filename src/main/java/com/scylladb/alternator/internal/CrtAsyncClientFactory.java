@@ -98,6 +98,7 @@ public final class CrtAsyncClientFactory {
       return;
     }
     TlsHttpClientSupport.rejectUnsupportedHostnameVerification(tlsConfig, "CRT async");
+    TlsSessionCacheSupport.rejectUnsupportedSessionCacheConfig(tlsConfig, "CRT async");
     if (!tlsConfig.getCustomCaCertPaths().isEmpty() || tlsConfig.hasClientCertificate()) {
       throw new UnsupportedOperationException(
           "Custom CA certificates and client TLS certificates are not supported with the CRT async HTTP client. "

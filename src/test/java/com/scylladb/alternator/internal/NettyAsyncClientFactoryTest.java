@@ -4,6 +4,7 @@ import static org.junit.Assert.*;
 
 import com.scylladb.alternator.AlternatorConfig;
 import com.scylladb.alternator.TlsConfig;
+import com.scylladb.alternator.TlsSessionCacheConfig;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -100,6 +101,13 @@ public class NettyAsyncClientFactoryTest {
   @Test(expected = UnsupportedOperationException.class)
   public void testCreateWithHostnameVerificationDisabledThrows() {
     TlsConfig tlsConfig = TlsConfig.builder().withVerifyHostname(false).build();
+    NettyAsyncClientFactory.create(null, null, tlsConfig);
+  }
+
+  @Test(expected = UnsupportedOperationException.class)
+  public void testCreateWithCustomSessionCacheThrows() {
+    TlsConfig tlsConfig =
+        TlsConfig.builder().withSessionCacheConfig(TlsSessionCacheConfig.disabled()).build();
     NettyAsyncClientFactory.create(null, null, tlsConfig);
   }
 

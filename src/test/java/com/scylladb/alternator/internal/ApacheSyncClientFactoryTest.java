@@ -4,6 +4,7 @@ import static org.junit.Assert.*;
 
 import com.scylladb.alternator.AlternatorConfig;
 import com.scylladb.alternator.TlsConfig;
+import com.scylladb.alternator.TlsSessionCacheConfig;
 import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -118,6 +119,27 @@ public class ApacheSyncClientFactoryTest {
   }
 
   @Test
+  public void testCreateWithCustomSessionCacheUsesCustomSocketFactory() {
+    TlsConfig tlsConfig =
+        TlsConfig.builder()
+            .withSessionCacheConfig(
+                TlsSessionCacheConfig.builder()
+                    .withSessionCacheSize(64)
+                    .withSessionTimeoutSeconds(300)
+                    .build())
+            .build();
+    AtomicReference<ConnectionSocketFactory> socketFactory = new AtomicReference<>();
+    SdkHttpClient client =
+        ApacheSyncClientFactory.create(
+            builder -> socketFactory.set(readSocketFactory(builder)), null, tlsConfig);
+
+    assertTrue(
+        "Should use a custom SSL socket factory for custom TLS session cache config",
+        socketFactory.get() instanceof SSLConnectionSocketFactory);
+    client.close();
+  }
+
+  @Test
   public void testCreateWithConfigAndTls() {
     AlternatorConfig config =
         AlternatorConfig.builder()
@@ -168,6 +190,15 @@ public class ApacheSyncClientFactoryTest {
     TlsConfig tlsConfig = TlsConfig.builder().withVerifyHostname(false).build();
     SdkHttpClient client = ApacheSyncClientFactory.createPollingClient(tlsConfig);
     assertNotNull("Should create polling client with hostname verification disabled", client);
+    client.close();
+  }
+
+  @Test
+  public void testCreatePollingClientWithCustomSessionCache() {
+    TlsConfig tlsConfig =
+        TlsConfig.builder().withSessionCacheConfig(TlsSessionCacheConfig.disabled()).build();
+    SdkHttpClient client = ApacheSyncClientFactory.createPollingClient(tlsConfig);
+    assertNotNull("Should create polling client with custom TLS session cache config", client);
     client.close();
   }
 
