@@ -105,9 +105,13 @@ public final class ApacheSyncClientFactory {
     if (tlsConfig == null) {
       return;
     }
-    if (TlsHttpClientSupport.requiresHostnameVerificationDisabled(tlsConfig)) {
+    if (TlsHttpClientSupport.requiresHostnameVerificationDisabled(tlsConfig)
+        || TlsSessionCacheSupport.hasCustomSessionCacheConfig(tlsConfig)) {
       SSLContext sslContext = TlsContextFactory.createSslContext(tlsConfig);
-      HostnameVerifier hostnameVerifier = NoopHostnameVerifier.INSTANCE;
+      HostnameVerifier hostnameVerifier =
+          tlsConfig.isVerifyHostname()
+              ? SSLConnectionSocketFactory.getDefaultHostnameVerifier()
+              : NoopHostnameVerifier.INSTANCE;
       builder.socketFactory(new SSLConnectionSocketFactory(sslContext, hostnameVerifier));
       return;
     }

@@ -755,6 +755,10 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
     .build();
 ```
 
+Custom session cache settings are applied by the Apache sync HTTP client. The AWS SDK Netty and
+CRT HTTP clients do not expose TLS session cache controls, so non-default session cache settings are
+rejected for those client types instead of being silently ignored.
+
 #### Disabling TLS session caching
 
 If you need to disable TLS session caching:

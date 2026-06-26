@@ -4,6 +4,7 @@ import static org.junit.Assert.*;
 
 import com.scylladb.alternator.AlternatorConfig;
 import com.scylladb.alternator.TlsConfig;
+import com.scylladb.alternator.TlsSessionCacheConfig;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -108,6 +109,13 @@ public class CrtSyncClientFactoryTest {
     CrtSyncClientFactory.create(null, null, tlsConfig);
   }
 
+  @Test(expected = UnsupportedOperationException.class)
+  public void testCreateWithCustomSessionCacheThrows() {
+    TlsConfig tlsConfig =
+        TlsConfig.builder().withSessionCacheConfig(TlsSessionCacheConfig.disabled()).build();
+    CrtSyncClientFactory.create(null, null, tlsConfig);
+  }
+
   @Test
   public void testCreateWithConfigAndTls() {
     AlternatorConfig config =
@@ -157,6 +165,13 @@ public class CrtSyncClientFactoryTest {
   @Test(expected = UnsupportedOperationException.class)
   public void testCreatePollingClientWithHostnameVerificationDisabledThrows() {
     TlsConfig tlsConfig = TlsConfig.builder().withVerifyHostname(false).build();
+    CrtSyncClientFactory.createPollingClient(tlsConfig);
+  }
+
+  @Test(expected = UnsupportedOperationException.class)
+  public void testCreatePollingClientWithCustomSessionCacheThrows() {
+    TlsConfig tlsConfig =
+        TlsConfig.builder().withSessionCacheConfig(TlsSessionCacheConfig.disabled()).build();
     CrtSyncClientFactory.createPollingClient(tlsConfig);
   }
 

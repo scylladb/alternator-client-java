@@ -94,6 +94,7 @@ public final class NettyAsyncClientFactory {
       return;
     }
     TlsHttpClientSupport.rejectUnsupportedHostnameVerification(tlsConfig, "Netty async");
+    TlsSessionCacheSupport.rejectUnsupportedSessionCacheConfig(tlsConfig, "Netty async");
     if (tlsConfig.hasClientCertificate()) {
       KeyManager[] keyManagers = TlsContextFactory.createKeyManagers(tlsConfig);
       builder.tlsKeyManagersProvider(() -> keyManagers);

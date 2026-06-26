@@ -4,6 +4,7 @@ import static org.junit.Assert.*;
 
 import com.scylladb.alternator.AlternatorConfig;
 import com.scylladb.alternator.TlsConfig;
+import com.scylladb.alternator.TlsSessionCacheConfig;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -105,6 +106,13 @@ public class CrtAsyncClientFactoryTest {
   @Test(expected = UnsupportedOperationException.class)
   public void testCreateWithHostnameVerificationDisabledThrows() {
     TlsConfig tlsConfig = TlsConfig.builder().withVerifyHostname(false).build();
+    CrtAsyncClientFactory.create(null, null, tlsConfig);
+  }
+
+  @Test(expected = UnsupportedOperationException.class)
+  public void testCreateWithCustomSessionCacheThrows() {
+    TlsConfig tlsConfig =
+        TlsConfig.builder().withSessionCacheConfig(TlsSessionCacheConfig.disabled()).build();
     CrtAsyncClientFactory.create(null, null, tlsConfig);
   }
 
