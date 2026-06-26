@@ -1620,12 +1620,50 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testBatchWriteItemReorderedWritesRouteDeterministically() {
-    String selectedPk = "a-route";
-    String otherPk = findPkValueWithDifferentRoute("z-route-", selectedPk);
+  public void testBatchWriteItemMajorityPreferredNodeWins() {
+    String majorityPk = PK_VALUE;
+    String otherPk = findPkValueWithDifferentRoute("other-route-", majorityPk);
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.ANY_WRITE));
     try {
-      Map<String, List<WriteRequest>> firstRequestItems = new HashMap<>();
+      Map<String, List<WriteRequest>> requestItems = new LinkedHashMap<>();
+      requestItems.put(
+          TABLE_NAME,
+          Arrays.asList(
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(makeItem(otherPk)).build())
+                  .build(),
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(makeItem(majorityPk)).build())
+                  .build(),
+              WriteRequest.builder()
+                  .deleteRequest(DeleteRequest.builder().key(makeKey()).build())
+                  .build()));
+
+      URI expectedRoute = firstAffinityRouteForPk(majorityPk);
+
+      mockHttpClient.clearCapturedRequests();
+      client.batchWriteItem(BatchWriteItemRequest.builder().requestItems(requestItems).build());
+      URI actualRoute = mockHttpClient.getLastRequestUri();
+
+      assertSameRoute(
+          "BatchWrite should route to the majority preferred node", expectedRoute, actualRoute);
+    } finally {
+      client.close();
+    }
+  }
+
+  @Test
+  public void testBatchWriteItemNonKeyAttributesDoNotAffectRouting() {
+    String majorityPk = PK_VALUE;
+    String otherPk = findPkValueWithDifferentRoute("other-route-", majorityPk);
+    DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.ANY_WRITE));
+    try {
+      Map<String, AttributeValue> majorityA = makeItem(majorityPk);
+      majorityA.put("data", AttributeValue.builder().s("alpha").build());
+      Map<String, AttributeValue> majorityB = makeItem(majorityPk);
+      majorityB.put("data", AttributeValue.builder().s("zeta").build());
+
+      Map<String, List<WriteRequest>> firstRequestItems = new LinkedHashMap<>();
       firstRequestItems.put(
           TABLE_NAME,
           Arrays.asList(
@@ -1633,21 +1671,30 @@ public class AffinityQueryPlanInterceptorTest {
                   .putRequest(PutRequest.builder().item(makeItem(otherPk)).build())
                   .build(),
               WriteRequest.builder()
-                  .putRequest(PutRequest.builder().item(makeItem(selectedPk)).build())
+                  .putRequest(PutRequest.builder().item(majorityA).build())
+                  .build(),
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(majorityB).build())
                   .build()));
 
-      Map<String, List<WriteRequest>> secondRequestItems = new HashMap<>();
+      Map<String, AttributeValue> majorityC = makeItem(majorityPk);
+      majorityC.put("data", AttributeValue.builder().s("middle").build());
+      Map<String, AttributeValue> majorityD = makeItem(majorityPk);
+      majorityD.put("data", AttributeValue.builder().s("beta").build());
+
+      Map<String, List<WriteRequest>> secondRequestItems = new LinkedHashMap<>();
       secondRequestItems.put(
           TABLE_NAME,
           Arrays.asList(
               WriteRequest.builder()
-                  .putRequest(PutRequest.builder().item(makeItem(selectedPk)).build())
+                  .putRequest(PutRequest.builder().item(majorityC).build())
                   .build(),
               WriteRequest.builder()
                   .putRequest(PutRequest.builder().item(makeItem(otherPk)).build())
+                  .build(),
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(majorityD).build())
                   .build()));
-
-      URI expectedRoute = firstAffinityRouteForPk(selectedPk);
 
       mockHttpClient.clearCapturedRequests();
       client.batchWriteItem(
@@ -1659,14 +1706,152 @@ public class AffinityQueryPlanInterceptorTest {
           BatchWriteItemRequest.builder().requestItems(secondRequestItems).build());
       URI secondRoute = mockHttpClient.getLastRequestUri();
 
+      URI expectedRoute = firstAffinityRouteForPk(majorityPk);
       assertSameRoute(
-          "First request should route by deterministic BatchWrite target",
-          expectedRoute,
-          firstRoute);
+          "First request should route by partition-key votes", expectedRoute, firstRoute);
       assertSameRoute(
-          "Second request should route by deterministic BatchWrite target",
-          expectedRoute,
-          secondRoute);
+          "Second request should route by partition-key votes", expectedRoute, secondRoute);
+    } finally {
+      client.close();
+    }
+  }
+
+  @Test
+  public void testBatchWriteItemMissingMetadataContinuesWithUsableCandidate() {
+    KeyRouteAffinityConfig config =
+        KeyRouteAffinityConfig.builder()
+            .withType(KeyRouteAffinity.ANY_WRITE)
+            .withPkInfo(TABLE_NAME, PK_NAME)
+            .build();
+    DynamoDbClient client = createClient(config);
+    try {
+      Map<String, List<WriteRequest>> requestItems = new LinkedHashMap<>();
+      requestItems.put(
+          "unknown_table",
+          Collections.singletonList(
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(makeItem("unknown-pk")).build())
+                  .build()));
+      requestItems.put(
+          TABLE_NAME,
+          Collections.singletonList(
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(makeItem(PK_VALUE)).build())
+                  .build()));
+
+      URI expectedRoute = firstAffinityRouteForPk(PK_VALUE);
+
+      mockHttpClient.clearCapturedRequests();
+      client.batchWriteItem(BatchWriteItemRequest.builder().requestItems(requestItems).build());
+      URI actualRoute = mockHttpClient.getLastRequestUri();
+
+      assertSameRoute(
+          "BatchWrite should continue after missing table metadata", expectedRoute, actualRoute);
+    } finally {
+      client.close();
+    }
+  }
+
+  @Test
+  public void testBatchWriteItemSkipsMissingAndUnsupportedPartitionKeys() {
+    DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.ANY_WRITE));
+    try {
+      Map<String, AttributeValue> missingPk = new HashMap<>();
+      missingPk.put("data", AttributeValue.builder().s("missing").build());
+      Map<String, AttributeValue> unsupportedPk = new HashMap<>();
+      unsupportedPk.put(PK_NAME, AttributeValue.builder().bool(true).build());
+
+      Map<String, List<WriteRequest>> requestItems = new LinkedHashMap<>();
+      requestItems.put(
+          TABLE_NAME,
+          Arrays.asList(
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(missingPk).build())
+                  .build(),
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(unsupportedPk).build())
+                  .build(),
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(makeItem(PK_VALUE)).build())
+                  .build()));
+
+      URI expectedRoute = firstAffinityRouteForPk(PK_VALUE);
+
+      mockHttpClient.clearCapturedRequests();
+      client.batchWriteItem(BatchWriteItemRequest.builder().requestItems(requestItems).build());
+      URI actualRoute = mockHttpClient.getLastRequestUri();
+
+      assertSameRoute(
+          "BatchWrite should route by the supported candidate", expectedRoute, actualRoute);
+    } finally {
+      client.close();
+    }
+  }
+
+  @Test
+  public void testBatchWriteItemTieUsesLexicographicNodeOrder() {
+    String firstPk = PK_VALUE;
+    String secondPk = findPkValueWithDifferentRoute("tie-route-", firstPk);
+    URI firstRoute = firstAffinityRouteForPk(firstPk);
+    URI secondRoute = firstAffinityRouteForPk(secondPk);
+    URI expectedRoute =
+        firstRoute.toString().compareTo(secondRoute.toString()) <= 0 ? firstRoute : secondRoute;
+
+    DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.ANY_WRITE));
+    try {
+      Map<String, List<WriteRequest>> requestItems = new LinkedHashMap<>();
+      requestItems.put(
+          TABLE_NAME,
+          Arrays.asList(
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(makeItem(firstPk)).build())
+                  .build(),
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(makeItem(secondPk)).build())
+                  .build()));
+
+      mockHttpClient.clearCapturedRequests();
+      client.batchWriteItem(BatchWriteItemRequest.builder().requestItems(requestItems).build());
+      URI actualRoute = mockHttpClient.getLastRequestUri();
+
+      assertSameRoute("Tied votes should use lexicographic node order", expectedRoute, actualRoute);
+    } finally {
+      client.close();
+    }
+  }
+
+  @Test
+  public void testBatchWriteItemNoUsableCandidatesFallsBackToRoundRobin() {
+    DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.ANY_WRITE));
+    try {
+      Map<String, AttributeValue> unsupportedPk = new HashMap<>();
+      unsupportedPk.put(PK_NAME, AttributeValue.builder().bool(true).build());
+      Map<String, List<WriteRequest>> requestItems = new LinkedHashMap<>();
+      requestItems.put(
+          TABLE_NAME,
+          Collections.singletonList(
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(unsupportedPk).build())
+                  .build()));
+
+      assertRoundRobinRouting(
+          () ->
+              client.batchWriteItem(
+                  BatchWriteItemRequest.builder().requestItems(requestItems).build()));
+    } finally {
+      client.close();
+    }
+  }
+
+  @Test
+  public void testPutItemUnsupportedPartitionKeyTypeFallsBackToRoundRobin() {
+    DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.ANY_WRITE));
+    try {
+      Map<String, AttributeValue> item = new HashMap<>();
+      item.put(PK_NAME, AttributeValue.builder().bool(true).build());
+
+      assertRoundRobinRouting(
+          () -> client.putItem(PutItemRequest.builder().tableName(TABLE_NAME).item(item).build()));
     } finally {
       client.close();
     }

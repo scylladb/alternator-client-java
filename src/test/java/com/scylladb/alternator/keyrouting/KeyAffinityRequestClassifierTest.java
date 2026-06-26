@@ -5,9 +5,11 @@ import static org.junit.Assert.*;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.junit.Test;
 import software.amazon.awssdk.services.dynamodb.model.*;
 
@@ -548,42 +550,40 @@ public class KeyAffinityRequestClassifierTest {
   }
 
   @Test
-  public void testBatchWriteItemExtractionIsTableOrderIndependent() {
+  public void testBatchWriteItemExtractionIncludesMultipleTables() {
     BatchWriteItemRequest first = batchWriteRequest("orders", "z-order", "audit", "a-audit");
-    BatchWriteItemRequest second = batchWriteRequest("audit", "a-audit", "orders", "z-order");
 
-    assertEquals("audit", KeyAffinityRequestClassifier.extractTableName(first));
-    assertEquals("audit", KeyAffinityRequestClassifier.extractTableName(second));
+    List<KeyAffinityRequestClassifier.BatchWriteRoutingTarget> targets =
+        KeyAffinityRequestClassifier.extractBatchWriteRoutingTargets(first);
 
-    AttributeValue firstPk = KeyAffinityRequestClassifier.extractPartitionKey(first, "pk");
-    AttributeValue secondPk = KeyAffinityRequestClassifier.extractPartitionKey(second, "pk");
-    assertNotNull(firstPk);
-    assertNotNull(secondPk);
-    assertEquals("a-audit", firstPk.s());
-    assertEquals("a-audit", secondPk.s());
+    assertEquals(2, targets.size());
+    Set<String> tableAndPk = new HashSet<>();
+    for (KeyAffinityRequestClassifier.BatchWriteRoutingTarget target : targets) {
+      tableAndPk.add(target.tableName() + ":" + target.partitionKeyValue("pk").s());
+    }
+    assertTrue(tableAndPk.contains("orders:z-order"));
+    assertTrue(tableAndPk.contains("audit:a-audit"));
   }
 
   @Test
-  public void testBatchWriteItemExtractionIsWriteOrderIndependent() {
-    BatchWriteItemRequest first =
+  public void testBatchWriteItemExtractionIncludesMultipleWrites() {
+    BatchWriteItemRequest request =
         BatchWriteItemRequest.builder()
             .requestItems(
                 Collections.singletonMap(
                     "orders", Arrays.asList(batchPut("z-route"), batchPut("a-route"))))
             .build();
-    BatchWriteItemRequest second =
-        BatchWriteItemRequest.builder()
-            .requestItems(
-                Collections.singletonMap(
-                    "orders", Arrays.asList(batchPut("a-route"), batchPut("z-route"))))
-            .build();
 
-    AttributeValue firstPk = KeyAffinityRequestClassifier.extractPartitionKey(first, "pk");
-    AttributeValue secondPk = KeyAffinityRequestClassifier.extractPartitionKey(second, "pk");
-    assertNotNull(firstPk);
-    assertNotNull(secondPk);
-    assertEquals("a-route", firstPk.s());
-    assertEquals("a-route", secondPk.s());
+    List<KeyAffinityRequestClassifier.BatchWriteRoutingTarget> targets =
+        KeyAffinityRequestClassifier.extractBatchWriteRoutingTargets(request);
+
+    assertEquals(2, targets.size());
+    Set<String> pkValues = new HashSet<>();
+    for (KeyAffinityRequestClassifier.BatchWriteRoutingTarget target : targets) {
+      pkValues.add(target.partitionKeyValue("pk").s());
+    }
+    assertTrue(pkValues.contains("z-route"));
+    assertTrue(pkValues.contains("a-route"));
   }
 
   @Test

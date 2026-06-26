@@ -2,10 +2,8 @@ package com.scylladb.alternator.keyrouting;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
-import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.core.SdkRequest;
 import software.amazon.awssdk.services.dynamodb.model.AttributeAction;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
@@ -221,16 +219,13 @@ public final class KeyAffinityRequestClassifier {
   }
 
   /**
-   * Extracts BatchWriteItem routing targets in a deterministic cross-language order.
+   * Extracts BatchWriteItem routing targets.
    *
-   * <p>The ordering key is {@code (tableName, canonicalAttributes, operation)}, where
-   * canonicalAttributes is a no-whitespace JSON representation with sorted map keys. This matches
-   * the Rust and Go implementations so the same positive BatchWriteItem workload selects the same
-   * partition key before hashing.
+   * <p>All usable targets contribute to BatchWriteItem affinity routing. The routing decision must
+   * not depend on the order returned here, non-key attributes, or SDK map iteration order.
    *
    * @param request the BatchWriteItem request
-   * @return deterministic routing candidates; empty when the request has no
-   *     PutRequest/DeleteRequest
+   * @return routing candidates; empty when the request has no PutRequest/DeleteRequest
    */
   public static List<BatchWriteRoutingTarget> extractBatchWriteRoutingTargets(
       BatchWriteItemRequest request) {
@@ -247,19 +242,12 @@ public final class KeyAffinityRequestClassifier {
       for (WriteRequest write : writes) {
         if (write.putRequest() != null) {
           candidates.add(
-              new BatchWriteRoutingTarget(
-                  entry.getKey(),
-                  write.putRequest().item(),
-                  "PutRequest",
-                  canonicalAttributeValues(write.putRequest().item())));
+              new BatchWriteRoutingTarget(entry.getKey(), write.putRequest().item(), "PutRequest"));
         }
         if (write.deleteRequest() != null) {
           candidates.add(
               new BatchWriteRoutingTarget(
-                  entry.getKey(),
-                  write.deleteRequest().key(),
-                  "DeleteRequest",
-                  canonicalAttributeValues(write.deleteRequest().key())));
+                  entry.getKey(), write.deleteRequest().key(), "DeleteRequest"));
         }
       }
     }
@@ -267,182 +255,7 @@ public final class KeyAffinityRequestClassifier {
     if (candidates.isEmpty()) {
       return Collections.emptyList();
     }
-
-    candidates.sort(
-        Comparator.comparing((BatchWriteRoutingTarget target) -> target.tableName)
-            .thenComparing(target -> target.canonicalAttributes)
-            .thenComparing(target -> target.operation));
     return Collections.unmodifiableList(candidates);
-  }
-
-  private static String canonicalAttributeValues(Map<String, AttributeValue> values) {
-    if (values == null || values.isEmpty()) {
-      return "{}";
-    }
-
-    List<String> keys = new ArrayList<>(values.keySet());
-    Collections.sort(keys);
-
-    StringBuilder builder = new StringBuilder();
-    builder.append('{');
-    for (int i = 0; i < keys.size(); i++) {
-      if (i > 0) {
-        builder.append(',');
-      }
-      String key = keys.get(i);
-      builder.append(quote(key));
-      builder.append(':');
-      appendCanonicalAttributeValue(builder, values.get(key));
-    }
-    builder.append('}');
-    return builder.toString();
-  }
-
-  private static void appendCanonicalAttributeValue(StringBuilder builder, AttributeValue value) {
-    if (value == null) {
-      builder.append("{\"UNKNOWN\":true}");
-      return;
-    }
-    if (value.s() != null) {
-      appendTaggedJsonString(builder, "S", value.s());
-      return;
-    }
-    if (value.n() != null) {
-      appendTaggedJsonString(builder, "N", value.n());
-      return;
-    }
-    if (value.b() != null) {
-      builder.append("{\"B\":{\"__bytes__\":\"");
-      appendHex(builder, value.b().asByteArray());
-      builder.append("\"}}");
-      return;
-    }
-    if (value.bool() != null) {
-      builder.append("{\"BOOL\":").append(value.bool() ? "true" : "false").append('}');
-      return;
-    }
-    if (value.nul() != null) {
-      builder.append("{\"NULL\":").append(value.nul() ? "true" : "false").append('}');
-      return;
-    }
-    if (value.hasSs()) {
-      appendTaggedJsonStringList(builder, "SS", value.ss());
-      return;
-    }
-    if (value.hasNs()) {
-      appendTaggedJsonStringList(builder, "NS", value.ns());
-      return;
-    }
-    if (value.hasBs()) {
-      builder.append("{\"BS\":[");
-      int i = 0;
-      for (SdkBytes bytes : value.bs()) {
-        if (i > 0) {
-          builder.append(',');
-        }
-        builder.append("{\"__bytes__\":\"");
-        appendHex(builder, bytes.asByteArray());
-        builder.append("\"}");
-        i++;
-      }
-      builder.append("]}");
-      return;
-    }
-    if (value.hasL()) {
-      builder.append("{\"L\":[");
-      int i = 0;
-      for (AttributeValue item : value.l()) {
-        if (i > 0) {
-          builder.append(',');
-        }
-        appendCanonicalAttributeValue(builder, item);
-        i++;
-      }
-      builder.append("]}");
-      return;
-    }
-    if (value.hasM()) {
-      builder.append("{\"M\":");
-      builder.append(canonicalAttributeValues(value.m()));
-      builder.append('}');
-      return;
-    }
-    builder.append("{\"UNKNOWN\":true}");
-  }
-
-  private static void appendTaggedJsonString(StringBuilder builder, String tag, String value) {
-    builder.append("{\"").append(tag).append("\":");
-    builder.append(quote(value));
-    builder.append('}');
-  }
-
-  private static void appendTaggedJsonStringList(
-      StringBuilder builder, String tag, List<String> values) {
-    builder.append("{\"").append(tag).append("\":[");
-    for (int i = 0; i < values.size(); i++) {
-      if (i > 0) {
-        builder.append(',');
-      }
-      builder.append(quote(values.get(i)));
-    }
-    builder.append("]}");
-  }
-
-  private static void appendHex(StringBuilder builder, byte[] bytes) {
-    final char[] hex = "0123456789abcdef".toCharArray();
-    for (byte value : bytes) {
-      builder.append(hex[(value >> 4) & 0x0f]);
-      builder.append(hex[value & 0x0f]);
-    }
-  }
-
-  private static String quote(String value) {
-    StringBuilder builder = new StringBuilder();
-    builder.append('"');
-    for (int i = 0; i < value.length(); i++) {
-      char c = value.charAt(i);
-      switch (c) {
-        case '\\':
-          builder.append("\\\\");
-          break;
-        case '"':
-          builder.append("\\\"");
-          break;
-        case '\b':
-          builder.append("\\b");
-          break;
-        case '\f':
-          builder.append("\\f");
-          break;
-        case '\n':
-          builder.append("\\n");
-          break;
-        case '\r':
-          builder.append("\\r");
-          break;
-        case '\t':
-          builder.append("\\t");
-          break;
-        default:
-          if (c <= 0x1f) {
-            builder.append("\\u");
-            appendHex4(builder, c);
-          } else {
-            builder.append(c);
-          }
-          break;
-      }
-    }
-    builder.append('"');
-    return builder.toString();
-  }
-
-  private static void appendHex4(StringBuilder builder, char value) {
-    final char[] hex = "0123456789abcdef".toCharArray();
-    builder.append(hex[(value >> 12) & 0x0f]);
-    builder.append(hex[(value >> 8) & 0x0f]);
-    builder.append(hex[(value >> 4) & 0x0f]);
-    builder.append(hex[value & 0x0f]);
   }
 
   /** Deterministic BatchWriteItem routing candidate. */
@@ -450,17 +263,12 @@ public final class KeyAffinityRequestClassifier {
     private final String tableName;
     private final Map<String, AttributeValue> values;
     private final String operation;
-    private final String canonicalAttributes;
 
     private BatchWriteRoutingTarget(
-        String tableName,
-        Map<String, AttributeValue> values,
-        String operation,
-        String canonicalAttributes) {
+        String tableName, Map<String, AttributeValue> values, String operation) {
       this.tableName = tableName;
       this.values = values;
       this.operation = operation;
-      this.canonicalAttributes = canonicalAttributes;
     }
 
     /**
@@ -488,15 +296,6 @@ public final class KeyAffinityRequestClassifier {
      */
     public String operation() {
       return operation;
-    }
-
-    /**
-     * Returns the canonical JSON attributes used for deterministic candidate ordering.
-     *
-     * @return the canonical JSON attributes
-     */
-    public String canonicalAttributes() {
-      return canonicalAttributes;
     }
 
     /**

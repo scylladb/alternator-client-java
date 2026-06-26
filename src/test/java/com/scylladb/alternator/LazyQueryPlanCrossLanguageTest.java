@@ -16,8 +16,8 @@ import org.junit.Test;
  * implementation for the same seed values. This is critical for key route affinity, where all
  * client implementations must route the same partition key to the same coordinator node.
  *
- * <p>Test vectors are generated from the Go implementation using Go's math/rand PRNG with
- * pick-and-remove selection.
+ * <p>Test vectors are generated using Go's math/rand PRNG with pick-and-remove selection over the
+ * canonical lexicographic live-node order.
  *
  * <p>Node naming convention: active nodes are node1.example.com:8043 through
  * node{N}.example.com:8043, quarantined nodes are quarantined1.example.com:8043 through
@@ -65,7 +65,7 @@ public class LazyQueryPlanCrossLanguageTest {
     AlternatorLiveNodes liveNodes = createLiveNodes(10, 0);
     LazyQueryPlan plan = new LazyQueryPlan(liveNodes, 42L);
     List<String> actual = getSequence(plan, 6);
-    assertEquals(Arrays.asList("node6", "node9", "node5", "node2", "node7", "node1"), actual);
+    assertEquals(Arrays.asList("node5", "node8", "node4", "node10", "node6", "node1"), actual);
   }
 
   @Test
@@ -73,7 +73,7 @@ public class LazyQueryPlanCrossLanguageTest {
     AlternatorLiveNodes liveNodes = createLiveNodes(10, 0);
     LazyQueryPlan plan = new LazyQueryPlan(liveNodes, 123L);
     List<String> actual = getSequence(plan, 6);
-    assertEquals(Arrays.asList("node6", "node1", "node4", "node3", "node10", "node5"), actual);
+    assertEquals(Arrays.asList("node5", "node1", "node3", "node2", "node9", "node4"), actual);
   }
 
   @Test
@@ -81,7 +81,7 @@ public class LazyQueryPlanCrossLanguageTest {
     AlternatorLiveNodes liveNodes = createLiveNodes(10, 0);
     LazyQueryPlan plan = new LazyQueryPlan(liveNodes, 999L);
     List<String> actual = getSequence(plan, 6);
-    assertEquals(Arrays.asList("node5", "node10", "node4", "node1", "node2", "node3"), actual);
+    assertEquals(Arrays.asList("node4", "node9", "node3", "node1", "node10", "node2"), actual);
   }
 
   @Test
@@ -89,7 +89,7 @@ public class LazyQueryPlanCrossLanguageTest {
     AlternatorLiveNodes liveNodes = createLiveNodes(10, 0);
     LazyQueryPlan plan = new LazyQueryPlan(liveNodes, 0L);
     List<String> actual = getSequence(plan, 6);
-    assertEquals(Arrays.asList("node5", "node1", "node2", "node10", "node6", "node8"), actual);
+    assertEquals(Arrays.asList("node4", "node1", "node10", "node9", "node5", "node7"), actual);
   }
 
   @Test
@@ -97,7 +97,7 @@ public class LazyQueryPlanCrossLanguageTest {
     AlternatorLiveNodes liveNodes = createLiveNodes(10, 0);
     LazyQueryPlan plan = new LazyQueryPlan(liveNodes, -1L);
     List<String> actual = getSequence(plan, 6);
-    assertEquals(Arrays.asList("node2", "node5", "node1", "node3", "node6", "node10"), actual);
+    assertEquals(Arrays.asList("node10", "node4", "node1", "node2", "node5", "node9"), actual);
   }
 
   @Test
@@ -113,7 +113,7 @@ public class LazyQueryPlanCrossLanguageTest {
     AlternatorLiveNodes liveNodes = createLiveNodes(10, 0);
     LazyQueryPlan plan = new LazyQueryPlan(liveNodes, 12345L);
     List<String> actual = getSequence(plan, 6);
-    assertEquals(Arrays.asList("node4", "node5", "node1", "node7", "node6", "node8"), actual);
+    assertEquals(Arrays.asList("node3", "node4", "node1", "node6", "node5", "node7"), actual);
   }
 
   @Test
@@ -121,6 +121,6 @@ public class LazyQueryPlanCrossLanguageTest {
     AlternatorLiveNodes liveNodes = createLiveNodes(10, 0);
     LazyQueryPlan plan = new LazyQueryPlan(liveNodes, Long.MAX_VALUE);
     List<String> actual = getSequence(plan, 6);
-    assertEquals(Arrays.asList("node2", "node7", "node8", "node1", "node10", "node4"), actual);
+    assertEquals(Arrays.asList("node10", "node6", "node7", "node1", "node9", "node3"), actual);
   }
 }
