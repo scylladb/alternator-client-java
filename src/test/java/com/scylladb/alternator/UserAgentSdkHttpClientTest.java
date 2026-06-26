@@ -4,6 +4,8 @@ import static org.junit.Assert.*;
 
 import java.io.ByteArrayInputStream;
 import java.net.URI;
+import java.util.HashSet;
+import java.util.Set;
 import org.junit.Test;
 import software.amazon.awssdk.http.ContentStreamProvider;
 import software.amazon.awssdk.http.ExecutableHttpRequest;
@@ -47,6 +49,26 @@ public class UserAgentSdkHttpClientTest {
   }
 
   @Test
+  public void testDefaultUserAgentReplacesAwsSdkUserAgent() {
+    MockSdkHttpClient mockClient = new MockSdkHttpClient();
+    UserAgentSdkHttpClient client =
+        new UserAgentSdkHttpClient(mockClient, AlternatorUserAgent.defaultUserAgent());
+
+    client.prepareRequest(
+        HttpExecuteRequest.builder().request(request("aws-sdk-java/2.x")).build());
+
+    assertEquals(
+        AlternatorUserAgent.userAgentToken(),
+        mockClient.capturedRequest.firstMatchingHeader("User-Agent").get());
+    assertFalse(
+        mockClient
+            .capturedRequest
+            .firstMatchingHeader("User-Agent")
+            .get()
+            .contains("aws-sdk-java"));
+  }
+
+  @Test
   public void testReplacesUserAgent() {
     MockSdkHttpClient mockClient = new MockSdkHttpClient();
     UserAgentSdkHttpClient client =
@@ -63,13 +85,15 @@ public class UserAgentSdkHttpClientTest {
   public void testTransformsUserAgent() {
     MockSdkHttpClient mockClient = new MockSdkHttpClient();
     UserAgentSdkHttpClient client =
-        new UserAgentSdkHttpClient(mockClient, userAgent -> "prefix " + userAgent + " suffix");
+        new UserAgentSdkHttpClient(
+            mockClient,
+            AlternatorUserAgent.transformDefault(userAgent -> "prefix " + userAgent + " suffix"));
 
     client.prepareRequest(
         HttpExecuteRequest.builder().request(request("aws-sdk-java/2.x")).build());
 
     assertEquals(
-        "prefix aws-sdk-java/2.x suffix",
+        "prefix " + AlternatorUserAgent.userAgentToken() + " suffix",
         mockClient.capturedRequest.firstMatchingHeader("User-Agent").get());
   }
 
@@ -84,6 +108,40 @@ public class UserAgentSdkHttpClientTest {
 
     assertFalse(mockClient.capturedRequest.headers().containsKey("User-Agent"));
     assertEquals("localhost:8043", mockClient.capturedRequest.firstMatchingHeader("Host").get());
+  }
+
+  @Test
+  public void testDefaultUserAgentWithHeaderOptimizationReplacesAwsSdkUserAgent() {
+    MockSdkHttpClient mockClient = new MockSdkHttpClient();
+    Set<String> whitelist = AlternatorConfig.builder().getRequiredHeaders();
+    SdkHttpClient client =
+        new HeadersFilteringSdkHttpClient(
+            new UserAgentSdkHttpClient(mockClient, AlternatorUserAgent.defaultUserAgent()),
+            whitelist);
+
+    client.prepareRequest(
+        HttpExecuteRequest.builder().request(requestWithSdkMetadata("aws-sdk-java/2.x")).build());
+
+    assertEquals(
+        AlternatorUserAgent.userAgentToken(),
+        mockClient.capturedRequest.firstMatchingHeader("User-Agent").get());
+    assertFalse(mockClient.capturedRequest.headers().containsKey("X-Amz-Sdk-Invocation-Id"));
+  }
+
+  @Test
+  public void testDisabledUserAgentWithHeaderOptimizationRemovesAwsSdkUserAgent() {
+    MockSdkHttpClient mockClient = new MockSdkHttpClient();
+    Set<String> whitelist =
+        new HashSet<>(AlternatorConfig.builder().withUserAgentEnabled(false).getRequiredHeaders());
+    SdkHttpClient client =
+        new HeadersFilteringSdkHttpClient(
+            new UserAgentSdkHttpClient(mockClient, AlternatorUserAgent.disable()), whitelist);
+
+    client.prepareRequest(
+        HttpExecuteRequest.builder().request(requestWithSdkMetadata("aws-sdk-java/2.x")).build());
+
+    assertFalse(mockClient.capturedRequest.headers().containsKey("User-Agent"));
+    assertFalse(mockClient.capturedRequest.headers().containsKey("X-Amz-Sdk-Invocation-Id"));
   }
 
   @Test
@@ -120,6 +178,20 @@ public class UserAgentSdkHttpClientTest {
         .uri(URI.create("https://localhost:8043"))
         .appendHeader("Host", "localhost:8043")
         .appendHeader("User-Agent", userAgent)
+        .build();
+  }
+
+  private SdkHttpRequest requestWithSdkMetadata(String userAgent) {
+    return SdkHttpRequest.builder()
+        .method(SdkHttpMethod.POST)
+        .uri(URI.create("https://localhost:8043"))
+        .appendHeader("Host", "localhost:8043")
+        .appendHeader("X-Amz-Target", "DynamoDB_20120810.GetItem")
+        .appendHeader("Content-Type", "application/x-amz-json-1.0")
+        .appendHeader("Content-Length", "123")
+        .appendHeader("Accept-Encoding", "gzip")
+        .appendHeader("User-Agent", userAgent)
+        .appendHeader("X-Amz-Sdk-Invocation-Id", "some-id")
         .build();
   }
 }

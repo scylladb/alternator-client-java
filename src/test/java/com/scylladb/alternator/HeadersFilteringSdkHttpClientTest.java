@@ -7,8 +7,6 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
 import org.junit.Test;
-import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
-import software.amazon.awssdk.core.client.config.SdkAdvancedClientOption;
 import software.amazon.awssdk.http.ExecutableHttpRequest;
 import software.amazon.awssdk.http.HttpExecuteRequest;
 import software.amazon.awssdk.http.HttpExecuteResponse;
@@ -216,24 +214,6 @@ public class HeadersFilteringSdkHttpClientTest {
         "aws-sdk-java/2.x", mockClient.capturedRequest.firstMatchingHeader("User-Agent").get());
     assertFalse(mockClient.capturedRequest.headers().containsKey("X-Amz-Sdk-Invocation-Id"));
     assertFalse(mockClient.capturedRequest.headers().containsKey("amz-sdk-request"));
-  }
-
-  @Test
-  public void testAlternatorUserAgentSuffixIsAddedToOverrideConfiguration() {
-    ClientOverrideConfiguration.Builder overrideBuilder = ClientOverrideConfiguration.builder();
-
-    AlternatorUserAgent.applyDefaultSuffixTo(overrideBuilder);
-
-    String suffix =
-        overrideBuilder.build().advancedOption(SdkAdvancedClientOption.USER_AGENT_SUFFIX).get();
-    assertEquals(AlternatorUserAgent.userAgentToken(), suffix);
-  }
-
-  @Test
-  public void testAlternatorUserAgentSuffixPreservesExistingSuffix() {
-    assertEquals(
-        "custom/1 " + AlternatorUserAgent.userAgentToken(),
-        AlternatorUserAgent.appendToken("custom/1", AlternatorUserAgent.userAgentToken()));
   }
 
   @Test

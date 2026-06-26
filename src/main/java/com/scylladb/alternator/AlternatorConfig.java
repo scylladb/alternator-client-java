@@ -148,7 +148,7 @@ public class AlternatorConfig {
    * HTTP headers required when user-agent reporting is enabled.
    *
    * <ul>
-   *   <li>{@code User-Agent} - Reports the AWS SDK and ScyllaDB Alternator client versions
+   *   <li>{@code User-Agent} - Reports the ScyllaDB Alternator client version
    * </ul>
    *
    * @since 2.0.5
@@ -397,9 +397,9 @@ public class AlternatorConfig {
   /**
    * Checks if user-agent reporting is enabled.
    *
-   * <p>When enabled, the client sends a {@code User-Agent} header that includes AWS SDK metadata
-   * and the ScyllaDB Alternator client version. When disabled, optimized header whitelists do not
-   * require {@code User-Agent}.
+   * <p>When enabled, the client sends a {@code User-Agent} header that includes the ScyllaDB
+   * Alternator client version. When disabled, optimized header whitelists do not require {@code
+   * User-Agent}.
    *
    * @return true if user-agent reporting is enabled, false otherwise
    * @since 2.0.5

@@ -2,14 +2,11 @@ package com.scylladb.alternator;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.Objects;
 import java.util.Properties;
 import java.util.function.UnaryOperator;
-import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
-import software.amazon.awssdk.core.client.config.SdkAdvancedClientOption;
 import software.amazon.awssdk.http.SdkHttpRequest;
 
-/** Adds this Alternator wrapper's identity to AWS SDK user-agent strings. */
+/** Rewrites generated user-agent strings to this Alternator wrapper's identity. */
 final class AlternatorUserAgent {
   static final String HEADER_NAME = "User-Agent";
   static final String PRODUCT_NAME = "scylladb-alternator-client-java";
@@ -20,22 +17,22 @@ final class AlternatorUserAgent {
 
   private AlternatorUserAgent() {}
 
-  static void applyDefaultSuffixTo(ClientOverrideConfiguration.Builder overrideBuilder) {
-    Objects.requireNonNull(overrideBuilder, "overrideBuilder");
-
-    String existingSuffix =
-        overrideBuilder.advancedOptions().get(SdkAdvancedClientOption.USER_AGENT_SUFFIX);
-    overrideBuilder.putAdvancedOption(
-        SdkAdvancedClientOption.USER_AGENT_SUFFIX, appendToken(existingSuffix, USER_AGENT_TOKEN));
-  }
-
   static String userAgentToken() {
     return USER_AGENT_TOKEN;
+  }
+
+  static UnaryOperator<String> defaultUserAgent() {
+    return replaceWith(USER_AGENT_TOKEN);
   }
 
   static UnaryOperator<String> replaceWith(String userAgent) {
     requireValidUserAgent(userAgent);
     return current -> userAgent;
+  }
+
+  static UnaryOperator<String> transformDefault(UnaryOperator<String> userAgentTransformer) {
+    requireUserAgentTransformer(userAgentTransformer);
+    return current -> userAgentTransformer.apply(USER_AGENT_TOKEN);
   }
 
   static UnaryOperator<String> disable() {
@@ -53,18 +50,6 @@ final class AlternatorUserAgent {
       throw new IllegalArgumentException("userAgentTransformer cannot be null");
     }
     return userAgentTransformer;
-  }
-
-  static String appendToken(String existingSuffix, String token) {
-    if (existingSuffix == null || existingSuffix.trim().isEmpty()) {
-      return token;
-    }
-
-    String trimmed = existingSuffix.trim();
-    if (trimmed.contains(token)) {
-      return trimmed;
-    }
-    return trimmed + " " + token;
   }
 
   static SdkHttpRequest transform(SdkHttpRequest request, UnaryOperator<String> transformer) {
