@@ -684,15 +684,16 @@ public class AlternatorDynamoDbAsyncClient {
 
       AlternatorConfig alternatorConfig = configBuilder.build();
 
+      ClientOverrideConfiguration.Builder compressionOverrideBuilder =
+          delegate.overrideConfiguration() != null
+              ? delegate.overrideConfiguration().toBuilder()
+              : ClientOverrideConfiguration.builder();
+      compressionOverrideBuilder.addExecutionInterceptor(new ResponseCompressionInterceptor());
       if (alternatorConfig.getCompressionAlgorithm().isEnabled()) {
-        ClientOverrideConfiguration.Builder overrideBuilder =
-            delegate.overrideConfiguration() != null
-                ? delegate.overrideConfiguration().toBuilder()
-                : ClientOverrideConfiguration.builder();
-        overrideBuilder.addExecutionInterceptor(
+        compressionOverrideBuilder.addExecutionInterceptor(
             new GzipRequestInterceptor(alternatorConfig.getMinCompressionSizeBytes()));
-        delegate.overrideConfiguration(overrideBuilder.build());
       }
+      delegate.overrideConfiguration(compressionOverrideBuilder.build());
 
       TlsConfig tlsConfig = alternatorConfig.getTlsConfig();
       if (!httpClientSet) {

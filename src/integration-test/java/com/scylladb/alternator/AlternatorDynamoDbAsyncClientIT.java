@@ -423,6 +423,47 @@ public class AlternatorDynamoDbAsyncClientIT {
   }
 
   @Test
+  public void testResponseCompressionNegotiatesAcceptEncoding() throws Exception {
+    AtomicBoolean acceptEncodingSeen = new AtomicBoolean(false);
+
+    ExecutionInterceptor responseCompressionVerifier =
+        new ExecutionInterceptor() {
+          @Override
+          public void beforeTransmission(
+              Context.BeforeTransmission context, ExecutionAttributes executionAttributes) {
+            context
+                .httpRequest()
+                .firstMatchingHeader("Accept-Encoding")
+                .ifPresent(
+                    value -> {
+                      if (value.contains("gzip") && value.contains("deflate")) {
+                        acceptEncodingSeen.set(true);
+                      }
+                    });
+          }
+        };
+
+    ClientOverrideConfiguration overrideConfig =
+        ClientOverrideConfiguration.builder()
+            .addExecutionInterceptor(responseCompressionVerifier)
+            .build();
+
+    DynamoDbAsyncClient client =
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(seedUri)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
+            .overrideConfiguration(overrideConfig)
+            .build();
+
+    try {
+      client.listTables(ListTablesRequest.builder().limit(1).build()).get();
+      assertTrue("Accept-Encoding should advertise gzip and deflate", acceptEncodingSeen.get());
+    } finally {
+      client.close();
+    }
+  }
+
+  @Test
   public void testHeadersOptimizationFiltersHeaders() throws Exception {
     // Track which headers are seen in the request
     Set<String> seenHeaders = new HashSet<>();
@@ -640,4 +681,5 @@ public class AlternatorDynamoDbAsyncClientIT {
 
     client.close();
   }
+
 }
