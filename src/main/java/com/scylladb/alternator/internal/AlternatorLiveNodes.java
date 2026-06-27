@@ -235,7 +235,7 @@ public class AlternatorLiveNodes extends Thread {
             .withOptimizeHeaders(config.isOptimizeHeaders())
             .withHeadersWhitelist(config.getHeadersWhitelist());
     if (config.isResponseCompressionEnabled()) {
-      builder.withResponseCompressionAlgorithms(config.getResponseCompressionAlgorithms());
+      builder.withResponseCompression(config.getResponseCompressionAlgorithms());
     } else {
       builder.withResponseCompressionDisabled();
     }
