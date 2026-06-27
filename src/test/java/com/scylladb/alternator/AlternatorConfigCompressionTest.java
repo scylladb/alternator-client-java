@@ -129,7 +129,7 @@ public class AlternatorConfigCompressionTest {
   public void testCustomResponseCompressionAlgorithmsPreserveOrder() {
     AlternatorConfig config =
         AlternatorConfig.builder()
-            .withResponseCompressionAlgorithms(
+            .withResponseCompression(
                 ResponseCompressionAlgorithm.DEFLATE, ResponseCompressionAlgorithm.GZIP)
             .build();
 
@@ -150,18 +150,16 @@ public class AlternatorConfigCompressionTest {
 
   @Test(expected = IllegalArgumentException.class)
   public void testNullResponseCompressionAlgorithmsThrowException() {
-    AlternatorConfig.builder()
-        .withResponseCompressionAlgorithms((ResponseCompressionAlgorithm[]) null);
+    AlternatorConfig.builder().withResponseCompression((ResponseCompressionAlgorithm[]) null);
   }
 
   @Test(expected = IllegalArgumentException.class)
   public void testEmptyResponseCompressionAlgorithmsThrowException() {
-    AlternatorConfig.builder().withResponseCompressionAlgorithms();
+    AlternatorConfig.builder().withResponseCompression();
   }
 
   @Test(expected = IllegalArgumentException.class)
   public void testNullResponseCompressionAlgorithmThrowsException() {
-    AlternatorConfig.builder()
-        .withResponseCompressionAlgorithms(ResponseCompressionAlgorithm.GZIP, null);
+    AlternatorConfig.builder().withResponseCompression(ResponseCompressionAlgorithm.GZIP, null);
   }
 }

@@ -139,7 +139,7 @@ public class AlternatorConfigHeadersTest {
     AlternatorConfig config =
         AlternatorConfig.builder()
             .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
-            .withResponseCompressionAlgorithms(
+            .withResponseCompression(
                 ResponseCompressionAlgorithm.GZIP, ResponseCompressionAlgorithm.DEFLATE)
             .authenticationEnabled(true)
             .build();
@@ -182,8 +182,7 @@ public class AlternatorConfigHeadersTest {
   @Test(expected = IllegalArgumentException.class)
   public void testCustomWhitelistWithoutAcceptEncodingFailsWhenResponseCompressionEnabled() {
     AlternatorConfig.Builder builder =
-        AlternatorConfig.builder()
-            .withResponseCompressionAlgorithms(ResponseCompressionAlgorithm.GZIP);
+        AlternatorConfig.builder().withResponseCompression(ResponseCompressionAlgorithm.GZIP);
     Set<String> whitelist = new HashSet<>(builder.getRequiredHeaders());
     whitelist.remove("Accept-Encoding");
 
@@ -290,7 +289,7 @@ public class AlternatorConfigHeadersTest {
     AlternatorConfig config =
         AlternatorConfig.builder()
             .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
-            .withResponseCompressionAlgorithms(ResponseCompressionAlgorithm.GZIP)
+            .withResponseCompression(ResponseCompressionAlgorithm.GZIP)
             .authenticationEnabled(false)
             .build();
     Set<String> noAuthHeaders = config.getRequiredHeaders();
@@ -381,7 +380,7 @@ public class AlternatorConfigHeadersTest {
     assertFalse(noAuth.contains("Authorization"));
 
     // Enable response compression
-    builder.withResponseCompressionAlgorithms(ResponseCompressionAlgorithm.GZIP);
+    builder.withResponseCompression(ResponseCompressionAlgorithm.GZIP);
     Set<String> withResponseCompression = builder.getRequiredHeaders();
     assertEquals(8, withResponseCompression.size());
     assertTrue(withResponseCompression.contains("Content-Encoding"));

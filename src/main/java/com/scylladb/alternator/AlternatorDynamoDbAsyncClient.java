@@ -192,9 +192,9 @@ public class AlternatorDynamoDbAsyncClient {
      * @throws IllegalArgumentException if algorithms is null, empty, or contains null
      * @since 2.0.6
      */
-    public AlternatorDynamoDbAsyncClientBuilder withResponseCompressionAlgorithms(
+    public AlternatorDynamoDbAsyncClientBuilder withResponseCompression(
         ResponseCompressionAlgorithm... algorithms) {
-      configBuilder.withResponseCompressionAlgorithms(algorithms);
+      configBuilder.withResponseCompression(algorithms);
       return this;
     }
 
@@ -208,9 +208,9 @@ public class AlternatorDynamoDbAsyncClient {
      * @throws IllegalArgumentException if algorithms is null, empty, or contains null
      * @since 2.0.6
      */
-    public AlternatorDynamoDbAsyncClientBuilder withResponseCompressionAlgorithms(
+    public AlternatorDynamoDbAsyncClientBuilder withResponseCompression(
         Collection<ResponseCompressionAlgorithm> algorithms) {
-      configBuilder.withResponseCompressionAlgorithms(algorithms);
+      configBuilder.withResponseCompression(algorithms);
       return this;
     }
 
@@ -454,8 +454,7 @@ public class AlternatorDynamoDbAsyncClient {
         configBuilder.withCompressionAlgorithm(config.getCompressionAlgorithm());
         configBuilder.withMinCompressionSizeBytes(config.getMinCompressionSizeBytes());
         if (config.isResponseCompressionEnabled()) {
-          configBuilder.withResponseCompressionAlgorithms(
-              config.getResponseCompressionAlgorithms());
+          configBuilder.withResponseCompression(config.getResponseCompressionAlgorithms());
         } else {
           configBuilder.withResponseCompressionDisabled();
         }

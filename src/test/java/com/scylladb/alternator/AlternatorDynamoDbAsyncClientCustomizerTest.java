@@ -194,7 +194,7 @@ public class AlternatorDynamoDbAsyncClientCustomizerTest {
     AlternatorDynamoDbAsyncClientWrapper wrapper =
         AlternatorDynamoDbAsyncClient.builder()
             .endpointOverride(SEED_URI)
-            .withResponseCompressionAlgorithms(
+            .withResponseCompression(
                 ResponseCompressionAlgorithm.DEFLATE, ResponseCompressionAlgorithm.GZIP)
             .buildWithAlternatorAPI();
     try {

@@ -879,13 +879,13 @@ public class AlternatorConfig {
      * @throws IllegalArgumentException if algorithms is null, empty, or contains null
      * @since 2.0.6
      */
-    public Builder withResponseCompressionAlgorithms(ResponseCompressionAlgorithm... algorithms) {
+    public Builder withResponseCompression(ResponseCompressionAlgorithm... algorithms) {
       if (algorithms == null) {
         throw new IllegalArgumentException(
             "responseCompressionAlgorithms cannot be null or empty. "
                 + "Use withResponseCompressionDisabled() to disable response compression.");
       }
-      return withResponseCompressionAlgorithms(Arrays.asList(algorithms));
+      return withResponseCompression(Arrays.asList(algorithms));
     }
 
     /**
@@ -899,8 +899,7 @@ public class AlternatorConfig {
      * @throws IllegalArgumentException if algorithms is null, empty, or contains null
      * @since 2.0.6
      */
-    public Builder withResponseCompressionAlgorithms(
-        Collection<ResponseCompressionAlgorithm> algorithms) {
+    public Builder withResponseCompression(Collection<ResponseCompressionAlgorithm> algorithms) {
       this.responseCompressionAlgorithms = ResponseCompressionAlgorithm.validatedList(algorithms);
       return this;
     }

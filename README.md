@@ -422,7 +422,7 @@ import com.scylladb.alternator.ResponseCompressionAlgorithm;
 DynamoDbClient client = AlternatorDynamoDbClient.builder()
     .endpointOverride(URI.create("https://127.0.0.1:8043"))
     .credentialsProvider(myCredentials)
-    .withResponseCompressionAlgorithms(
+    .withResponseCompression(
         ResponseCompressionAlgorithm.GZIP,
         ResponseCompressionAlgorithm.DEFLATE)
     .build();
@@ -437,7 +437,7 @@ import com.scylladb.alternator.ResponseCompressionAlgorithm;
 DynamoDbClient client = AlternatorDynamoDbClient.builder()
     .endpointOverride(URI.create("https://127.0.0.1:8043"))
     .credentialsProvider(myCredentials)
-    .withResponseCompressionAlgorithms(ResponseCompressionAlgorithm.DEFLATE)
+    .withResponseCompression(ResponseCompressionAlgorithm.DEFLATE)
     .build();
 ```
 

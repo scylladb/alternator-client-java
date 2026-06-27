@@ -474,7 +474,7 @@ public class AlternatorDynamoDbClientIT {
             .endpointOverride(seedUri)
             .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .overrideConfiguration(overrideConfig)
-            .withResponseCompressionAlgorithms(
+            .withResponseCompression(
                 ResponseCompressionAlgorithm.GZIP, ResponseCompressionAlgorithm.DEFLATE)
             .build();
 
@@ -512,7 +512,7 @@ public class AlternatorDynamoDbClientIT {
             .endpointOverride(seedUri)
             .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .overrideConfiguration(overrideConfig)
-            .withResponseCompressionAlgorithms(ResponseCompressionAlgorithm.DEFLATE)
+            .withResponseCompression(ResponseCompressionAlgorithm.DEFLATE)
             .build();
 
     try {
