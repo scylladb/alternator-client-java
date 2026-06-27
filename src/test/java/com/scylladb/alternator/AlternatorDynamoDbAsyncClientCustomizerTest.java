@@ -189,6 +189,41 @@ public class AlternatorDynamoDbAsyncClientCustomizerTest {
     }
   }
 
+  @Test
+  public void testResponseCompressionAlgorithmsPropagateToConfig() {
+    AlternatorDynamoDbAsyncClientWrapper wrapper =
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(SEED_URI)
+            .withResponseCompressionAlgorithms(
+                ResponseCompressionAlgorithm.DEFLATE, ResponseCompressionAlgorithm.GZIP)
+            .buildWithAlternatorAPI();
+    try {
+      AlternatorConfig config = wrapper.getAlternatorConfig();
+      assertEquals(
+          Arrays.asList(ResponseCompressionAlgorithm.DEFLATE, ResponseCompressionAlgorithm.GZIP),
+          config.getResponseCompressionAlgorithms());
+      assertTrue(config.isResponseCompressionEnabled());
+    } finally {
+      wrapper.close();
+    }
+  }
+
+  @Test
+  public void testResponseCompressionDisabledPropagatesToConfig() {
+    AlternatorDynamoDbAsyncClientWrapper wrapper =
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(SEED_URI)
+            .withResponseCompressionDisabled()
+            .buildWithAlternatorAPI();
+    try {
+      AlternatorConfig config = wrapper.getAlternatorConfig();
+      assertTrue(config.getResponseCompressionAlgorithms().isEmpty());
+      assertFalse(config.isResponseCompressionEnabled());
+    } finally {
+      wrapper.close();
+    }
+  }
+
   @Test(expected = IllegalArgumentException.class)
   public void testWithUserAgentRejectsNullString() {
     AlternatorDynamoDbAsyncClient.builder().endpointOverride(SEED_URI).withUserAgent((String) null);

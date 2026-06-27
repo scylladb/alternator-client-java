@@ -8,6 +8,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -56,6 +58,19 @@ public class ResponseCompressionInterceptorTest {
     assertEquals(
         ResponseCompressionInterceptor.ACCEPT_ENCODING,
         modified.firstMatchingHeader("Accept-Encoding").get());
+  }
+
+  @Test
+  public void testCustomAcceptEncodingOrder() {
+    ResponseCompressionInterceptor customInterceptor =
+        new ResponseCompressionInterceptor(
+            Arrays.asList(ResponseCompressionAlgorithm.DEFLATE, ResponseCompressionAlgorithm.GZIP));
+    SdkHttpRequest request = createHttpRequest();
+
+    SdkHttpRequest modified =
+        customInterceptor.modifyHttpRequest(requestContext(request), new ExecutionAttributes());
+
+    assertEquals("deflate, gzip", modified.firstMatchingHeader("Accept-Encoding").get());
   }
 
   @Test
@@ -110,6 +125,26 @@ public class ResponseCompressionInterceptorTest {
     Optional<InputStream> modifiedContent = interceptor.modifyHttpResponseContent(context, attrs);
 
     assertEquals("br", modifiedResponse.firstMatchingHeader("Content-Encoding").get());
+    assertFalse(modifiedContent.isPresent());
+  }
+
+  @Test
+  public void testSupportedButNotConfiguredEncodingIsNotModified() throws Exception {
+    ResponseCompressionInterceptor gzipOnlyInterceptor =
+        new ResponseCompressionInterceptor(
+            Collections.singletonList(ResponseCompressionAlgorithm.GZIP));
+    byte[] compressed = deflate("deflate response".getBytes(StandardCharsets.UTF_8));
+    SdkHttpResponse response =
+        SdkHttpResponse.builder().statusCode(200).putHeader("Content-Encoding", "deflate").build();
+    ExecutionAttributes attrs = new ExecutionAttributes();
+    Context.ModifyHttpResponse context =
+        responseContext(response, new ByteArrayInputStream(compressed), null);
+
+    SdkHttpResponse modifiedResponse = gzipOnlyInterceptor.modifyHttpResponse(context, attrs);
+    Optional<InputStream> modifiedContent =
+        gzipOnlyInterceptor.modifyHttpResponseContent(context, attrs);
+
+    assertEquals("deflate", modifiedResponse.firstMatchingHeader("Content-Encoding").get());
     assertFalse(modifiedContent.isPresent());
   }
 

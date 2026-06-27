@@ -5,6 +5,8 @@ import static org.junit.Assert.*;
 import com.scylladb.alternator.routing.ClusterScope;
 import com.scylladb.alternator.routing.DatacenterScope;
 import com.scylladb.alternator.routing.RackScope;
+import java.util.Arrays;
+import java.util.Collections;
 import org.junit.Test;
 
 /**
@@ -22,6 +24,8 @@ public class AlternatorConfigCompressionTest {
     assertEquals(
         AlternatorConfig.DEFAULT_MIN_COMPRESSION_SIZE_BYTES, config.getMinCompressionSizeBytes());
     assertFalse(config.getCompressionAlgorithm().isEnabled());
+    assertEquals(Collections.emptyList(), config.getResponseCompressionAlgorithms());
+    assertFalse(config.isResponseCompressionEnabled());
   }
 
   @Test
@@ -119,5 +123,45 @@ public class AlternatorConfigCompressionTest {
   public void testDefaultMinCompressionSizeValue() {
     // Verify the default constant value is 1024 bytes (1 KB)
     assertEquals(1024, AlternatorConfig.DEFAULT_MIN_COMPRESSION_SIZE_BYTES);
+  }
+
+  @Test
+  public void testCustomResponseCompressionAlgorithmsPreserveOrder() {
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withResponseCompressionAlgorithms(
+                ResponseCompressionAlgorithm.DEFLATE, ResponseCompressionAlgorithm.GZIP)
+            .build();
+
+    assertEquals(
+        Arrays.asList(ResponseCompressionAlgorithm.DEFLATE, ResponseCompressionAlgorithm.GZIP),
+        config.getResponseCompressionAlgorithms());
+    assertTrue(config.isResponseCompressionEnabled());
+  }
+
+  @Test
+  public void testResponseCompressionDisabled() {
+    AlternatorConfig config = AlternatorConfig.builder().withResponseCompressionDisabled().build();
+
+    assertTrue(config.getResponseCompressionAlgorithms().isEmpty());
+    assertFalse(config.isResponseCompressionEnabled());
+    assertFalse(config.getRequiredHeaders().contains("Accept-Encoding"));
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testNullResponseCompressionAlgorithmsThrowException() {
+    AlternatorConfig.builder()
+        .withResponseCompressionAlgorithms((ResponseCompressionAlgorithm[]) null);
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testEmptyResponseCompressionAlgorithmsThrowException() {
+    AlternatorConfig.builder().withResponseCompressionAlgorithms();
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testNullResponseCompressionAlgorithmThrowsException() {
+    AlternatorConfig.builder()
+        .withResponseCompressionAlgorithms(ResponseCompressionAlgorithm.GZIP, null);
   }
 }

@@ -8,6 +8,8 @@ import java.io.IOException;
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.concurrent.CompletableFuture;
 import java.util.zip.DeflaterOutputStream;
 import java.util.zip.GZIPOutputStream;
@@ -57,7 +59,37 @@ public class ResponseCompressionIT {
     verifyAsyncResponse("deflate", deflate(RESPONSE_JSON));
   }
 
+  @Test
+  public void testSyncSdkClientUsesConfiguredResponseCompressionAlgorithms() throws Exception {
+    verifySyncResponse(
+        "gzip",
+        gzip(RESPONSE_JSON),
+        Collections.singletonList(ResponseCompressionAlgorithm.GZIP),
+        "gzip");
+  }
+
+  @Test
+  public void testAsyncSdkClientUsesConfiguredResponseCompressionAlgorithms() throws Exception {
+    verifyAsyncResponse(
+        "gzip",
+        gzip(RESPONSE_JSON),
+        Collections.singletonList(ResponseCompressionAlgorithm.GZIP),
+        "gzip");
+  }
+
   private static void verifySyncResponse(String encoding, byte[] compressedBody) {
+    verifySyncResponse(
+        encoding,
+        compressedBody,
+        ResponseCompressionAlgorithm.supportedAlgorithms(),
+        ResponseCompressionInterceptor.ACCEPT_ENCODING);
+  }
+
+  private static void verifySyncResponse(
+      String encoding,
+      byte[] compressedBody,
+      Collection<ResponseCompressionAlgorithm> algorithms,
+      String expectedAcceptEncoding) {
     CompressedResponseHttpClient httpClient =
         new CompressedResponseHttpClient(encoding, compressedBody);
     DynamoDbClient client =
@@ -66,7 +98,8 @@ public class ResponseCompressionIT {
             .region(Region.US_EAST_1)
             .credentialsProvider(AnonymousCredentialsProvider.create())
             .httpClient(httpClient)
-            .overrideConfiguration(c -> c.addExecutionInterceptor(new ResponseCompressionInterceptor()))
+            .overrideConfiguration(
+                c -> c.addExecutionInterceptor(new ResponseCompressionInterceptor(algorithms)))
             .build();
 
     try {
@@ -74,7 +107,7 @@ public class ResponseCompressionIT {
 
       assertEquals(TABLE_NAME, response.tableNames().get(0));
       assertEquals(
-          ResponseCompressionInterceptor.ACCEPT_ENCODING,
+          expectedAcceptEncoding,
           httpClient.capturedRequest.firstMatchingHeader("Accept-Encoding").get());
     } finally {
       client.close();
@@ -82,6 +115,19 @@ public class ResponseCompressionIT {
   }
 
   private static void verifyAsyncResponse(String encoding, byte[] compressedBody) throws Exception {
+    verifyAsyncResponse(
+        encoding,
+        compressedBody,
+        ResponseCompressionAlgorithm.supportedAlgorithms(),
+        ResponseCompressionInterceptor.ACCEPT_ENCODING);
+  }
+
+  private static void verifyAsyncResponse(
+      String encoding,
+      byte[] compressedBody,
+      Collection<ResponseCompressionAlgorithm> algorithms,
+      String expectedAcceptEncoding)
+      throws Exception {
     CompressedResponseAsyncHttpClient httpClient =
         new CompressedResponseAsyncHttpClient(encoding, compressedBody);
     DynamoDbAsyncClient client =
@@ -90,7 +136,8 @@ public class ResponseCompressionIT {
             .region(Region.US_EAST_1)
             .credentialsProvider(AnonymousCredentialsProvider.create())
             .httpClient(httpClient)
-            .overrideConfiguration(c -> c.addExecutionInterceptor(new ResponseCompressionInterceptor()))
+            .overrideConfiguration(
+                c -> c.addExecutionInterceptor(new ResponseCompressionInterceptor(algorithms)))
             .build();
 
     try {
@@ -98,7 +145,7 @@ public class ResponseCompressionIT {
 
       assertEquals(TABLE_NAME, response.tableNames().get(0));
       assertEquals(
-          ResponseCompressionInterceptor.ACCEPT_ENCODING,
+          expectedAcceptEncoding,
           httpClient.capturedRequest.firstMatchingHeader("Accept-Encoding").get());
     } finally {
       client.close();
