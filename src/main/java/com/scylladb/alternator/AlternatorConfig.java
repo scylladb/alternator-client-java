@@ -273,7 +273,7 @@ public class AlternatorConfig {
     this.responseCompressionAlgorithms =
         responseCompressionAlgorithms != null
             ? Collections.unmodifiableList(new ArrayList<>(responseCompressionAlgorithms))
-            : ResponseCompressionAlgorithm.defaultAlgorithms();
+            : Collections.emptyList();
     this.optimizeHeaders = optimizeHeaders;
     this.userAgentEnabled = userAgentEnabled;
     this.authenticationEnabled = authenticationEnabled;
@@ -383,8 +383,7 @@ public class AlternatorConfig {
    * Gets the configured HTTP response compression algorithms.
    *
    * <p>The algorithms are ordered as they will be sent in the {@code Accept-Encoding} header. The
-   * default is {@link ResponseCompressionAlgorithm#GZIP} followed by {@link
-   * ResponseCompressionAlgorithm#DEFLATE}. An empty list means response compression is disabled.
+   * default is an empty list, which means response compression is disabled.
    *
    * @return response compression algorithms, never null
    * @since 2.0.6
@@ -638,7 +637,7 @@ public class AlternatorConfig {
     private RequestCompressionAlgorithm compressionAlgorithm = RequestCompressionAlgorithm.NONE;
     private int minCompressionSizeBytes = DEFAULT_MIN_COMPRESSION_SIZE_BYTES;
     private List<ResponseCompressionAlgorithm> responseCompressionAlgorithms =
-        ResponseCompressionAlgorithm.defaultAlgorithms();
+        Collections.emptyList();
     private boolean optimizeHeaders = false;
     private Set<String> headersWhitelist = null; // null means use default based on config
     private boolean headersWhitelistWasSet = false;
@@ -768,7 +767,7 @@ public class AlternatorConfig {
      *
      * Set<String> required = builder.getRequiredHeaders();
      * // required contains: Host, X-Amz-Target, Content-Type, Content-Length,
-     * //                    Accept-Encoding, Content-Encoding, Authorization, X-Amz-Date
+     * //                    Content-Encoding, Authorization, X-Amz-Date
      * }</pre>
      *
      * @return an unmodifiable set of required header names for the current configuration
@@ -872,8 +871,8 @@ public class AlternatorConfig {
     /**
      * Sets the HTTP response compression algorithms to advertise and decode.
      *
-     * <p>The configured order is used for the {@code Accept-Encoding} header. The default is {@link
-     * ResponseCompressionAlgorithm#GZIP} followed by {@link ResponseCompressionAlgorithm#DEFLATE}.
+     * <p>The configured order is used for the {@code Accept-Encoding} header. Response compression
+     * is disabled by default.
      *
      * @param algorithms the response compression algorithms to enable
      * @return this builder instance
@@ -892,8 +891,8 @@ public class AlternatorConfig {
     /**
      * Sets the HTTP response compression algorithms to advertise and decode.
      *
-     * <p>The configured order is used for the {@code Accept-Encoding} header. The default is {@link
-     * ResponseCompressionAlgorithm#GZIP} followed by {@link ResponseCompressionAlgorithm#DEFLATE}.
+     * <p>The configured order is used for the {@code Accept-Encoding} header. Response compression
+     * is disabled by default.
      *
      * @param algorithms the response compression algorithms to enable
      * @return this builder instance

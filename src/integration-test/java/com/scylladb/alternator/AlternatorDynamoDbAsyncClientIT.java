@@ -424,6 +424,42 @@ public class AlternatorDynamoDbAsyncClientIT {
   }
 
   @Test
+  public void testResponseCompressionDisabledByDefaultDoesNotSetAcceptEncoding() throws Exception {
+    AtomicReference<String> acceptEncoding = new AtomicReference<>();
+
+    ExecutionInterceptor responseCompressionVerifier =
+        new ExecutionInterceptor() {
+          @Override
+          public void beforeTransmission(
+              Context.BeforeTransmission context, ExecutionAttributes executionAttributes) {
+            context
+                .httpRequest()
+                .firstMatchingHeader("Accept-Encoding")
+                .ifPresent(acceptEncoding::set);
+          }
+        };
+
+    ClientOverrideConfiguration overrideConfig =
+        ClientOverrideConfiguration.builder()
+            .addExecutionInterceptor(responseCompressionVerifier)
+            .build();
+
+    DynamoDbAsyncClient client =
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(seedUri)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
+            .overrideConfiguration(overrideConfig)
+            .build();
+
+    try {
+      client.listTables(ListTablesRequest.builder().limit(1).build()).get();
+      assertNull(acceptEncoding.get());
+    } finally {
+      client.close();
+    }
+  }
+
+  @Test
   public void testResponseCompressionNegotiatesAcceptEncoding() throws Exception {
     AtomicReference<String> acceptEncoding = new AtomicReference<>();
 
@@ -449,6 +485,8 @@ public class AlternatorDynamoDbAsyncClientIT {
             .endpointOverride(seedUri)
             .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
             .overrideConfiguration(overrideConfig)
+            .withResponseCompressionAlgorithms(
+                ResponseCompressionAlgorithm.GZIP, ResponseCompressionAlgorithm.DEFLATE)
             .build();
 
     try {
@@ -564,7 +602,6 @@ public class AlternatorDynamoDbAsyncClientIT {
                 "X-Amz-Target",
                 "Content-Type",
                 "Content-Length",
-                "Accept-Encoding", // Required header
                 "Authorization",
                 "X-Amz-Date",
                 "Connection",

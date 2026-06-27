@@ -206,7 +206,8 @@ public class HeadersFilteringSdkHttpClientTest {
     assertTrue(mockClient.capturedRequest.headers().containsKey("Content-Length"));
     assertTrue(mockClient.capturedRequest.headers().containsKey("Authorization"));
     assertTrue(mockClient.capturedRequest.headers().containsKey("X-Amz-Date"));
-    assertTrue(mockClient.capturedRequest.headers().containsKey("Accept-Encoding"));
+    // Accept-Encoding is preserved only when response compression is enabled.
+    assertFalse(mockClient.capturedRequest.headers().containsKey("Accept-Encoding"));
 
     // User-Agent should be preserved for driver reporting; other SDK metadata is filtered
     assertTrue(mockClient.capturedRequest.headers().containsKey("User-Agent"));

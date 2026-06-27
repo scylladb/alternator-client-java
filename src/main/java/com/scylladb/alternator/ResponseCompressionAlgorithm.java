@@ -19,7 +19,7 @@ public enum ResponseCompressionAlgorithm {
   /** DEFLATE response compression. */
   DEFLATE("deflate");
 
-  private static final List<ResponseCompressionAlgorithm> DEFAULT_ALGORITHMS =
+  private static final List<ResponseCompressionAlgorithm> SUPPORTED_ALGORITHMS =
       Collections.unmodifiableList(Arrays.asList(GZIP, DEFLATE));
 
   private final String contentEncoding;
@@ -37,8 +37,8 @@ public enum ResponseCompressionAlgorithm {
     return contentEncoding;
   }
 
-  static List<ResponseCompressionAlgorithm> defaultAlgorithms() {
-    return DEFAULT_ALGORITHMS;
+  static List<ResponseCompressionAlgorithm> supportedAlgorithms() {
+    return SUPPORTED_ALGORITHMS;
   }
 
   static List<ResponseCompressionAlgorithm> validatedList(

@@ -28,7 +28,8 @@ import software.amazon.awssdk.http.SdkHttpResponse;
 class ResponseCompressionInterceptor implements ExecutionInterceptor {
 
   static final String ACCEPT_ENCODING =
-      ResponseCompressionAlgorithm.acceptEncoding(ResponseCompressionAlgorithm.defaultAlgorithms());
+      ResponseCompressionAlgorithm.acceptEncoding(
+          ResponseCompressionAlgorithm.supportedAlgorithms());
 
   private static final String ACCEPT_ENCODING_HEADER = "Accept-Encoding";
   private static final String CONTENT_ENCODING_HEADER = "Content-Encoding";
@@ -39,7 +40,7 @@ class ResponseCompressionInterceptor implements ExecutionInterceptor {
   private final String acceptEncoding;
 
   ResponseCompressionInterceptor() {
-    this(ResponseCompressionAlgorithm.defaultAlgorithms());
+    this(ResponseCompressionAlgorithm.supportedAlgorithms());
   }
 
   ResponseCompressionInterceptor(Collection<ResponseCompressionAlgorithm> algorithms) {

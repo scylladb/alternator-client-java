@@ -404,18 +404,31 @@ mvn exec:java -Dexec.mainClass=com.scylladb.alternator.demo.Demo5 -Dexec.classpa
 
 #### Response compression
 
-The library automatically negotiates compressed responses by sending
-`Accept-Encoding: gzip, deflate` on DynamoDB requests. When Alternator returns
-`Content-Encoding: gzip` or `Content-Encoding: deflate`, the response body is
-decompressed before it reaches the AWS SDK response parser. This works for both
-synchronous and asynchronous clients and does not require any application
-configuration.
+Response compression is disabled by default. To negotiate compressed responses,
+configure the supported algorithms to advertise on DynamoDB requests. When enabled
+and Alternator returns `Content-Encoding: gzip` or `Content-Encoding: deflate`, the
+response body is decompressed before it reaches the AWS SDK response parser. This
+works for both synchronous and asynchronous clients.
 
 Response compression support:
 - `gzip` - supported
 - `deflate` - supported
 
-You can restrict response compression to a supported subset, and the configured
+To enable response compression for all supported algorithms:
+
+```java
+import com.scylladb.alternator.ResponseCompressionAlgorithm;
+
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://127.0.0.1:8043"))
+    .credentialsProvider(myCredentials)
+    .withResponseCompressionAlgorithms(
+        ResponseCompressionAlgorithm.GZIP,
+        ResponseCompressionAlgorithm.DEFLATE)
+    .build();
+```
+
+You can also restrict response compression to a supported subset, and the configured
 order is used for `Accept-Encoding`:
 
 ```java
@@ -428,7 +441,7 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
     .build();
 ```
 
-To disable response compression negotiation and decompression:
+To explicitly disable response compression negotiation and decompression:
 
 ```java
 DynamoDbClient client = AlternatorDynamoDbClient.builder()
@@ -519,12 +532,13 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
 
 #### Default headers whitelist
 
-When headers optimization is enabled, only the following headers are preserved by default:
+When headers optimization is enabled, the default whitelist preserves the headers required for
+the active configuration:
 - `Host` - Required by HTTP/1.1
 - `X-Amz-Target` - Specifies the DynamoDB operation
 - `Content-Type` - MIME type for DynamoDB API
 - `Content-Length` - Required for request body
-- `Accept-Encoding` - For response compression negotiation
+- `Accept-Encoding` - For response compression negotiation (when enabled)
 - `Content-Encoding` - For request compression (when enabled)
 - `Authorization` - AWS SigV4 signature (when authentication is enabled)
 - `X-Amz-Date` - Timestamp for AWS signature (when authentication is enabled)
@@ -545,8 +559,8 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
     .withOptimizeHeaders(true)
     .withHeadersWhitelist(Arrays.asList(
         "Host", "X-Amz-Target", "Content-Type", "Content-Length",
-        "Accept-Encoding", "Authorization", "X-Amz-Date", "Connection",
-        "User-Agent", "X-Custom-Header"))
+        "Authorization", "X-Amz-Date", "Connection", "User-Agent",
+        "X-Custom-Header"))
     .build();
 ```
 

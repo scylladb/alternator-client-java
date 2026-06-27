@@ -6,6 +6,7 @@ import com.scylladb.alternator.routing.ClusterScope;
 import com.scylladb.alternator.routing.DatacenterScope;
 import com.scylladb.alternator.routing.RackScope;
 import java.util.Arrays;
+import java.util.Collections;
 import org.junit.Test;
 
 /**
@@ -23,10 +24,8 @@ public class AlternatorConfigCompressionTest {
     assertEquals(
         AlternatorConfig.DEFAULT_MIN_COMPRESSION_SIZE_BYTES, config.getMinCompressionSizeBytes());
     assertFalse(config.getCompressionAlgorithm().isEnabled());
-    assertEquals(
-        Arrays.asList(ResponseCompressionAlgorithm.GZIP, ResponseCompressionAlgorithm.DEFLATE),
-        config.getResponseCompressionAlgorithms());
-    assertTrue(config.isResponseCompressionEnabled());
+    assertEquals(Collections.emptyList(), config.getResponseCompressionAlgorithms());
+    assertFalse(config.isResponseCompressionEnabled());
   }
 
   @Test

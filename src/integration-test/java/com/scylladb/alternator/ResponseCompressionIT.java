@@ -81,7 +81,7 @@ public class ResponseCompressionIT {
     verifySyncResponse(
         encoding,
         compressedBody,
-        ResponseCompressionAlgorithm.defaultAlgorithms(),
+        ResponseCompressionAlgorithm.supportedAlgorithms(),
         ResponseCompressionInterceptor.ACCEPT_ENCODING);
   }
 
@@ -118,7 +118,7 @@ public class ResponseCompressionIT {
     verifyAsyncResponse(
         encoding,
         compressedBody,
-        ResponseCompressionAlgorithm.defaultAlgorithms(),
+        ResponseCompressionAlgorithm.supportedAlgorithms(),
         ResponseCompressionInterceptor.ACCEPT_ENCODING);
   }
 
