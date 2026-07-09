@@ -239,10 +239,28 @@ code that looks something like this:
         .build();
 ```
 
-The `region()` chosen doesn't matter when the endpoint is explicitly chosen
-with `endpointOverride()`, but nevertheless should be specified otherwise the
-SDK will try to look it up in a configuration file, and complain if it isn't
-set there.
+The AWS region is still part of the AWS SDK client configuration even when
+`endpointOverride()` sends every request to Alternator instead of an AWS
+DynamoDB regional endpoint. Alternator does not use this value for routing; the
+library chooses nodes from `/localnodes` and the configured routing scope.
+However, the SDK requires a region for signing and configuration resolution, and
+the value can appear in tracing, logging, metrics, or debug output.
+
+`AlternatorDynamoDbClient` sets `fake-aws-region` when the application does not
+provide a region so the SDK does not fall back to profile or environment
+discovery and fail before Alternator is contacted. If that placeholder would be
+confusing in observability tools, set a meaningful value explicitly:
+
+```java
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .region(Region.of("us-east-1"))
+    .endpointOverride(URI.create("https://127.0.0.1:8043"))
+    .credentialsProvider(myCredentials)
+    .build();
+```
+
+Use the deployment or Scylla Cloud region that makes sense for your operators;
+it does not change Alternator node selection.
 
 #### Using `AlternatorDynamoDbClient`
 
