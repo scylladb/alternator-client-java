@@ -759,6 +759,7 @@ public class AlternatorDynamoDbAsyncClient {
       SyncClientDetector.SyncClientType syncType = SyncClientDetector.detect();
       SdkHttpClient pollingClient = SyncClientDetector.createPollingClient(syncType, tlsConfig);
 
+      pollingClient = configurePollingSyncClient(pollingClient, alternatorConfig);
       AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(alternatorConfig, pollingClient);
       liveNodes.start();
 
@@ -907,6 +908,14 @@ public class AlternatorDynamoDbAsyncClient {
 
     private boolean needsHttpClientWrapper(AlternatorConfig alternatorConfig) {
       return userAgentTransformer != null || alternatorConfig.isOptimizeHeaders();
+    }
+
+    private SdkHttpClient configurePollingSyncClient(
+        SdkHttpClient pollingClient, AlternatorConfig alternatorConfig) {
+      if (alternatorConfig.isUserAgentEnabled()) {
+        return new UserAgentSdkHttpClient(pollingClient, userAgentTransformer);
+      }
+      return pollingClient;
     }
 
     private void applyEndpointToConfig() {

@@ -781,6 +781,7 @@ public class AlternatorDynamoDbClient {
         pollingClient = SyncClientDetector.createPollingClient(pollingType, tlsConfig);
       }
 
+      pollingClient = configurePollingSyncClient(pollingClient, alternatorConfig);
       AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(alternatorConfig, pollingClient);
       liveNodes.start();
 
@@ -906,6 +907,14 @@ public class AlternatorDynamoDbClient {
                 configuredClient, alternatorConfig.getHeadersWhitelist());
       }
       return configuredClient;
+    }
+
+    private SdkHttpClient configurePollingSyncClient(
+        SdkHttpClient pollingClient, AlternatorConfig alternatorConfig) {
+      if (alternatorConfig.isUserAgentEnabled()) {
+        return new UserAgentSdkHttpClient(pollingClient, userAgentTransformer);
+      }
+      return pollingClient;
     }
 
     private void configureCustomSyncClient(AlternatorConfig alternatorConfig) {

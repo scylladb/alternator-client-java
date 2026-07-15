@@ -4,11 +4,17 @@ import static org.junit.Assert.*;
 
 import com.scylladb.alternator.internal.SyncClientDetector;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.net.URI;
 import java.util.Arrays;
 import java.util.function.UnaryOperator;
 import org.junit.Test;
+import software.amazon.awssdk.http.ExecutableHttpRequest;
+import software.amazon.awssdk.http.HttpExecuteRequest;
+import software.amazon.awssdk.http.HttpExecuteResponse;
 import software.amazon.awssdk.http.SdkHttpClient;
+import software.amazon.awssdk.http.SdkHttpMethod;
+import software.amazon.awssdk.http.SdkHttpRequest;
 import software.amazon.awssdk.http.apache.ApacheHttpClient;
 
 /**
@@ -428,6 +434,37 @@ public class AlternatorDynamoDbClientCustomizerTest {
         userAgentTransformer(builder).apply("aws-sdk-java/2.x"));
   }
 
+  @Test
+  public void testPollingClientAddsDefaultUserAgent() throws Exception {
+    var builder = AlternatorDynamoDbClient.builder().endpointOverride(SEED_URI);
+    CapturingSdkHttpClient delegate = new CapturingSdkHttpClient();
+    SdkHttpClient configured =
+        configurePollingSyncClient(builder, delegate, AlternatorConfig.builder().build());
+
+    configured.prepareRequest(HttpExecuteRequest.builder().request(localNodesRequest()).build());
+
+    assertEquals(
+        AlternatorUserAgent.userAgentToken(),
+        delegate.capturedRequest.firstMatchingHeader("User-Agent").get());
+  }
+
+  @Test
+  public void testPollingClientAppliesCustomUserAgent() throws Exception {
+    var builder =
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(SEED_URI)
+            .withUserAgent(userAgent -> userAgent + " app/1");
+    CapturingSdkHttpClient delegate = new CapturingSdkHttpClient();
+    SdkHttpClient configured =
+        configurePollingSyncClient(builder, delegate, AlternatorConfig.builder().build());
+
+    configured.prepareRequest(HttpExecuteRequest.builder().request(localNodesRequest()).build());
+
+    assertEquals(
+        AlternatorUserAgent.userAgentToken() + " app/1",
+        delegate.capturedRequest.firstMatchingHeader("User-Agent").get());
+  }
+
   @Test(expected = IllegalStateException.class)
   public void testHttpClientTypeConflictsWithHttpClientBuilder() {
     AlternatorDynamoDbClient.builder()
@@ -453,5 +490,54 @@ public class AlternatorDynamoDbClientCustomizerTest {
     Field field = builder.getClass().getDeclaredField("userAgentTransformer");
     field.setAccessible(true);
     return (UnaryOperator<String>) field.get(builder);
+  }
+
+  private SdkHttpClient configurePollingSyncClient(
+      AlternatorDynamoDbClient.AlternatorDynamoDbClientBuilder builder,
+      SdkHttpClient pollingClient,
+      AlternatorConfig config)
+      throws Exception {
+    Method method =
+        builder
+            .getClass()
+            .getDeclaredMethod(
+                "configurePollingSyncClient", SdkHttpClient.class, AlternatorConfig.class);
+    method.setAccessible(true);
+    return (SdkHttpClient) method.invoke(builder, pollingClient, config);
+  }
+
+  private SdkHttpRequest localNodesRequest() {
+    return SdkHttpRequest.builder()
+        .method(SdkHttpMethod.GET)
+        .uri(SEED_URI.resolve("/localnodes"))
+        .putHeader("Host", SEED_URI.getHost() + ":" + SEED_URI.getPort())
+        .putHeader("Connection", "keep-alive")
+        .build();
+  }
+
+  private static class CapturingSdkHttpClient implements SdkHttpClient {
+    SdkHttpRequest capturedRequest;
+
+    @Override
+    public ExecutableHttpRequest prepareRequest(HttpExecuteRequest request) {
+      capturedRequest = request.httpRequest();
+      return new ExecutableHttpRequest() {
+        @Override
+        public HttpExecuteResponse call() {
+          return null;
+        }
+
+        @Override
+        public void abort() {}
+      };
+    }
+
+    @Override
+    public void close() {}
+
+    @Override
+    public String clientName() {
+      return "capturing";
+    }
   }
 }
