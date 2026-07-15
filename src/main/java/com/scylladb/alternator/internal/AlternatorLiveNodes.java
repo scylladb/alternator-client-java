@@ -73,7 +73,7 @@ public class AlternatorLiveNodes extends Thread {
             logger.log(Level.FINE, "AlternatorLiveNodes polling stopped during shutdown", e);
             return;
           }
-          throw e;
+          logger.log(Level.SEVERE, "AlternatorLiveNodes polling failed unexpectedly", e);
         }
         try {
           Thread.sleep(getRefreshInterval());
