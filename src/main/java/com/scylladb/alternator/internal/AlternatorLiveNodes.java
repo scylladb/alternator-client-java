@@ -78,9 +78,12 @@ public class AlternatorLiveNodes extends Thread {
         try {
           Thread.sleep(getRefreshInterval());
         } catch (InterruptedException e) {
-          logger.log(Level.INFO, "AlternatorLiveNodes thread interrupted and stopping");
-          Thread.currentThread().interrupt(); // Restore interrupted status
-          return;
+          if (shutdownRequested.get()) {
+            logger.log(Level.INFO, "AlternatorLiveNodes thread interrupted and stopping");
+            Thread.currentThread().interrupt(); // Restore interrupted status
+            return;
+          }
+          logger.log(Level.FINE, "AlternatorLiveNodes thread interrupted without shutdown request");
         }
       }
     } finally {
