@@ -152,9 +152,9 @@ public class AlternatorLiveNodesScopeFallbackTest {
    * Verifies that when all discovered nodes become unreachable, the client should fall back to the
    * original seed nodes for re-discovery.
    *
-   * <p>After a successful discovery replaces liveNodes with new nodes, if all those new nodes
-   * become unreachable, the client should re-inject the seed URLs into its candidate list so it can
-   * recover through the original entry points.
+   * <p>After a successful discovery replaces liveNodes with new nodes, if those live nodes cannot
+   * return a usable /localnodes response, the client should fall back to the original seed URLs so
+   * it can recover through the configured entry points.
    *
    * @throws Exception if an unexpected error occurs
    */
@@ -173,7 +173,7 @@ public class AlternatorLiveNodesScopeFallbackTest {
     assertEquals(1, initialList.size());
     assertEquals("10.0.0.1", initialList.get(0).getHost());
 
-    // After a successful update, liveNodes should contain discovered nodes AND the seed
+    // After a successful update, liveNodes should contain discovered nodes without injecting seeds
     liveNodes.updateLiveNodes();
     List<URI> updatedList = liveNodes.getLiveNodes();
     List<String> hosts = new ArrayList<>();
@@ -183,12 +183,8 @@ public class AlternatorLiveNodesScopeFallbackTest {
     assertTrue("Should contain discovered node 10.0.0.2", hosts.contains("10.0.0.2"));
     assertTrue("Should contain discovered node 10.0.0.3", hosts.contains("10.0.0.3"));
 
-    // The seed node should still be present in liveNodes as a fallback,
-    // so that if 10.0.0.2 and 10.0.0.3 both die, the client can re-discover via 10.0.0.1.
-    assertTrue(
-        "Seed node 10.0.0.1 should be retained as a fallback after discovery, "
-            + "but liveNodes only contains: "
-            + hosts,
+    assertFalse(
+        "Seed node 10.0.0.1 should remain a discovery candidate, not a routing target",
         hosts.contains("10.0.0.1"));
   }
 
@@ -264,14 +260,16 @@ public class AlternatorLiveNodesScopeFallbackTest {
         3,
         requestCount.get());
 
-    // liveNodes should now contain the cluster-scope node and the seed node
+    // liveNodes should now contain only the cluster-scope node
     List<URI> nodes = liveNodes.getLiveNodes();
     List<String> nodeHosts = new ArrayList<>();
     for (URI uri : nodes) {
       nodeHosts.add(uri.getHost());
     }
     assertTrue("Should contain cluster-scope node 10.0.0.5", nodeHosts.contains("10.0.0.5"));
-    assertTrue("Should contain seed node 10.0.0.1 as fallback", nodeHosts.contains("10.0.0.1"));
+    assertFalse(
+        "Seed node 10.0.0.1 should not be added to the routing list",
+        nodeHosts.contains("10.0.0.1"));
   }
 
   /**

@@ -531,7 +531,7 @@ public class AlternatorLiveNodes extends Thread {
       try {
         List<URI> nodes = getNodesForScope(scope);
         if (!nodes.isEmpty()) {
-          liveNodes.set(mergeWithInitialNodes(nodes));
+          liveNodes.set(nodes);
           logger.log(
               Level.FINE, "Updated hosts to " + liveNodes + " using " + scope.getDescription());
           return;
@@ -551,12 +551,12 @@ public class AlternatorLiveNodes extends Thread {
       }
       scope = fallback;
     }
-    // No nodes found in any scope - keep the current list but ensure seeds are present
+    // No nodes found in any scope - keep the current list. Initial seed nodes are retained
+    // separately and remain discovery candidates without being injected into the routing list.
     if (lastException != null) {
-      liveNodes.set(mergeWithInitialNodes(liveNodes.get()));
       logger.log(
           Level.WARNING,
-          "All nodes unreachable in every routing scope, re-injected seed nodes into live list");
+          "All nodes unreachable in every routing scope, keeping existing node list");
     } else {
       logger.log(Level.WARNING, "No nodes found in any routing scope, keeping existing node list");
     }
@@ -565,50 +565,95 @@ public class AlternatorLiveNodes extends Thread {
   private List<URI> getNodesForScope(RoutingScope scope) throws IOException {
     String query = scope.getLocalNodesQuery();
     String requestQuery = query.isEmpty() ? null : query;
+
+    DiscoveryAttempt liveAttempt =
+        discoverNodes(scope, liveDiscoveryCandidates(), requestQuery, "live node");
+    if (!liveAttempt.nodes.isEmpty()) {
+      return liveAttempt.nodes;
+    }
+
+    DiscoveryAttempt seedAttempt =
+        discoverNodes(
+            scope, initialDiscoveryCandidates(liveAttempt.candidates), requestQuery, "seed node");
+    if (!seedAttempt.nodes.isEmpty()) {
+      return seedAttempt.nodes;
+    }
+
+    if (seedAttempt.lastException != null) {
+      throw seedAttempt.lastException;
+    }
+    if (liveAttempt.lastException != null) {
+      throw liveAttempt.lastException;
+    }
+    return Collections.emptyList();
+  }
+
+  private DiscoveryAttempt discoverNodes(
+      RoutingScope scope, List<URI> candidates, String requestQuery, String candidateDescription) {
     IOException lastException = null;
     Set<URI> nodes = new LinkedHashSet<>();
-    for (URI seedNode : initialNodes) {
+    for (URI candidate : candidates) {
       try {
-        List<URI> seedNodes = getNodes(withPathAndQuery(seedNode, "/localnodes", requestQuery));
-        if (!seedNodes.isEmpty()) {
+        List<URI> discoveredNodes =
+            getNodes(withPathAndRawQuery(candidate, "/localnodes", requestQuery));
+        if (!discoveredNodes.isEmpty()) {
           if (!(scope instanceof ClusterScope)) {
-            return seedNodes;
+            return new DiscoveryAttempt(candidates, discoveredNodes, lastException);
           }
-          nodes.addAll(seedNodes);
+          nodes.addAll(discoveredNodes);
         }
       } catch (IOException e) {
         logger.log(
             Level.WARNING,
-            "Failed to contact seed node " + seedNode + " for " + scope.getDescription(),
+            "Failed to contact "
+                + candidateDescription
+                + " "
+                + candidate
+                + " for "
+                + scope.getDescription(),
             e);
         lastException = e;
       } catch (URISyntaxException e) {
         throw new RuntimeException(e);
       }
     }
-    if (!nodes.isEmpty()) {
-      return new ArrayList<>(nodes);
-    }
-    if (lastException != null) {
-      throw lastException;
-    }
-    return Collections.emptyList();
+
+    return new DiscoveryAttempt(candidates, new ArrayList<>(nodes), lastException);
   }
 
-  /**
-   * Merges the given node list with the initial seed nodes, ensuring seed nodes are always present
-   * as fallback candidates for re-discovery. Seed nodes are appended at the end to preserve the
-   * ordering priority of discovered nodes.
-   *
-   * @param nodes the current list of discovered nodes
-   * @return a new list containing all discovered nodes plus any missing seed nodes
-   */
-  private List<URI> mergeWithInitialNodes(List<URI> nodes) {
-    Set<URI> seen = new LinkedHashSet<>(nodes);
-    for (URI seed : initialNodes) {
-      seen.add(seed);
+  private List<URI> liveDiscoveryCandidates() {
+    return new ArrayList<>(new LinkedHashSet<>(liveNodes.get()));
+  }
+
+  private List<URI> initialDiscoveryCandidates(List<URI> alreadyTried) {
+    Set<URI> candidates = new LinkedHashSet<>(initialNodes);
+    candidates.removeAll(alreadyTried);
+    return new ArrayList<>(candidates);
+  }
+
+  private static class DiscoveryAttempt {
+    final List<URI> candidates;
+    final List<URI> nodes;
+    final IOException lastException;
+
+    DiscoveryAttempt(List<URI> candidates, List<URI> nodes, IOException lastException) {
+      this.candidates = candidates;
+      this.nodes = nodes;
+      this.lastException = lastException;
     }
-    return new ArrayList<>(seen);
+  }
+
+  private URI withPathAndRawQuery(URI uri, String path, String rawQuery) throws URISyntaxException {
+    URI withoutQuery =
+        new URI(uri.getScheme(), null, uri.getHost(), uri.getPort(), path, null, null);
+    if (rawQuery == null || rawQuery.isEmpty()) {
+      return withoutQuery;
+    }
+    try {
+      return new URI(withoutQuery.toASCIIString() + "?" + rawQuery);
+    } catch (URISyntaxException e) {
+      return new URI(uri.getScheme(), null, uri.getHost(), uri.getPort(), path, rawQuery, null);
+    }
   }
 
   private List<URI> getNodes(URI uri) throws IOException {

@@ -78,7 +78,7 @@ public final class DatacenterScope implements RoutingScope {
   /** {@inheritDoc} */
   @Override
   public String getLocalNodesQuery() {
-    return "dc=" + datacenter;
+    return "dc=" + RoutingScopeQuery.encodeValue(datacenter);
   }
 
   /** {@inheritDoc} */

@@ -101,7 +101,10 @@ public final class RackScope implements RoutingScope {
   /** {@inheritDoc} */
   @Override
   public String getLocalNodesQuery() {
-    return "dc=" + datacenter + "&rack=" + rack;
+    return "dc="
+        + RoutingScopeQuery.encodeValue(datacenter)
+        + "&rack="
+        + RoutingScopeQuery.encodeValue(rack);
   }
 
   /** {@inheritDoc} */

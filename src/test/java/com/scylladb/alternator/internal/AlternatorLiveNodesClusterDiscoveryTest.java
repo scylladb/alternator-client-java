@@ -6,6 +6,7 @@ import com.scylladb.alternator.AlternatorConfig;
 import com.scylladb.alternator.routing.ClusterScope;
 import com.scylladb.alternator.routing.DatacenterScope;
 import com.scylladb.alternator.routing.RackScope;
+import com.scylladb.alternator.routing.RoutingScope;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.net.URI;
@@ -137,11 +138,82 @@ public class AlternatorLiveNodesClusterDiscoveryTest {
     liveNodes.updateLiveNodes();
 
     assertEquals(
-        new LinkedHashSet<>(Arrays.asList("dc1-node1.example.com", "dc2-node1.example.com")),
+        new LinkedHashSet<>(Arrays.asList("dc1-node1.example.com")),
         hostSet(liveNodes.getLiveNodes()));
     assertEquals(
         new HashSet<>(Arrays.asList("dc1-node1.example.com", "dc2-node1.example.com")),
         capturedHostSet(httpClient.capturedRequests));
+  }
+
+  @Test
+  public void testDiscoveryUsesKnownLiveNodesBeforeInitialSeed() throws Exception {
+    Map<String, String> responses = new HashMap<>();
+    Set<String> failingHosts = new HashSet<>();
+    responses.put("seed.example.com", "[\"node2.example.com\",\"node3.example.com\"]");
+    responses.put("node2.example.com", "[\"node2.example.com\",\"node3.example.com\"]");
+    responses.put("node3.example.com", "[\"node2.example.com\",\"node3.example.com\"]");
+    DiscoveryHttpClient httpClient = new DiscoveryHttpClient(responses, failingHosts);
+
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withSeedHost("seed.example.com")
+            .withScheme("http")
+            .withPort(8000)
+            .withRoutingScope(ClusterScope.create())
+            .build();
+
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, httpClient);
+    liveNodes.updateLiveNodes();
+    assertEquals(
+        new LinkedHashSet<>(Arrays.asList("node2.example.com", "node3.example.com")),
+        hostSet(liveNodes.getLiveNodes()));
+
+    failingHosts.add("seed.example.com");
+    httpClient.capturedRequests.clear();
+    liveNodes.updateLiveNodes();
+
+    assertEquals(
+        new LinkedHashSet<>(Arrays.asList("node2.example.com", "node3.example.com")),
+        hostSet(liveNodes.getLiveNodes()));
+    assertEquals(
+        new HashSet<>(Arrays.asList("node2.example.com", "node3.example.com")),
+        capturedHostSet(httpClient.capturedRequests));
+  }
+
+  @Test
+  public void testDiscoveryFallsBackToInitialSeedWhenLiveNodesReturnNoNodes() throws Exception {
+    Map<String, String> responses = new HashMap<>();
+    Set<String> failingHosts = new HashSet<>();
+    responses.put("seed.example.com", "[\"node2.example.com\",\"node3.example.com\"]");
+    responses.put("node2.example.com", "[]");
+    responses.put("node3.example.com", "[]");
+    DiscoveryHttpClient httpClient = new DiscoveryHttpClient(responses, failingHosts);
+
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withSeedHost("seed.example.com")
+            .withScheme("http")
+            .withPort(8000)
+            .withRoutingScope(ClusterScope.create())
+            .build();
+
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, httpClient);
+    liveNodes.updateLiveNodes();
+    assertEquals(
+        new LinkedHashSet<>(Arrays.asList("node2.example.com", "node3.example.com")),
+        hostSet(liveNodes.getLiveNodes()));
+
+    failingHosts.add("node2.example.com");
+    responses.put("seed.example.com", "[\"recovered.example.com\"]");
+    httpClient.capturedRequests.clear();
+    liveNodes.updateLiveNodes();
+
+    assertEquals(
+        new LinkedHashSet<>(Arrays.asList("recovered.example.com")),
+        hostSet(liveNodes.getLiveNodes()));
+    assertEquals(
+        Arrays.asList("node2.example.com", "node3.example.com", "seed.example.com"),
+        capturedHosts(httpClient.capturedRequests));
   }
 
   @Test
@@ -165,9 +237,7 @@ public class AlternatorLiveNodesClusterDiscoveryTest {
     liveNodes.updateLiveNodes();
 
     assertEquals(
-        new LinkedHashSet<>(
-            Arrays.asList(
-                "dc1-rack1-node.example.com", "dc2-node1.example.com", "dc1-node1.example.com")),
+        new LinkedHashSet<>(Arrays.asList("dc1-rack1-node.example.com")),
         hostSet(liveNodes.getLiveNodes()));
     assertEquals(
         Arrays.asList("dc2-node1.example.com", "dc1-node1.example.com"),
@@ -176,6 +246,51 @@ public class AlternatorLiveNodesClusterDiscoveryTest {
       assertTrue(request.rawQueryParameters().containsKey("dc"));
       assertTrue(request.rawQueryParameters().containsKey("rack"));
     }
+  }
+
+  @Test
+  public void testScopedLocalNodesQueryValuesAreEncodedOnce() throws Exception {
+    Map<String, String> responses = new HashMap<>();
+    responses.put("seed.example.com", "[\"scoped-node.example.com\"]");
+    DiscoveryHttpClient httpClient = new DiscoveryHttpClient(responses);
+
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withSeedHost("seed.example.com")
+            .withScheme("http")
+            .withPort(8000)
+            .withRoutingScope(RackScope.of("dc&prod", "rack=1/blue", null))
+            .build();
+
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, httpClient);
+    liveNodes.updateLiveNodes();
+
+    SdkHttpRequest request = httpClient.capturedRequests.get(0);
+    String encodedQuery = request.encodedQueryParameters().get();
+    assertTrue(encodedQuery.contains("dc=dc%26prod"));
+    assertTrue(encodedQuery.contains("rack=rack%3D1%2Fblue"));
+    assertFalse(encodedQuery.contains("%25"));
+  }
+
+  @Test
+  public void testCustomScopeLocalNodesQueryValuesAreEncodedWhenNeeded() throws Exception {
+    Map<String, String> responses = new HashMap<>();
+    responses.put("seed.example.com", "[\"scoped-node.example.com\"]");
+    DiscoveryHttpClient httpClient = new DiscoveryHttpClient(responses);
+
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withSeedHost("seed.example.com")
+            .withScheme("http")
+            .withPort(8000)
+            .withRoutingScope(customScope("dc=us east"))
+            .build();
+
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, httpClient);
+    liveNodes.updateLiveNodes();
+
+    SdkHttpRequest request = httpClient.capturedRequests.get(0);
+    assertEquals("dc=us%20east", request.encodedQueryParameters().get());
   }
 
   @Test
@@ -230,5 +345,29 @@ public class AlternatorLiveNodesClusterDiscoveryTest {
       hosts.add(request.host());
     }
     return hosts;
+  }
+
+  private static RoutingScope customScope(String query) {
+    return new RoutingScope() {
+      @Override
+      public String getName() {
+        return "Custom";
+      }
+
+      @Override
+      public String getDescription() {
+        return "Custom";
+      }
+
+      @Override
+      public RoutingScope getFallback() {
+        return null;
+      }
+
+      @Override
+      public String getLocalNodesQuery() {
+        return query;
+      }
+    };
   }
 }

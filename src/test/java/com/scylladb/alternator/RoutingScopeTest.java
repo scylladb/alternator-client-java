@@ -119,6 +119,12 @@ public class RoutingScopeTest {
   }
 
   @Test
+  public void testDatacenterScopeEncodesLocalNodesQueryValue() {
+    DatacenterScope scope = DatacenterScope.of("dc&prod=blue zone", null);
+    assertEquals("dc=dc%26prod%3Dblue%20zone", scope.getLocalNodesQuery());
+  }
+
+  @Test
   public void testDatacenterScopeToString() {
     DatacenterScope scope = DatacenterScope.of("dc1", ClusterScope.create());
     assertTrue(scope.toString().contains("dc1"));
@@ -197,6 +203,12 @@ public class RoutingScopeTest {
   public void testRackScopeGetLocalNodesQuery() {
     RackScope scope = RackScope.of("dc1", "rack1", null);
     assertEquals("dc=dc1&rack=rack1", scope.getLocalNodesQuery());
+  }
+
+  @Test
+  public void testRackScopeEncodesLocalNodesQueryValues() {
+    RackScope scope = RackScope.of("dc&prod", "rack=1/blue zone", null);
+    assertEquals("dc=dc%26prod&rack=rack%3D1%2Fblue%20zone", scope.getLocalNodesQuery());
   }
 
   @Test
