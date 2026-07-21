@@ -27,6 +27,14 @@
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
+            <!-- jackson-databind is a transitive dependency of the AWS SDK but is not
+                 exported as a managed version in the SDK BOM. Pin it here centrally
+                 so the version appears in one place and can be overridden by a parent POM. -->
+            <dependency>
+                <groupId>com.fasterxml.jackson.core</groupId>
+                <artifactId>jackson-databind</artifactId>
+                <version>2.22.1</version>
+            </dependency>
         </dependencies>
     </dependencyManagement>
     <dependencies>
@@ -50,6 +58,14 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>aws-crt-client</artifactId>
             <scope>provided</scope>
+        </dependency>
+        <!-- Jackson Databind is used by VectorSearchInterceptor for JSON manipulation.
+             Publish it transitively so clients can construct the auto-configured
+             AlternatorDynamoDbClient without declaring Jackson themselves. Version is
+             managed in <dependencyManagement> above. -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
         </dependency>
         <dependency>
 			<groupId>net.sourceforge.argparse4j</groupId>

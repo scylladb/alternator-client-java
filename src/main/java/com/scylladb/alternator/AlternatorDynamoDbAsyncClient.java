@@ -10,6 +10,7 @@ import com.scylladb.alternator.keyrouting.KeyRouteAffinityConfig;
 import com.scylladb.alternator.queryplan.AffinityQueryPlanInterceptor;
 import com.scylladb.alternator.queryplan.BasicQueryPlanInterceptor;
 import com.scylladb.alternator.routing.RoutingScope;
+import com.scylladb.alternator.vectorsearch.VectorSearchInterceptor;
 import java.net.URI;
 import java.util.Collection;
 import java.util.Objects;
@@ -732,21 +733,6 @@ public class AlternatorDynamoDbAsyncClient {
 
       AlternatorConfig alternatorConfig = configBuilder.build();
 
-      ClientOverrideConfiguration.Builder compressionOverrideBuilder =
-          delegate.overrideConfiguration() != null
-              ? delegate.overrideConfiguration().toBuilder()
-              : ClientOverrideConfiguration.builder();
-      if (alternatorConfig.isResponseCompressionEnabled()) {
-        compressionOverrideBuilder.addExecutionInterceptor(
-            new ResponseCompressionInterceptor(
-                alternatorConfig.getResponseCompressionAlgorithms()));
-      }
-      if (alternatorConfig.getCompressionAlgorithm().isEnabled()) {
-        compressionOverrideBuilder.addExecutionInterceptor(
-            new GzipRequestInterceptor(alternatorConfig.getMinCompressionSizeBytes()));
-      }
-      delegate.overrideConfiguration(compressionOverrideBuilder.build());
-
       TlsConfig tlsConfig = alternatorConfig.getTlsConfig();
       if (!httpClientSet) {
         SdkAsyncHttpClient mainClient =
@@ -768,6 +754,24 @@ public class AlternatorDynamoDbAsyncClient {
               ? delegate.overrideConfiguration().toBuilder()
               : ClientOverrideConfiguration.builder();
 
+      // Interceptor registration order matters. Request hooks run in the listed order; response
+      // hooks run in reverse order.
+      //   1. VectorSearchInterceptor injects VectorIndexes/VectorSearch JSON and converts
+      //      FLOAT32VECTOR markers; it must see the original request body.
+      //   2. ResponseCompressionInterceptor adds Accept-Encoding and, on responses, decodes before
+      //      vector response parsing.
+      //   3. GzipRequestInterceptor compresses the already vector-modified request body.
+      //   4. QueryPlanInterceptor selects the target node; body-independent.
+      overrideBuilder.addExecutionInterceptor(VectorSearchInterceptor.INSTANCE);
+      if (alternatorConfig.isResponseCompressionEnabled()) {
+        overrideBuilder.addExecutionInterceptor(
+            new ResponseCompressionInterceptor(
+                alternatorConfig.getResponseCompressionAlgorithms()));
+      }
+      if (alternatorConfig.getCompressionAlgorithm().isEnabled()) {
+        overrideBuilder.addExecutionInterceptor(
+            new GzipRequestInterceptor(alternatorConfig.getMinCompressionSizeBytes()));
+      }
       KeyRouteAffinityConfig keyAffinityConfig = alternatorConfig.getKeyRouteAffinityConfig();
       AffinityQueryPlanInterceptor affinityInterceptor = null;
       if (keyAffinityConfig != null
