@@ -2,6 +2,7 @@ package com.scylladb.alternator;
 
 import static org.junit.Assert.*;
 
+import com.scylladb.alternator.vectorsearch.VectorSearchInterceptor;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -24,6 +25,8 @@ import software.amazon.awssdk.core.SdkRequest;
 import software.amazon.awssdk.core.async.AsyncRequestBody;
 import software.amazon.awssdk.core.interceptor.Context;
 import software.amazon.awssdk.core.interceptor.ExecutionAttributes;
+import software.amazon.awssdk.core.interceptor.ExecutionInterceptorChain;
+import software.amazon.awssdk.core.interceptor.InterceptorContext;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.http.SdkHttpMethod;
 import software.amazon.awssdk.http.SdkHttpRequest;
@@ -201,6 +204,71 @@ public class ResponseCompressionInterceptorTest {
         interceptor.modifyAsyncHttpResponseContent(context, attrs);
 
     assertArrayEquals(original, collect(modifiedPublisher.get()));
+  }
+
+  @Test
+  public void testResponseCompressionRunsBeforeVectorSearchForSyncResponses() throws Exception {
+    byte[] original =
+        "{\"Item\":{\"embedding\":{\"FLOAT32VECTOR\":[1.0,2.0]}}}".getBytes(StandardCharsets.UTF_8);
+    byte[] compressed = gzip(original);
+    SdkHttpResponse response =
+        SdkHttpResponse.builder()
+            .statusCode(200)
+            .putHeader("Content-Encoding", "gzip")
+            .putHeader("Content-Length", Integer.toString(compressed.length))
+            .build();
+    ExecutionInterceptorChain chain =
+        new ExecutionInterceptorChain(
+            Arrays.asList(VectorSearchInterceptor.INSTANCE, new ResponseCompressionInterceptor()));
+    ExecutionAttributes attrs = new ExecutionAttributes();
+    InterceptorContext context =
+        InterceptorContext.builder()
+            .request(ListTablesRequest.builder().build())
+            .httpRequest(createHttpRequest())
+            .httpResponse(response)
+            .responseBody(new ByteArrayInputStream(compressed))
+            .build();
+
+    InterceptorContext result = chain.modifyHttpResponse(context, attrs);
+
+    assertFalse(result.httpResponse().firstMatchingHeader("Content-Encoding").isPresent());
+    assertFalse(result.httpResponse().firstMatchingHeader("Content-Length").isPresent());
+    String body = new String(readAll(result.responseBody().get()), StandardCharsets.UTF_8);
+    assertTrue(body.contains("\"L\""));
+    assertFalse(body.contains("FLOAT32VECTOR"));
+  }
+
+  @Test
+  public void testResponseCompressionRunsBeforeVectorSearchForAsyncResponses() throws Exception {
+    byte[] original =
+        "{\"Item\":{\"embedding\":{\"FLOAT32VECTOR\":[1.0,2.0]}}}".getBytes(StandardCharsets.UTF_8);
+    byte[] compressed = gzip(original);
+    SdkHttpResponse response =
+        SdkHttpResponse.builder()
+            .statusCode(200)
+            .putHeader("Content-Encoding", "gzip")
+            .putHeader("Content-Length", Integer.toString(compressed.length))
+            .build();
+    ExecutionInterceptorChain chain =
+        new ExecutionInterceptorChain(
+            Arrays.asList(VectorSearchInterceptor.INSTANCE, new ResponseCompressionInterceptor()));
+    ExecutionAttributes attrs = new ExecutionAttributes();
+    InterceptorContext context =
+        InterceptorContext.builder()
+            .request(ListTablesRequest.builder().build())
+            .httpRequest(createHttpRequest())
+            .httpResponse(response)
+            .responsePublisher(singleBufferPublisher(compressed))
+            .build();
+
+    InterceptorContext headerResult = chain.modifyHttpResponse(context, attrs);
+    InterceptorContext bodyResult = chain.modifyAsyncHttpResponse(headerResult, attrs);
+
+    assertFalse(headerResult.httpResponse().firstMatchingHeader("Content-Encoding").isPresent());
+    assertFalse(headerResult.httpResponse().firstMatchingHeader("Content-Length").isPresent());
+    String body = new String(collect(bodyResult.responsePublisher().get()), StandardCharsets.UTF_8);
+    assertTrue(body.contains("\"L\""));
+    assertFalse(body.contains("FLOAT32VECTOR"));
   }
 
   private static SdkHttpRequest createHttpRequest() {
