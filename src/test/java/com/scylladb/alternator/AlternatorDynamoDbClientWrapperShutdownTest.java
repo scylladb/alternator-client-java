@@ -98,6 +98,32 @@ public class AlternatorDynamoDbClientWrapperShutdownTest {
     assertEquals(Arrays.asList("resolver", "live-nodes", "polling-client", "client"), events);
   }
 
+  @Test
+  @SuppressWarnings("deprecation")
+  public void testSyncWrapperDeprecatedNextAsURIDelegatesToLiveNodes() {
+    URI node = URI.create("http://127.0.0.2:8000");
+    AlternatorLiveNodes liveNodes =
+        new AlternatorLiveNodes(
+            AlternatorConfig.builder().withSeedNode(node).build(), new NoopPollingClient());
+    AlternatorDynamoDbClientWrapper wrapper =
+        new AlternatorDynamoDbClientWrapper(mock(DynamoDbClient.class), liveNodes);
+
+    assertEquals(node, wrapper.nextAsURI());
+  }
+
+  @Test
+  @SuppressWarnings("deprecation")
+  public void testAsyncWrapperDeprecatedNextAsURIDelegatesToLiveNodes() {
+    URI node = URI.create("http://127.0.0.2:8000");
+    AlternatorLiveNodes liveNodes =
+        new AlternatorLiveNodes(
+            AlternatorConfig.builder().withSeedNode(node).build(), new NoopPollingClient());
+    AlternatorDynamoDbAsyncClientWrapper wrapper =
+        new AlternatorDynamoDbAsyncClientWrapper(mock(DynamoDbAsyncClient.class), liveNodes);
+
+    assertEquals(node, wrapper.nextAsURI());
+  }
+
   private static final class TrackingLiveNodes extends AlternatorLiveNodes {
     private final List<String> events;
 

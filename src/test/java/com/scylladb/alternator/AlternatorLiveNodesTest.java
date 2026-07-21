@@ -45,36 +45,6 @@ public class AlternatorLiveNodesTest {
   }
 
   @Test
-  public void testNextAsURIRoundRobin() throws URISyntaxException {
-    List<URI> nodes =
-        Arrays.asList(
-            new URI("http://node1.example.com:8000"),
-            new URI("http://node2.example.com:8000"),
-            new URI("http://node3.example.com:8000"));
-    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(nodes, "http", 8000, "", "");
-
-    Set<URI> returnedNodes = new HashSet<>();
-    for (int i = 0; i < 6; i++) {
-      returnedNodes.add(liveNodes.nextAsURI());
-    }
-
-    assertEquals("Round-robin should return all nodes", 3, returnedNodes.size());
-  }
-
-  @Test
-  public void testNextAsURIWithPathAndQuery() throws URISyntaxException {
-    URI node = new URI("http://localhost:8000");
-    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(node, "", "");
-
-    URI result = liveNodes.nextAsURI("/test/path", "key=value");
-
-    assertEquals("/test/path", result.getPath());
-    assertEquals("key=value", result.getQuery());
-    assertEquals("localhost", result.getHost());
-    assertEquals(8000, result.getPort());
-  }
-
-  @Test
   public void testGetLiveNodes() throws URISyntaxException {
     List<URI> nodes =
         Arrays.asList(
@@ -100,6 +70,59 @@ public class AlternatorLiveNodesTest {
     } catch (UnsupportedOperationException e) {
       // Expected
     }
+  }
+
+  @Test
+  public void testGetLiveNodesExcludesDownNodes() throws URISyntaxException {
+    URI active = new URI("http://node1.example.com:8000");
+    URI down = new URI("http://node2.example.com:8000");
+    AlternatorLiveNodes liveNodes =
+        new AlternatorLiveNodes(Arrays.asList(active, down), "http", 8000, "", "");
+
+    markNodeDown(liveNodes, down);
+
+    assertEquals(Arrays.asList(active, down), liveNodes.getDiscoveredNodes());
+    assertEquals(Collections.singletonList(active), liveNodes.getLiveNodes());
+  }
+
+  @Test
+  @SuppressWarnings("deprecation")
+  public void testDeprecatedNextAsURIUsesQueryPlan() throws URISyntaxException {
+    URI active = new URI("http://node1.example.com:8000");
+    URI down = new URI("http://node2.example.com:8000");
+    AlternatorLiveNodes liveNodes =
+        new AlternatorLiveNodes(Arrays.asList(active, down), "http", 8000, "", "");
+
+    markNodeDown(liveNodes, down);
+
+    assertEquals(active, liveNodes.nextAsURI());
+  }
+
+  @Test
+  @SuppressWarnings("deprecation")
+  public void testDeprecatedNextAsURIWithPathAndQuery() throws URISyntaxException {
+    URI node = new URI("http://node1.example.com:8000");
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(node, "", "");
+
+    URI result = liveNodes.nextAsURI("/localnodes", "dc=dc1");
+
+    assertEquals("http", result.getScheme());
+    assertEquals("node1.example.com", result.getHost());
+    assertEquals(8000, result.getPort());
+    assertEquals("/localnodes", result.getPath());
+    assertEquals("dc=dc1", result.getQuery());
+  }
+
+  @Test
+  public void testDeprecatedLiveNodesInternalOverrideFeedsQueryPlan() throws URISyntaxException {
+    URI seed = new URI("http://seed.example.com:8000");
+    URI overrideNode = new URI("http://override.example.com:8000");
+    LegacyLiveNodesOverride liveNodes =
+        new LegacyLiveNodesOverride(seed, Collections.singletonList(overrideNode));
+
+    assertEquals(
+        Collections.singletonList(overrideNode), collectNodes(new LazyQueryPlan(liveNodes)));
+    assertEquals(Collections.singletonList(seed), liveNodes.baseLiveNodesInternal());
   }
 
   @Test
@@ -178,9 +201,42 @@ public class AlternatorLiveNodesTest {
     URI node = new URI("https://localhost:8043");
     AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(node, "", "");
 
-    URI result = liveNodes.nextAsURI();
+    URI result = new LazyQueryPlan(liveNodes).next();
 
     assertEquals("https", result.getScheme());
     assertEquals(8043, result.getPort());
+  }
+
+  private static List<URI> collectNodes(LazyQueryPlan plan) {
+    List<URI> collected = new ArrayList<>();
+    while (plan.hasNext()) {
+      collected.add(plan.next());
+    }
+    return collected;
+  }
+
+  private static void markNodeDown(AlternatorLiveNodes liveNodes, URI node) {
+    for (int i = 0; i < NodeHealthConfig.DEFAULT_CONSECUTIVE_FAILURE_THRESHOLD; i++) {
+      liveNodes.reportNodeResult(node, NodeHealthObservation.TRAFFIC_FAILURE);
+    }
+  }
+
+  private static final class LegacyLiveNodesOverride extends AlternatorLiveNodes {
+    private final List<URI> nodes;
+
+    private LegacyLiveNodesOverride(URI seed, List<URI> nodes) {
+      super(seed, "", "");
+      this.nodes = new ArrayList<>(nodes);
+    }
+
+    @Override
+    @Deprecated
+    protected List<URI> getLiveNodesInternal() {
+      return nodes;
+    }
+
+    private List<URI> baseLiveNodesInternal() {
+      return super.getLiveNodesInternal();
+    }
   }
 }
