@@ -92,6 +92,7 @@ jobs:
         run: make cert-cache-save
 
       - name: Run integration tests and demo apps
+        timeout-minutes: 15
         run: make test-all
 
       - name: Upload integration test results

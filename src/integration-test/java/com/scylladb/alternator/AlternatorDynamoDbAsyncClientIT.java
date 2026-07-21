@@ -380,7 +380,8 @@ public class AlternatorDynamoDbAsyncClientIT {
                   .build())
           .get();
     } catch (Exception e) {
-      // Table doesn't exist - that's expected, we just want to verify the request was compressed
+      // Scylla 2025.1 does not decode gzip request bodies. This test verifies the client-side
+      // transport headers; byte-for-byte compression is covered by GzipRequestInterceptorTest.
     }
 
     assertTrue(
@@ -752,7 +753,8 @@ public class AlternatorDynamoDbAsyncClientIT {
                   .build())
           .get();
     } catch (Exception e) {
-      // Expected - table doesn't exist
+      // Scylla 2025.1 does not decode gzip request bodies. The assertions below verify that header
+      // optimization preserves the compression headers.
     }
 
     // Verify both features work together

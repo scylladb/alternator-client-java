@@ -1,0 +1,83 @@
+/*
+ * Copyright ScyllaDB, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.scylladb.alternator.vectorsearch;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
+import software.amazon.awssdk.services.dynamodb.model.ConsumedCapacity;
+import software.amazon.awssdk.services.dynamodb.model.QueryResponse;
+
+/**
+ * The result of a vector search {@code Query} request.
+ *
+ * <p>Wraps the standard {@link QueryResponse} and adds access to per-item similarity scores
+ * returned by Alternator when {@link VectorSearch#returnScores()} is {@code true}.
+ *
+ * <p>Similarity scores are in the same order as the items returned by {@link #items()}.
+ */
+public final class VectorQueryResult {
+
+  private final QueryResponse response;
+  private final List<Double> scores;
+
+  public VectorQueryResult(QueryResponse response, List<Double> scores) {
+    this.response = response;
+    this.scores =
+        scores != null
+            ? Collections.unmodifiableList(new ArrayList<>(scores))
+            : Collections.emptyList();
+  }
+
+  /** Returns the underlying {@link QueryResponse}. */
+  public QueryResponse response() {
+    return response;
+  }
+
+  /**
+   * Returns the list of items returned by the query.
+   *
+   * <p>Convenience delegate for {@link QueryResponse#items()}.
+   */
+  public List<Map<String, AttributeValue>> items() {
+    return response.items();
+  }
+
+  /**
+   * Returns the number of items in this response after any {@code Limit} and filter expression are
+   * applied.
+   *
+   * <p>Convenience delegate for {@link QueryResponse#count()}.
+   */
+  public int count() {
+    return response.count();
+  }
+
+  /**
+   * Returns per-item similarity scores in the same order as {@link #items()}, or an empty list if
+   * scores were not requested or the server did not return them.
+   */
+  public List<Double> scores() {
+    return scores;
+  }
+
+  /** Returns the consumed capacity, or {@code null} if not requested. */
+  public ConsumedCapacity consumedCapacity() {
+    return response.consumedCapacity();
+  }
+}

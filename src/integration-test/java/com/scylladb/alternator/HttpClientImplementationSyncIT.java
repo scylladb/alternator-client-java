@@ -449,8 +449,9 @@ public class HttpClientImplementationSyncIT {
                   "pk", AttributeValue.builder().s("k").build(),
                   "data", AttributeValue.builder().s(largePayload()).build()))
               .build());
-    } catch (ResourceNotFoundException e) {
-      // Expected — table doesn't exist
+    } catch (DynamoDbException e) {
+      // Scylla 2025.1 does not decode gzip request bodies. This test verifies that each HTTP client
+      // receives the compressed request and its transport headers.
     } finally {
       client.close();
     }
@@ -494,8 +495,8 @@ public class HttpClientImplementationSyncIT {
                   "pk", AttributeValue.builder().s("k").build(),
                   "data", AttributeValue.builder().s(largePayload()).build()))
               .build());
-    } catch (ResourceNotFoundException e) {
-      // Expected
+    } catch (DynamoDbException e) {
+      // Scylla 2025.1 does not decode gzip request bodies. Header behavior is asserted below.
     } finally {
       client.close();
     }

@@ -368,8 +368,9 @@ public class AlternatorDynamoDbClientIT {
                       "ID", AttributeValue.builder().s("compression-test").build(),
                       "LargeData", AttributeValue.builder().s(largeValue.toString()).build()))
               .build());
-    } catch (ResourceNotFoundException e) {
-      // Table doesn't exist - that's expected, we just want to verify the request was compressed
+    } catch (DynamoDbException e) {
+      // Scylla 2025.1 does not decode gzip request bodies. This test verifies the client-side
+      // transport headers; byte-for-byte compression is covered by GzipRequestInterceptorTest.
     }
 
     assertTrue(
@@ -739,8 +740,9 @@ public class AlternatorDynamoDbClientIT {
                       "ID", AttributeValue.builder().s("test").build(),
                       "LargeData", AttributeValue.builder().s(largeValue.toString()).build()))
               .build());
-    } catch (ResourceNotFoundException e) {
-      // Expected - table doesn't exist
+    } catch (DynamoDbException e) {
+      // Scylla 2025.1 does not decode gzip request bodies. The assertions below verify that header
+      // optimization preserves the compression headers.
     }
 
     // Verify both features work together

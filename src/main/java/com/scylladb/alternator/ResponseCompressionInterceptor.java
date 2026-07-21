@@ -75,7 +75,7 @@ class ResponseCompressionInterceptor implements ExecutionInterceptor {
   public SdkHttpResponse modifyHttpResponse(
       Context.ModifyHttpResponse context, ExecutionAttributes executionAttributes) {
     Optional<ResponseCompressionAlgorithm> encoding = responseEncoding(context.httpResponse());
-    encoding.ifPresent(value -> executionAttributes.putAttribute(RESPONSE_ENCODING, value));
+    executionAttributes.putAttribute(RESPONSE_ENCODING, encoding.orElse(null));
     return encoding.isPresent()
         ? stripCompressionHeaders(context.httpResponse())
         : context.httpResponse();
@@ -86,7 +86,7 @@ class ResponseCompressionInterceptor implements ExecutionInterceptor {
       Context.ModifyHttpResponse context, ExecutionAttributes executionAttributes) {
     ResponseCompressionAlgorithm encoding = executionAttributes.getAttribute(RESPONSE_ENCODING);
     if (encoding == null || !context.responseBody().isPresent()) {
-      return Optional.empty();
+      return context.responseBody();
     }
 
     try {
@@ -102,7 +102,7 @@ class ResponseCompressionInterceptor implements ExecutionInterceptor {
       Context.ModifyHttpResponse context, ExecutionAttributes executionAttributes) {
     ResponseCompressionAlgorithm encoding = executionAttributes.getAttribute(RESPONSE_ENCODING);
     if (encoding == null || !context.responsePublisher().isPresent()) {
-      return Optional.empty();
+      return context.responsePublisher();
     }
     return Optional.of(new DecompressingPublisher(context.responsePublisher().get(), encoding));
   }
