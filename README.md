@@ -188,6 +188,17 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
 `connectionAcquisitionTimeoutMs` or `connectionTimeoutMs` to 0 with CRT will fall back to
 SDK defaults (an info message is logged).
 
+**CRT sync 5xx connection note:** The AWS SDK CRT sync response handler treats HTTP
+5xx server errors as a condition where the native CRT connection may be closed instead
+of returned to the pool. There is no `AwsCrtHttpClient.Builder` option to disable this;
+`maxConcurrency`, idle timeout, TCP keep-alive, and CRT connection health settings do
+not change that status-code close policy. In this repository's probe using AWS SDK
+2.42.2, five sequential 500 responses reused the same TCP connection locally, while CI
+observed one replacement connection across the same five responses. Treat CRT sync 5xx
+reuse as best-effort: the current probe does not show one new connection per 5xx, but
+application code should still assume a connection can rotate after any 5xx response.
+Use Apache sync if strict single-connection reuse after 5xx responses is required.
+
 These settings are applied as defaults before any customizer callback runs, so the
 customizer can override them if needed.
 
