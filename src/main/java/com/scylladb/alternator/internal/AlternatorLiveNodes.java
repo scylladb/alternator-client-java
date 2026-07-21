@@ -47,6 +47,7 @@ public class AlternatorLiveNodes extends Thread {
   private final AtomicBoolean shutdownRequested = new AtomicBoolean(false);
   private final SdkHttpClient pollingHttpClient;
   private final boolean ownsPollingClient;
+  private final AtomicBoolean pollingClientClosed = new AtomicBoolean(false);
   private final AtomicLong lastActivityTime = new AtomicLong(0);
   private final LocalNodesResponseParser localNodesResponseParser;
 
@@ -94,7 +95,9 @@ public class AlternatorLiveNodes extends Thread {
 
   /** Closes the polling HTTP client if this instance owns it. */
   private void closePollingClient() {
-    if (ownsPollingClient && pollingHttpClient != null) {
+    if (ownsPollingClient
+        && pollingHttpClient != null
+        && pollingClientClosed.compareAndSet(false, true)) {
       pollingHttpClient.close();
     }
   }
@@ -110,6 +113,7 @@ public class AlternatorLiveNodes extends Thread {
   public void shutdown() {
     shutdownRequested.set(true);
     this.interrupt();
+    closePollingClient();
   }
 
   /**
