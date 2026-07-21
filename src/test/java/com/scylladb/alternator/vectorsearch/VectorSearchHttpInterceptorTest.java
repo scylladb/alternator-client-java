@@ -8,6 +8,7 @@ import static org.junit.Assert.*;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.scylladb.alternator.GzipRequestInterceptor;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -20,6 +21,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.CRC32;
 import java.util.zip.DeflaterOutputStream;
+import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 import org.junit.Test;
 import org.reactivestreams.Publisher;
@@ -28,7 +30,10 @@ import org.reactivestreams.Subscription;
 import software.amazon.awssdk.auth.credentials.AnonymousCredentialsProvider;
 import software.amazon.awssdk.core.interceptor.Context;
 import software.amazon.awssdk.core.interceptor.ExecutionAttributes;
+import software.amazon.awssdk.core.interceptor.ExecutionInterceptorChain;
 import software.amazon.awssdk.core.interceptor.InterceptorContext;
+import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.http.ContentStreamProvider;
 import software.amazon.awssdk.http.SdkHttpMethod;
 import software.amazon.awssdk.http.SdkHttpRequest;
 import software.amazon.awssdk.http.SdkHttpResponse;
@@ -37,6 +42,7 @@ import software.amazon.awssdk.http.async.SdkAsyncHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
+import software.amazon.awssdk.services.dynamodb.model.ListTablesRequest;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 
 public class VectorSearchHttpInterceptorTest {
@@ -470,6 +476,65 @@ public class VectorSearchHttpInterceptorTest {
     }
   }
 
+  @Test
+  public void testVectorSearchBeforeGzipCompressesModifiedRequestBody() throws Exception {
+    ExecutionInterceptorChain chain =
+        new ExecutionInterceptorChain(
+            Arrays.asList(VectorSearchInterceptor.INSTANCE, new GzipRequestInterceptor(1)));
+    ExecutionAttributes attrs = new ExecutionAttributes();
+    attrs.putAttribute(
+        VectorSearchInterceptor.VECTOR_SEARCH,
+        VectorSearch.builder().queryVector(1.0f, 2.0f).returnScores(true).build());
+
+    InterceptorContext context =
+        InterceptorContext.builder()
+            .request(ListTablesRequest.builder().build())
+            .httpRequest(queryHttpRequest())
+            .requestBody(RequestBody.fromString("{\"TableName\":\"items\"}"))
+            .build();
+
+    InterceptorContext result = chain.modifyHttpRequestAndHttpContent(context, attrs);
+
+    assertEquals("gzip", result.httpRequest().firstMatchingHeader("Content-Encoding").get());
+    byte[] compressed = readRequestBody(result.requestBody());
+    byte[] uncompressed = gzipDecompress(compressed);
+    String json = new String(uncompressed, StandardCharsets.UTF_8);
+    assertTrue(json.contains("\"VectorSearch\""));
+    assertTrue(json.contains("\"FLOAT32VECTOR\""));
+    assertEquals(
+        String.valueOf(compressed.length),
+        result.httpRequest().firstMatchingHeader("Content-Length").get());
+  }
+
+  @Test
+  public void testVectorSearchBeforeGzipReplaysUnchangedSingleUseRequestBody() throws Exception {
+    ExecutionInterceptorChain chain =
+        new ExecutionInterceptorChain(
+            Arrays.asList(VectorSearchInterceptor.INSTANCE, new GzipRequestInterceptor(1)));
+    ExecutionAttributes attrs = new ExecutionAttributes();
+    byte[] original = bytes("{\"TableName\":\"items\",\"Item\":{\"id\":{\"S\":\"item-1\"}}}");
+    ByteArrayInputStream singleUseStream = new ByteArrayInputStream(original);
+    ContentStreamProvider singleUseProvider = () -> singleUseStream;
+
+    InterceptorContext context =
+        InterceptorContext.builder()
+            .request(ListTablesRequest.builder().build())
+            .httpRequest(queryHttpRequest())
+            .requestBody(
+                RequestBody.fromContentProvider(
+                    singleUseProvider, original.length, "application/x-amz-json-1.0"))
+            .build();
+
+    InterceptorContext result = chain.modifyHttpRequestAndHttpContent(context, attrs);
+
+    assertEquals("gzip", result.httpRequest().firstMatchingHeader("Content-Encoding").get());
+    byte[] compressed = readRequestBody(result.requestBody());
+    assertArrayEquals(original, gzipDecompress(compressed));
+    assertEquals(
+        String.valueOf(compressed.length),
+        result.httpRequest().firstMatchingHeader("Content-Length").get());
+  }
+
   @Test(expected = IllegalStateException.class)
   public void testDeleteVectorIndexActionRequiresIndexName() {
     DeleteVectorIndexAction.builder().build();
@@ -558,12 +623,21 @@ public class VectorSearchHttpInterceptorTest {
         .build();
   }
 
+  private static byte[] readRequestBody(Optional<RequestBody> body) throws IOException {
+    assertTrue(body.isPresent());
+    return readAllBytes(body.get().contentStreamProvider().newStream());
+  }
+
   private static byte[] gzipCompress(byte[] uncompressed) throws IOException {
     ByteArrayOutputStream out = new ByteArrayOutputStream();
     try (GZIPOutputStream gzip = new GZIPOutputStream(out)) {
       gzip.write(uncompressed);
     }
     return out.toByteArray();
+  }
+
+  private static byte[] gzipDecompress(byte[] compressed) throws IOException {
+    return readAllBytes(new GZIPInputStream(new ByteArrayInputStream(compressed)));
   }
 
   private static String crc32(byte[] bytes) {
