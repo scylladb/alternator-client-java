@@ -39,8 +39,6 @@ import software.amazon.awssdk.http.SdkHttpRequest;
 public class AlternatorLiveNodes extends Thread {
   private static final long DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
 
-  private final String alternatorScheme;
-  private final int alternatorPort;
   private final AtomicReference<List<URI>> liveNodes;
   private final List<URI> initialNodes;
   private final AtomicInteger nextLiveNodeIndex;
@@ -50,6 +48,7 @@ public class AlternatorLiveNodes extends Thread {
   private final SdkHttpClient pollingHttpClient;
   private final boolean ownsPollingClient;
   private final AtomicLong lastActivityTime = new AtomicLong(0);
+  private final LocalNodesResponseParser localNodesResponseParser;
 
   private static Logger logger = Logger.getLogger(AlternatorLiveNodes.class.getName());
 
@@ -359,8 +358,8 @@ public class AlternatorLiveNodes extends Thread {
     if (seedHosts == null || seedHosts.isEmpty()) {
       throw new RuntimeException("config must contain at least one seed host");
     }
-    this.alternatorScheme = config.getScheme();
-    this.alternatorPort = config.getPort();
+    this.localNodesResponseParser =
+        new LocalNodesResponseParser(config.getScheme(), config.getPort());
     this.initialNodes = hostsToUris(seedHosts);
     this.liveNodes = new AtomicReference<>();
     this.nextLiveNodeIndex = new AtomicInteger(0);
@@ -450,7 +449,7 @@ public class AlternatorLiveNodes extends Thread {
 
   private void validateConfig() throws ValidationError {
     try {
-      // Make sure that `alternatorScheme` and `alternatorPort` are correct values
+      // Make sure that the configured scheme and port are valid values.
       this.hostToURI("1.1.1.1");
     } catch (MalformedURLException | URISyntaxException e) {
       throw new ValidationError("failed to validate configuration", e);
@@ -458,10 +457,7 @@ public class AlternatorLiveNodes extends Thread {
   }
 
   private URI hostToURI(String host) throws URISyntaxException, MalformedURLException {
-    URI uri = new URI(alternatorScheme, null, host, alternatorPort, null, null, null);
-    // Make sure that URI to URL conversion works
-    uri.toURL();
-    return uri;
+    return localNodesResponseParser.hostToURI(host);
   }
 
   private List<URI> hostsToUris(List<String> hosts) {
@@ -695,37 +691,12 @@ public class AlternatorLiveNodes extends Thread {
   }
 
   private List<URI> parseLocalNodesResponse(String responseStr) {
-    // response looks like: ["127.0.0.2","127.0.0.3","127.0.0.1"]
-    responseStr = responseStr.trim();
-    if (!responseStr.startsWith("[") || !responseStr.endsWith("]")) {
+    try {
+      return localNodesResponseParser.parse(responseStr);
+    } catch (LocalNodesResponseParser.InvalidLocalNodesResponseException e) {
       logger.log(Level.WARNING, "Malformed /localnodes response: " + responseStr);
       return Collections.emptyList();
     }
-
-    String responseBody = responseStr.substring(1, responseStr.length() - 1).trim();
-    if (responseBody.isEmpty()) {
-      return Collections.emptyList();
-    }
-
-    String[] list = responseBody.split(",");
-    List<URI> newHosts = new ArrayList<>();
-    for (String host : list) {
-      host = host.trim();
-      if (host.isEmpty()) {
-        continue;
-      }
-      if (host.length() < 2 || !host.startsWith("\"") || !host.endsWith("\"")) {
-        logger.log(Level.WARNING, "Malformed host entry in /localnodes response: " + host);
-        continue;
-      }
-      host = host.substring(1, host.length() - 1);
-      try {
-        newHosts.add(this.hostToURI(host));
-      } catch (URISyntaxException | MalformedURLException e) {
-        logger.log(Level.WARNING, "Invalid host: " + host, e);
-      }
-    }
-    return newHosts;
   }
 
   /**

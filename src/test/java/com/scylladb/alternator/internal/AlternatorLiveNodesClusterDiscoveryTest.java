@@ -273,6 +273,28 @@ public class AlternatorLiveNodesClusterDiscoveryTest {
   }
 
   @Test
+  public void testLocalNodesParserHandlesWhitespaceAndEscapedStrings() throws Exception {
+    Map<String, String> responses = new HashMap<>();
+    responses.put("seed.example.com", " [ \"node1.example.com\" , \"node\\u0032.example.com\" ] ");
+    DiscoveryHttpClient httpClient = new DiscoveryHttpClient(responses);
+
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withSeedHost("seed.example.com")
+            .withScheme("http")
+            .withPort(8000)
+            .withRoutingScope(ClusterScope.create())
+            .build();
+
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, httpClient);
+    liveNodes.updateLiveNodes();
+
+    assertEquals(
+        new LinkedHashSet<>(Arrays.asList("node1.example.com", "node2.example.com")),
+        hostSet(liveNodes.getLiveNodes()));
+  }
+
+  @Test
   public void testCustomScopeLocalNodesQueryValuesAreEncodedWhenNeeded() throws Exception {
     Map<String, String> responses = new HashMap<>();
     responses.put("seed.example.com", "[\"scoped-node.example.com\"]");
