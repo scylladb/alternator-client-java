@@ -721,7 +721,9 @@ the client automatically falls back to the next scope in the chain:
 
 For datacenter or rack scoped routing in a multi-datacenter cluster, include a seed host from the
 target datacenter. The client queries configured seeds with the scope filter and only falls back
-after no seed returns nodes for that scope.
+after no seed returns nodes for that scope. Configured seed hosts remain discovery candidates, but
+they are not added to the routing node list unless `/localnodes` returns them for the selected
+scope.
 
 ```java
 // Rack -> Datacenter -> Cluster fallback chain
@@ -886,6 +888,61 @@ The default configuration works well for most use cases. Consider adjusting sett
 - **Long-running connections**: Default settings are optimal; session resumption primarily
   benefits reconnection scenarios
 
+### Node Health
+
+The client tracks active, quarantined, and down nodes while routing requests:
+
+- transport failures count as health failures
+- consecutive health failures mark a node down
+- down nodes are probed in the background with `GET /localnodes`
+- enough consecutive HTTP 200 probe responses move a down node into quarantine
+- quarantined nodes are sampled into routing once every configured number of attempts
+- enough consecutive successful contacts from a quarantined node promote it back to active
+
+For DynamoDB API requests, most HTTP responses mean the node was reachable for health purposes,
+including application-level errors. Authentication failures are detected from the parsed DynamoDB
+error code, such as `InvalidSignatureException`, `MissingAuthenticationTokenException`, or
+`UnrecognizedClientException`, because Alternator usually reports these as HTTP 400 responses.
+Authentication HTTP statuses (`401` or `403`) and transport failures also count as health failures.
+For `/localnodes`, any non-200 HTTP status or transport failure counts as a health failure.
+Traffic and `/localnodes` probe failure streaks are tracked separately, so a successful probe does
+not clear DynamoDB traffic/auth failures, and a successful DynamoDB request does not clear
+`/localnodes` probe failures.
+
+Key route affinity hashes and votes over all known discovered nodes so candidate order is stable
+while health changes. The final request-routing guard normally skips down nodes and admits at most
+one quarantined node when the quarantine sampling policy allows verification traffic. If there are
+no active nodes, routing fails open across all known nodes without changing their stored health
+state.
+
+The defaults are: 10 consecutive health failures mark a node down, 3 consecutive successful
+down-node probes move it into quarantine, 10 consecutive successful quarantined contacts promote it
+to active, down nodes are probed every 30 seconds, and quarantined nodes are sampled once every 10
+routing attempts.
+
+```java
+import com.scylladb.alternator.NodeHealthConfig;
+
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://127.0.0.1:8043"))
+    .credentialsProvider(myCredentials)
+    .withNodeHealthConfig(NodeHealthConfig.builder()
+        .withConsecutiveFailureThreshold(5)
+        .withDownNodeRecoverySuccessThreshold(3)
+        .withDownNodeProbePeriodMs(10_000)
+        .withQuarantineTrafficInterval(20)
+        .withQuarantineSuccessThreshold(10)
+        .build())
+    .build();
+```
+
+For custom integrations, `AlternatorLiveNodes` exposes `reportNodeResult(...)`,
+`getActiveNodes()`, `getQuarantinedNodes()`, and `getDownNodes()`. Report routed DynamoDB request
+outcomes with `TRAFFIC_SUCCESS` or `TRAFFIC_FAILURE`, and local node-health probe outcomes with
+`PROBE_SUCCESS` or `PROBE_FAILURE`. Probe success moves a `DOWN` node to quarantine; sampled traffic
+success moves a quarantined node back to active. Node health can be disabled with
+`AlternatorConfig.builder().withNodeHealthDisabled()`.
+
 ### Key Route Affinity (LWT Optimization)
 
 Key route affinity is an optimization for Lightweight Transactions (LWT) that use Paxos
@@ -894,7 +951,7 @@ it reduces Paxos round-trips and improves latency for conditional writes.
 
 **Note:** Synchronous clients automatically discover missing partition-key names via
 `DescribeTable`. Async clients can use key route affinity with pre-configured partition-key
-names; requests for tables without pre-configured metadata fall back to round-robin routing.
+names; requests for tables without pre-configured metadata fall back to random query-plan routing.
 
 #### Quick start
 
@@ -915,7 +972,7 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
 
 | Mode | Description |
 |------|-------------|
-| `KeyRouteAffinity.NONE` | Default — standard round-robin load balancing |
+| `KeyRouteAffinity.NONE` | Default — standard random query-plan load balancing |
 | `KeyRouteAffinity.RMW` | Optimize read-before-write operations (conditional updates/puts/deletes with `ConditionExpression`, `Expected`, or non-NONE `ReturnValues`) |
 | `KeyRouteAffinity.ANY_WRITE` | Optimize all write operations (`PutItem`, `UpdateItem`, `DeleteItem`, `BatchWriteItem`) |
 
@@ -949,7 +1006,7 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
 4. For `BatchWriteItem`, each usable write votes for its preferred node; voted nodes are tried by
    vote count, then by node URL
 5. Non-qualifying operations and requests without usable partition keys continue to use
-   round-robin load balancing
+   random query-plan load balancing
 
 #### When to use key route affinity
 

@@ -58,7 +58,6 @@ import software.amazon.awssdk.services.dynamodb.endpoints.DynamoDbEndpointProvid
  *
  * // Access Alternator-specific functionality
  * List<URI> nodes = client.getLiveNodes();
- * URI nextNode = client.nextAsURI();
  * }</pre>
  *
  * @author dmitry.kropachev
@@ -372,6 +371,30 @@ public class AlternatorDynamoDbAsyncClient {
     }
 
     /**
+     * Sets the node health tracking configuration.
+     *
+     * @param nodeHealthConfig the node health configuration, or null to use defaults
+     * @return this builder instance
+     * @since 2.0.6
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withNodeHealthConfig(
+        NodeHealthConfig nodeHealthConfig) {
+      configBuilder.withNodeHealthConfig(nodeHealthConfig);
+      return this;
+    }
+
+    /**
+     * Disables node health tracking.
+     *
+     * @return this builder instance
+     * @since 2.0.6
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withNodeHealthDisabled() {
+      configBuilder.withNodeHealthDisabled();
+      return this;
+    }
+
+    /**
      * Sets the maximum number of connections in the HTTP client connection pool.
      *
      * @param maxConnections the maximum number of connections (must be positive)
@@ -470,6 +493,7 @@ public class AlternatorDynamoDbAsyncClient {
         configBuilder.withKeyRouteAffinity(config.getKeyRouteAffinityConfig());
         configBuilder.withActiveRefreshIntervalMs(config.getActiveRefreshIntervalMs());
         configBuilder.withIdleRefreshIntervalMs(config.getIdleRefreshIntervalMs());
+        configBuilder.withNodeHealthConfig(config.getNodeHealthConfig());
         configBuilder.withMaxConnections(config.getMaxConnections());
         configBuilder.withConnectionMaxIdleTimeMs(config.getConnectionMaxIdleTimeMs());
         configBuilder.withConnectionTimeToLiveMs(config.getConnectionTimeToLiveMs());

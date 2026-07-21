@@ -28,7 +28,6 @@ import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
  *
  * // Access Alternator-specific functionality
  * List<URI> nodes = wrapper.getLiveNodes();
- * URI nextNode = wrapper.nextAsURI();
  * }</pre>
  *
  * @author dmitry.kropachev
@@ -116,19 +115,35 @@ public class AlternatorDynamoDbAsyncClientWrapper implements AutoCloseable {
   }
 
   /**
-   * Returns a snapshot of the current live nodes list.
+   * Returns a snapshot of the current discovered nodes list.
    *
-   * @return an unmodifiable list of the current live node URIs
+   * @return an unmodifiable list of the current discovered node URIs
+   * @since 2.1.0
+   */
+  public List<URI> getDiscoveredNodes() {
+    return liveNodes.getDiscoveredNodes();
+  }
+
+  /**
+   * Returns a snapshot of discovered nodes currently active for normal routing.
+   *
+   * @return an unmodifiable list of active discovered node URIs
    */
   public List<URI> getLiveNodes() {
     return liveNodes.getLiveNodes();
   }
 
   /**
-   * Returns the next node URI using round-robin selection.
+   * Returns the next node URI using the current query-plan selection.
    *
-   * @return the next {@link URI} in the round-robin sequence
+   * <p>This method is retained for source and binary compatibility with callers compiled against
+   * versions that exposed direct node selection.
+   *
+   * @return a selected node URI
+   * @deprecated Use normal DynamoDB client operations for routing, or {@link
+   *     #getAlternatorLiveNodes()} with {@code LazyQueryPlan} for custom routing.
    */
+  @Deprecated
   public URI nextAsURI() {
     return liveNodes.nextAsURI();
   }
