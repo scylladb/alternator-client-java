@@ -2,24 +2,39 @@ package com.scylladb.alternator;
 
 import static org.junit.Assert.*;
 
+import com.scylladb.alternator.vectorsearch.VectorSearchInterceptor;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.net.URI;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
 import java.util.zip.GZIPInputStream;
 import org.junit.Test;
+import software.amazon.awssdk.auth.credentials.AnonymousCredentialsProvider;
 import software.amazon.awssdk.core.SdkRequest;
 import software.amazon.awssdk.core.async.AsyncRequestBody;
 import software.amazon.awssdk.core.interceptor.Context;
 import software.amazon.awssdk.core.interceptor.ExecutionAttributes;
 import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.http.AbortableInputStream;
+import software.amazon.awssdk.http.ExecutableHttpRequest;
+import software.amazon.awssdk.http.HttpExecuteRequest;
+import software.amazon.awssdk.http.HttpExecuteResponse;
+import software.amazon.awssdk.http.SdkHttpClient;
+import software.amazon.awssdk.http.SdkHttpFullResponse;
 import software.amazon.awssdk.http.SdkHttpMethod;
 import software.amazon.awssdk.http.SdkHttpRequest;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
+import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.ListTablesRequest;
+import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 
 /**
  * Unit tests for GzipRequestInterceptor.
@@ -111,14 +126,8 @@ public class GzipRequestInterceptorTest {
 
   private byte[] readRequestBody(Optional<RequestBody> body) throws IOException {
     assertTrue("Request body should be present", body.isPresent());
-    ByteArrayOutputStream bos = new ByteArrayOutputStream();
-    byte[] buf = new byte[4096];
-    int len;
     java.io.InputStream is = body.get().contentStreamProvider().newStream();
-    while ((len = is.read(buf)) != -1) {
-      bos.write(buf, 0, len);
-    }
-    return bos.toByteArray();
+    return readAllBytes(is);
   }
 
   private byte[] readAsyncRequestBody(Optional<AsyncRequestBody> body) {
@@ -134,6 +143,56 @@ public class GzipRequestInterceptorTest {
             })
         .join();
     return bos.toByteArray();
+  }
+
+  private byte[] readAllBytes(java.io.InputStream is) throws IOException {
+    ByteArrayOutputStream bos = new ByteArrayOutputStream();
+    byte[] buf = new byte[4096];
+    int len;
+    while ((len = is.read(buf)) != -1) {
+      bos.write(buf, 0, len);
+    }
+    return bos.toByteArray();
+  }
+
+  @Test
+  public void testSyncDynamoDbClientSendsCompressedRequestBody() throws Exception {
+    RecordingHttpClient httpClient = new RecordingHttpClient();
+    DynamoDbClient client =
+        DynamoDbClient.builder()
+            .endpointOverride(URI.create("http://localhost:8000"))
+            .region(Region.US_EAST_1)
+            .credentialsProvider(AnonymousCredentialsProvider.create())
+            .httpClient(httpClient)
+            .overrideConfiguration(
+                c ->
+                    c.addExecutionInterceptor(VectorSearchInterceptor.INSTANCE)
+                        .addExecutionInterceptor(new ResponseCompressionInterceptor())
+                        .addExecutionInterceptor(new GzipRequestInterceptor(100)))
+            .build();
+
+    try {
+      StringBuilder largeValue = new StringBuilder();
+      for (int i = 0; i < 100; i++) {
+        largeValue.append("This is a test value that should be compressed. ");
+      }
+      client.putItem(
+          PutItemRequest.builder()
+              .tableName("items")
+              .item(
+                  Map.of(
+                      "ID", AttributeValue.builder().s("compression-test").build(),
+                      "LargeData", AttributeValue.builder().s(largeValue.toString()).build()))
+              .build());
+    } finally {
+      client.close();
+    }
+
+    assertEquals("gzip", httpClient.capturedRequest.firstMatchingHeader("Content-Encoding").get());
+    String requestJson =
+        new String(gzipDecompress(httpClient.capturedBody), StandardCharsets.UTF_8);
+    assertTrue(requestJson.contains("\"TableName\":\"items\""));
+    assertTrue(requestJson.contains("compression-test"));
   }
 
   @Test
@@ -371,6 +430,46 @@ public class GzipRequestInterceptorTest {
     assertEquals("Decompressed length should match original", testData.length, decompressed.length);
     for (int i = 0; i < testData.length; i++) {
       assertEquals("Byte mismatch at index " + i, testData[i], decompressed[i]);
+    }
+  }
+
+  private final class RecordingHttpClient implements SdkHttpClient {
+    private SdkHttpRequest capturedRequest;
+    private byte[] capturedBody;
+
+    @Override
+    public ExecutableHttpRequest prepareRequest(HttpExecuteRequest request) {
+      capturedRequest = request.httpRequest();
+      return new ExecutableHttpRequest() {
+        @Override
+        public HttpExecuteResponse call() throws IOException {
+          capturedBody =
+              request.contentStreamProvider().isPresent()
+                  ? readAllBytes(request.contentStreamProvider().get().newStream())
+                  : new byte[0];
+          byte[] body = "{}".getBytes(StandardCharsets.UTF_8);
+          return HttpExecuteResponse.builder()
+              .response(
+                  SdkHttpFullResponse.builder()
+                      .statusCode(200)
+                      .putHeader("Content-Type", "application/x-amz-json-1.0")
+                      .putHeader("Content-Length", String.valueOf(body.length))
+                      .build())
+              .responseBody(AbortableInputStream.create(new ByteArrayInputStream(body)))
+              .build();
+        }
+
+        @Override
+        public void abort() {}
+      };
+    }
+
+    @Override
+    public void close() {}
+
+    @Override
+    public String clientName() {
+      return "recording";
     }
   }
 }

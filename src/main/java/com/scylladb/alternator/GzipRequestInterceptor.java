@@ -31,6 +31,8 @@ public class GzipRequestInterceptor implements ExecutionInterceptor {
 
   private static final ExecutionAttribute<byte[]> ORIGINAL_BODY_BYTES =
       new ExecutionAttribute<>("GzipRequestInterceptor.originalBodyBytes");
+  private static final ExecutionAttribute<byte[]> COMPRESSED_BODY_BYTES =
+      new ExecutionAttribute<>("GzipRequestInterceptor.compressedBodyBytes");
   private static final ExecutionAttribute<Boolean> SHOULD_COMPRESS =
       new ExecutionAttribute<>("GzipRequestInterceptor.shouldCompress");
 
@@ -49,38 +51,24 @@ public class GzipRequestInterceptor implements ExecutionInterceptor {
   public SdkHttpRequest modifyHttpRequest(
       Context.ModifyHttpRequest context, ExecutionAttributes executionAttributes) {
 
-    byte[] originalContent;
-    try {
-      originalContent = readOriginalBody(context);
-    } catch (IOException | CompletionException e) {
-      executionAttributes.putAttribute(SHOULD_COMPRESS, false);
+    prepareBody(context, executionAttributes);
+    Boolean shouldCompress = executionAttributes.getAttribute(SHOULD_COMPRESS);
+    byte[] compressedContent = executionAttributes.getAttribute(COMPRESSED_BODY_BYTES);
+    if (shouldCompress == null || !shouldCompress || compressedContent == null) {
       return context.httpRequest();
     }
 
-    if (originalContent == null) {
-      executionAttributes.putAttribute(SHOULD_COMPRESS, false);
-      return context.httpRequest();
-    }
-
-    // Cache the original content for modifyHttpContent / modifyAsyncHttpContent.
-    executionAttributes.putAttribute(ORIGINAL_BODY_BYTES, originalContent);
-
-    // Check if we should compress based on size.
-    boolean shouldCompress = originalContent.length >= minCompressionSizeBytes;
-    executionAttributes.putAttribute(SHOULD_COMPRESS, shouldCompress);
-
-    if (shouldCompress) {
-      // Add Content-Encoding header.
-      return context.httpRequest().toBuilder().putHeader("Content-Encoding", "gzip").build();
-    }
-
-    return context.httpRequest();
+    return context.httpRequest().toBuilder()
+        .putHeader("Content-Encoding", "gzip")
+        .putHeader("Content-Length", String.valueOf(compressedContent.length))
+        .build();
   }
 
   @Override
   public Optional<RequestBody> modifyHttpContent(
       Context.ModifyHttpRequest context, ExecutionAttributes executionAttributes) {
 
+    prepareBody(context, executionAttributes);
     Boolean shouldCompress = executionAttributes.getAttribute(SHOULD_COMPRESS);
     if (shouldCompress == null || !shouldCompress) {
       // Return original body from cached bytes if available, otherwise return as-is
@@ -91,26 +79,51 @@ public class GzipRequestInterceptor implements ExecutionInterceptor {
       return context.requestBody();
     }
 
-    byte[] originalContent = executionAttributes.getAttribute(ORIGINAL_BODY_BYTES);
-    if (originalContent == null) {
+    byte[] compressedContent = executionAttributes.getAttribute(COMPRESSED_BODY_BYTES);
+    if (compressedContent == null) {
       return context.requestBody();
     }
 
-    try {
-      // Compress the content
-      byte[] compressedContent = gzipCompress(originalContent);
-      return Optional.of(RequestBody.fromBytes(compressedContent));
+    return Optional.of(RequestBody.fromBytes(compressedContent));
+  }
 
-    } catch (IOException e) {
-      // If compression fails, return original content
-      return Optional.of(RequestBody.fromBytes(originalContent));
+  private void prepareBody(
+      Context.ModifyHttpRequest context, ExecutionAttributes executionAttributes) {
+    if (executionAttributes.getAttribute(SHOULD_COMPRESS) != null) {
+      return;
     }
+
+    byte[] originalContent;
+    try {
+      originalContent = readOriginalBody(context);
+    } catch (IOException | CompletionException e) {
+      executionAttributes.putAttribute(SHOULD_COMPRESS, false);
+      return;
+    }
+
+    if (originalContent == null) {
+      executionAttributes.putAttribute(SHOULD_COMPRESS, false);
+      return;
+    }
+
+    executionAttributes.putAttribute(ORIGINAL_BODY_BYTES, originalContent);
+    boolean shouldCompress = originalContent.length >= minCompressionSizeBytes;
+    if (shouldCompress) {
+      try {
+        executionAttributes.putAttribute(COMPRESSED_BODY_BYTES, gzipCompress(originalContent));
+      } catch (IOException e) {
+        executionAttributes.putAttribute(SHOULD_COMPRESS, false);
+        return;
+      }
+    }
+    executionAttributes.putAttribute(SHOULD_COMPRESS, shouldCompress);
   }
 
   @Override
   public Optional<AsyncRequestBody> modifyAsyncHttpContent(
       Context.ModifyHttpRequest context, ExecutionAttributes executionAttributes) {
 
+    prepareBody(context, executionAttributes);
     Boolean shouldCompress = executionAttributes.getAttribute(SHOULD_COMPRESS);
     if (shouldCompress == null || !shouldCompress) {
       byte[] cachedBytes = executionAttributes.getAttribute(ORIGINAL_BODY_BYTES);
@@ -120,17 +133,12 @@ public class GzipRequestInterceptor implements ExecutionInterceptor {
       return context.asyncRequestBody();
     }
 
-    byte[] originalContent = executionAttributes.getAttribute(ORIGINAL_BODY_BYTES);
-    if (originalContent == null) {
+    byte[] compressedContent = executionAttributes.getAttribute(COMPRESSED_BODY_BYTES);
+    if (compressedContent == null) {
       return context.asyncRequestBody();
     }
 
-    try {
-      byte[] compressedContent = gzipCompress(originalContent);
-      return Optional.of(AsyncRequestBody.fromBytes(compressedContent));
-    } catch (IOException e) {
-      return Optional.of(AsyncRequestBody.fromBytes(originalContent));
-    }
+    return Optional.of(AsyncRequestBody.fromBytes(compressedContent));
   }
 
   private byte[] readOriginalBody(Context.ModifyHttpRequest context) throws IOException {

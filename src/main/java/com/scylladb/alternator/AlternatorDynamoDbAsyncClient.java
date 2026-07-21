@@ -10,8 +10,10 @@ import com.scylladb.alternator.keyrouting.KeyRouteAffinityConfig;
 import com.scylladb.alternator.queryplan.AffinityQueryPlanInterceptor;
 import com.scylladb.alternator.queryplan.BasicQueryPlanInterceptor;
 import com.scylladb.alternator.routing.RoutingScope;
+import com.scylladb.alternator.vectorsearch.VectorSearchInterceptor;
 import java.net.URI;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Objects;
 import java.util.function.Consumer;
 import java.util.function.UnaryOperator;
@@ -732,21 +734,6 @@ public class AlternatorDynamoDbAsyncClient {
 
       AlternatorConfig alternatorConfig = configBuilder.build();
 
-      ClientOverrideConfiguration.Builder compressionOverrideBuilder =
-          delegate.overrideConfiguration() != null
-              ? delegate.overrideConfiguration().toBuilder()
-              : ClientOverrideConfiguration.builder();
-      if (alternatorConfig.isResponseCompressionEnabled()) {
-        compressionOverrideBuilder.addExecutionInterceptor(
-            new ResponseCompressionInterceptor(
-                alternatorConfig.getResponseCompressionAlgorithms()));
-      }
-      if (alternatorConfig.getCompressionAlgorithm().isEnabled()) {
-        compressionOverrideBuilder.addExecutionInterceptor(
-            new GzipRequestInterceptor(alternatorConfig.getMinCompressionSizeBytes()));
-      }
-      delegate.overrideConfiguration(compressionOverrideBuilder.build());
-
       TlsConfig tlsConfig = alternatorConfig.getTlsConfig();
       if (!httpClientSet) {
         SdkAsyncHttpClient mainClient =
@@ -763,11 +750,34 @@ public class AlternatorDynamoDbAsyncClient {
       AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(alternatorConfig, pollingClient);
       liveNodes.start();
 
+      ClientOverrideConfiguration existingOverride = delegate.overrideConfiguration();
       ClientOverrideConfiguration.Builder overrideBuilder =
-          delegate.overrideConfiguration() != null
-              ? delegate.overrideConfiguration().toBuilder()
+          existingOverride != null
+              ? existingOverride.toBuilder()
               : ClientOverrideConfiguration.builder();
 
+      // Request hooks run in registration order; response hooks run in reverse. Split vector
+      // processing around caller interceptors so callers see vector-rewritten requests and
+      // decompressed/vector-rewritten responses.
+      overrideBuilder.executionInterceptors(Collections.emptyList());
+      overrideBuilder.addExecutionInterceptor(VectorSearchInterceptorPhases.REQUEST);
+      if (existingOverride != null) {
+        existingOverride.executionInterceptors().stream()
+            .filter(interceptor -> interceptor != VectorSearchInterceptor.INSTANCE)
+            .forEach(overrideBuilder::addExecutionInterceptor);
+      }
+      if (alternatorConfig.isResponseCompressionEnabled()) {
+        overrideBuilder.addExecutionInterceptor(
+            new ResponseCompressionInterceptor(
+                alternatorConfig.getResponseCompressionAlgorithms()));
+      }
+      // Registered after response compression so the reverse response chain validates checksums
+      // and processes the raw response before decompression and caller interceptors.
+      overrideBuilder.addExecutionInterceptor(VectorSearchInterceptorPhases.RESPONSE);
+      if (alternatorConfig.getCompressionAlgorithm().isEnabled()) {
+        overrideBuilder.addExecutionInterceptor(
+            new GzipRequestInterceptor(alternatorConfig.getMinCompressionSizeBytes()));
+      }
       KeyRouteAffinityConfig keyAffinityConfig = alternatorConfig.getKeyRouteAffinityConfig();
       AffinityQueryPlanInterceptor affinityInterceptor = null;
       if (keyAffinityConfig != null

@@ -2,6 +2,7 @@ package com.scylladb.alternator;
 
 import static org.junit.Assert.*;
 
+import com.scylladb.alternator.vectorsearch.VectorSearchInterceptor;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -14,6 +15,7 @@ import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.zip.CRC32;
 import java.util.zip.DeflaterOutputStream;
 import java.util.zip.GZIPOutputStream;
 import org.junit.Test;
@@ -24,6 +26,8 @@ import software.amazon.awssdk.core.SdkRequest;
 import software.amazon.awssdk.core.async.AsyncRequestBody;
 import software.amazon.awssdk.core.interceptor.Context;
 import software.amazon.awssdk.core.interceptor.ExecutionAttributes;
+import software.amazon.awssdk.core.interceptor.ExecutionInterceptorChain;
+import software.amazon.awssdk.core.interceptor.InterceptorContext;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.http.SdkHttpMethod;
 import software.amazon.awssdk.http.SdkHttpRequest;
@@ -114,18 +118,19 @@ public class ResponseCompressionInterceptorTest {
   }
 
   @Test
-  public void testUnsupportedEncodingIsNotModified() {
+  public void testUnsupportedEncodingIsNotModified() throws Exception {
+    byte[] body = {1, 2, 3};
     SdkHttpResponse response =
         SdkHttpResponse.builder().statusCode(200).putHeader("Content-Encoding", "br").build();
     ExecutionAttributes attrs = new ExecutionAttributes();
     Context.ModifyHttpResponse context =
-        responseContext(response, new ByteArrayInputStream(new byte[] {1, 2, 3}), null);
+        responseContext(response, new ByteArrayInputStream(body), null);
 
     SdkHttpResponse modifiedResponse = interceptor.modifyHttpResponse(context, attrs);
     Optional<InputStream> modifiedContent = interceptor.modifyHttpResponseContent(context, attrs);
 
     assertEquals("br", modifiedResponse.firstMatchingHeader("Content-Encoding").get());
-    assertFalse(modifiedContent.isPresent());
+    assertArrayEquals(body, readAll(modifiedContent.get()));
   }
 
   @Test
@@ -145,22 +150,23 @@ public class ResponseCompressionInterceptorTest {
         gzipOnlyInterceptor.modifyHttpResponseContent(context, attrs);
 
     assertEquals("deflate", modifiedResponse.firstMatchingHeader("Content-Encoding").get());
-    assertFalse(modifiedContent.isPresent());
+    assertArrayEquals(compressed, readAll(modifiedContent.get()));
   }
 
   @Test
-  public void testMultipleContentEncodingsAreNotModified() {
+  public void testMultipleContentEncodingsAreNotModified() throws Exception {
+    byte[] body = {1, 2, 3};
     SdkHttpResponse response =
         SdkHttpResponse.builder().statusCode(200).putHeader("Content-Encoding", "gzip, br").build();
     ExecutionAttributes attrs = new ExecutionAttributes();
     Context.ModifyHttpResponse context =
-        responseContext(response, new ByteArrayInputStream(new byte[] {1, 2, 3}), null);
+        responseContext(response, new ByteArrayInputStream(body), null);
 
     SdkHttpResponse modifiedResponse = interceptor.modifyHttpResponse(context, attrs);
     Optional<InputStream> modifiedContent = interceptor.modifyHttpResponseContent(context, attrs);
 
     assertEquals("gzip, br", modifiedResponse.firstMatchingHeader("Content-Encoding").get());
-    assertFalse(modifiedContent.isPresent());
+    assertArrayEquals(body, readAll(modifiedContent.get()));
   }
 
   @Test
@@ -201,6 +207,77 @@ public class ResponseCompressionInterceptorTest {
         interceptor.modifyAsyncHttpResponseContent(context, attrs);
 
     assertArrayEquals(original, collect(modifiedPublisher.get()));
+  }
+
+  @Test
+  public void testVectorSearchValidatesCompressedSyncResponseBeforeGenericDecompression()
+      throws Exception {
+    byte[] original =
+        "{\"Item\":{\"embedding\":{\"FLOAT32VECTOR\":[1.0,2.0]}}}".getBytes(StandardCharsets.UTF_8);
+    byte[] compressed = gzip(original);
+    SdkHttpResponse response =
+        SdkHttpResponse.builder()
+            .statusCode(200)
+            .putHeader("Content-Encoding", "gzip")
+            .putHeader("Content-Length", Integer.toString(compressed.length))
+            .putHeader("x-amz-crc32", crc32(compressed))
+            .build();
+    ExecutionInterceptorChain chain =
+        new ExecutionInterceptorChain(
+            Arrays.asList(new ResponseCompressionInterceptor(), VectorSearchInterceptor.INSTANCE));
+    ExecutionAttributes attrs = new ExecutionAttributes();
+    InterceptorContext context =
+        InterceptorContext.builder()
+            .request(ListTablesRequest.builder().build())
+            .httpRequest(createHttpRequest())
+            .httpResponse(response)
+            .responseBody(new ByteArrayInputStream(compressed))
+            .build();
+
+    InterceptorContext result = chain.modifyHttpResponse(context, attrs);
+
+    assertFalse(result.httpResponse().firstMatchingHeader("Content-Encoding").isPresent());
+    assertFalse(result.httpResponse().firstMatchingHeader("Content-Length").isPresent());
+    assertFalse(result.httpResponse().firstMatchingHeader("x-amz-crc32").isPresent());
+    String body = new String(readAll(result.responseBody().get()), StandardCharsets.UTF_8);
+    assertTrue(body.contains("\"B\""));
+    assertFalse(body.contains("FLOAT32VECTOR"));
+  }
+
+  @Test
+  public void testVectorSearchValidatesCompressedAsyncResponseBeforeGenericDecompression()
+      throws Exception {
+    byte[] original =
+        "{\"Item\":{\"embedding\":{\"FLOAT32VECTOR\":[1.0,2.0]}}}".getBytes(StandardCharsets.UTF_8);
+    byte[] compressed = gzip(original);
+    SdkHttpResponse response =
+        SdkHttpResponse.builder()
+            .statusCode(200)
+            .putHeader("Content-Encoding", "gzip")
+            .putHeader("Content-Length", Integer.toString(compressed.length))
+            .putHeader("x-amz-crc32", crc32(compressed))
+            .build();
+    ExecutionInterceptorChain chain =
+        new ExecutionInterceptorChain(
+            Arrays.asList(new ResponseCompressionInterceptor(), VectorSearchInterceptor.INSTANCE));
+    ExecutionAttributes attrs = new ExecutionAttributes();
+    InterceptorContext context =
+        InterceptorContext.builder()
+            .request(ListTablesRequest.builder().build())
+            .httpRequest(createHttpRequest())
+            .httpResponse(response)
+            .responsePublisher(singleBufferPublisher(compressed))
+            .build();
+
+    InterceptorContext headerResult = chain.modifyHttpResponse(context, attrs);
+    InterceptorContext bodyResult = chain.modifyAsyncHttpResponse(headerResult, attrs);
+
+    assertFalse(headerResult.httpResponse().firstMatchingHeader("Content-Encoding").isPresent());
+    assertFalse(headerResult.httpResponse().firstMatchingHeader("Content-Length").isPresent());
+    assertFalse(headerResult.httpResponse().firstMatchingHeader("x-amz-crc32").isPresent());
+    String body = new String(collect(bodyResult.responsePublisher().get()), StandardCharsets.UTF_8);
+    assertTrue(body.contains("\"B\""));
+    assertFalse(body.contains("FLOAT32VECTOR"));
   }
 
   private static SdkHttpRequest createHttpRequest() {
@@ -291,6 +368,12 @@ public class ResponseCompressionInterceptorTest {
       deflate.write(bytes);
     }
     return output.toByteArray();
+  }
+
+  private static String crc32(byte[] bytes) {
+    CRC32 crc32 = new CRC32();
+    crc32.update(bytes, 0, bytes.length);
+    return Long.toString(crc32.getValue());
   }
 
   private static byte[] readAll(InputStream input) throws IOException {

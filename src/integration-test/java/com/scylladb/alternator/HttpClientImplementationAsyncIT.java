@@ -436,7 +436,8 @@ public class HttpClientImplementationAsyncIT {
                   .build())
           .get();
     } catch (Exception e) {
-      // Expected — table doesn't exist
+      // Scylla 2025.1 does not decode gzip request bodies. This test verifies that each HTTP client
+      // receives the compressed request and its transport headers.
     } finally {
       client.close();
     }
@@ -483,7 +484,7 @@ public class HttpClientImplementationAsyncIT {
                   .build())
           .get();
     } catch (Exception e) {
-      // Expected
+      // Scylla 2025.1 does not decode gzip request bodies. Header behavior is asserted below.
     } finally {
       client.close();
     }
