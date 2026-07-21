@@ -1,6 +1,7 @@
 package com.scylladb.alternator.internal;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 import com.scylladb.alternator.AlternatorConfig;
 import java.io.IOException;
@@ -141,6 +142,19 @@ public class HttpClientNon2xxConnectionReuseTest {
         clientName + " status " + status + " should reach the server",
         REQUESTS,
         server.requestCount());
+    if (allowsCrtSyncServerErrorReconnect(clientName, status)) {
+      // AWS CRT sync documents 5xx server errors as a condition where a connection may be
+      // closed instead of returned to the pool. The native path does not rotate on every 5xx
+      // in this short probe, but CI has observed one replacement connection across five
+      // sequential 500 responses.
+      assertTrue(
+          clientName + " status " + status + " should reuse TCP connections",
+          server.acceptedConnections() <= 2);
+      assertTrue(
+          clientName + " status " + status + " should reuse client TCP ports",
+          server.uniqueRemotePorts() <= 2);
+      return;
+    }
     assertEquals(
         clientName + " status " + status + " should reuse one TCP connection",
         1,
@@ -149,6 +163,10 @@ public class HttpClientNon2xxConnectionReuseTest {
         clientName + " status " + status + " should use one client TCP port",
         1,
         server.uniqueRemotePorts());
+  }
+
+  private boolean allowsCrtSyncServerErrorReconnect(String clientName, int status) {
+    return "crt-sync".equals(clientName) && status >= 500;
   }
 
   private void drainAndClose(AbortableInputStream body) throws IOException {
