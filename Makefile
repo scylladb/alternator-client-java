@@ -50,6 +50,7 @@ verify:
 	${mvn} verify
 
 lint:
+	${mvn} license:check
 	${mvn} fmt:check
 	${mvn} checkstyle:check
 	${mvn} compile test-compile
@@ -60,6 +61,7 @@ lint-docs:
 	${mvn} javadoc:jar javadoc:aggregate javadoc:aggregate-jar javadoc:resource-bundle
 
 lint-fix:
+	${mvn} license:format
 	${mvn} fmt:format
 
 compile:
