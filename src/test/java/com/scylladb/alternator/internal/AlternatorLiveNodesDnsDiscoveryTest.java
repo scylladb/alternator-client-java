@@ -148,6 +148,55 @@ public class AlternatorLiveNodesDnsDiscoveryTest {
     }
   }
 
+  /** Verifies Apache retries another resolved address after an application-level failure. */
+  @Test(timeout = 10000)
+  public void testApacheDnsFallbackAfterNonSuccessfulLocalNodesResponse() throws Exception {
+    InetAddress goodAddress = InetAddress.getByName("127.0.0.1");
+    InetAddress badAddress = InetAddress.getByName("127.0.0.2");
+    AtomicInteger badRequests = new AtomicInteger();
+    AtomicInteger goodRequests = new AtomicInteger();
+    AtomicReference<String> badHostHeader = new AtomicReference<>();
+    AtomicReference<String> goodHostHeader = new AtomicReference<>();
+    HttpServer goodServer =
+        startServer(
+            goodAddress,
+            0,
+            200,
+            "[\"learned.test\"]",
+            exchange -> {
+              goodRequests.incrementAndGet();
+              goodHostHeader.set(exchange.getRequestHeaders().getFirst("Host"));
+            });
+    int dnsPort = goodServer.getAddress().getPort();
+    HttpServer badServer =
+        startServer(
+            badAddress,
+            dnsPort,
+            503,
+            "temporarily unavailable",
+            exchange -> {
+              badRequests.incrementAndGet();
+              badHostHeader.set(exchange.getRequestHeaders().getFirst("Host"));
+            });
+    DnsResolver resolver = hostname -> new InetAddress[] {badAddress, goodAddress};
+    SdkHttpClient httpClient = ApacheSyncClientFactory.createPollingClient(null, resolver);
+    try {
+      AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(dnsConfig(dnsPort), httpClient);
+
+      liveNodes.updateLiveNodes();
+
+      assertEquals("learned.test", liveNodes.nextAsURI().getHost());
+      assertEquals(1, badRequests.get());
+      assertEquals(1, goodRequests.get());
+      assertEquals("dual.test:" + dnsPort, badHostHeader.get());
+      assertEquals("dual.test:" + dnsPort, goodHostHeader.get());
+    } finally {
+      httpClient.close();
+      badServer.stop(0);
+      goodServer.stop(0);
+    }
+  }
+
   private void assertDnsDiscovery(InetAddress listenAddress, InetAddress... resolvedAddresses)
       throws Exception {
     AtomicReference<String> hostHeader = new AtomicReference<>();
@@ -194,13 +243,23 @@ public class AlternatorLiveNodesDnsDiscoveryTest {
   private HttpServer startServer(
       InetAddress listenAddress, String responseBody, ExchangeObserver observer)
       throws IOException {
-    HttpServer httpServer = HttpServer.create(new InetSocketAddress(listenAddress, 0), 0);
+    return startServer(listenAddress, 0, 200, responseBody, observer);
+  }
+
+  private HttpServer startServer(
+      InetAddress listenAddress,
+      int listenPort,
+      int statusCode,
+      String responseBody,
+      ExchangeObserver observer)
+      throws IOException {
+    HttpServer httpServer = HttpServer.create(new InetSocketAddress(listenAddress, listenPort), 0);
     httpServer.createContext(
         "/localnodes",
         exchange -> {
           observer.observe(exchange);
           byte[] body = responseBody.getBytes();
-          exchange.sendResponseHeaders(200, body.length);
+          exchange.sendResponseHeaders(statusCode, body.length);
           try (OutputStream output = exchange.getResponseBody()) {
             output.write(body);
           }

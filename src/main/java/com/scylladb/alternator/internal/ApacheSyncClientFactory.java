@@ -17,14 +17,17 @@ package com.scylladb.alternator.internal;
 
 import com.scylladb.alternator.AlternatorConfig;
 import com.scylladb.alternator.TlsConfig;
+import java.net.InetAddress;
 import java.time.Duration;
 import java.util.function.Consumer;
 import javax.net.ssl.HostnameVerifier;
 import javax.net.ssl.KeyManager;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
+import org.apache.http.conn.DnsResolver;
 import org.apache.http.conn.ssl.NoopHostnameVerifier;
 import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
+import org.apache.http.impl.conn.SystemDefaultDnsResolver;
 import software.amazon.awssdk.http.SdkHttpClient;
 import software.amazon.awssdk.http.SdkHttpConfigurationOption;
 import software.amazon.awssdk.http.apache.ApacheHttpClient;
@@ -96,11 +99,36 @@ public final class ApacheSyncClientFactory {
    * @return a configured SdkHttpClient with small pool size
    */
   public static SdkHttpClient createPollingClient(TlsConfig tlsConfig) {
+    return createPollingClient(tlsConfig, SystemDefaultDnsResolver.INSTANCE);
+  }
+
+  static SdkHttpClient createPollingClient(TlsConfig tlsConfig, DnsResolver resolver) {
+    SdkHttpClient delegate = buildPollingClient(tlsConfig, resolver, 4);
+    return new ApacheDnsFallbackSdkHttpClient(
+        delegate,
+        resolver,
+        (logicalHostname, address) ->
+            buildPollingClient(tlsConfig, pinnedResolver(resolver, logicalHostname, address), 1));
+  }
+
+  private static SdkHttpClient buildPollingClient(
+      TlsConfig tlsConfig, DnsResolver resolver, int maxConnections) {
     ApacheHttpClient.Builder builder = ApacheHttpClient.builder();
     builder.tcpKeepAlive(true);
-    builder.maxConnections(4);
+    builder.maxConnections(maxConnections);
+    builder.dnsResolver(resolver);
 
     return buildWithTls(builder, tlsConfig);
+  }
+
+  private static DnsResolver pinnedResolver(
+      DnsResolver fallbackResolver, String logicalHostname, InetAddress address) {
+    return hostname -> {
+      if (hostname.equalsIgnoreCase(logicalHostname)) {
+        return new InetAddress[] {address};
+      }
+      return fallbackResolver.resolve(hostname);
+    };
   }
 
   private static SdkHttpClient buildWithTls(ApacheHttpClient.Builder builder, TlsConfig tlsConfig) {

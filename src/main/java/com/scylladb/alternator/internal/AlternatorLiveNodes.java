@@ -23,6 +23,7 @@ import com.scylladb.alternator.routing.RoutingScope;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
+import java.net.InetAddress;
 import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -680,7 +681,67 @@ public class AlternatorLiveNodes extends Thread {
             .putHeader("Connection", "keep-alive")
             .build();
     HttpExecuteRequest executeRequest = HttpExecuteRequest.builder().request(sdkRequest).build();
-    ExecutableHttpRequest preparedRequest = pollingHttpClient.prepareRequest(executeRequest);
+    if (pollingHttpClient instanceof DnsFallbackSdkHttpClient) {
+      DnsFallbackSdkHttpClient dnsFallbackClient = (DnsFallbackSdkHttpClient) pollingHttpClient;
+      if (dnsFallbackClient.supportsDnsFallback(uri.getScheme())) {
+        return getNodesByResolvedAddress(uri, executeRequest, dnsFallbackClient);
+      }
+    }
+    return getNodes(pollingHttpClient.prepareRequest(executeRequest));
+  }
+
+  private List<URI> getNodesByResolvedAddress(
+      URI logicalUri, HttpExecuteRequest executeRequest, DnsFallbackSdkHttpClient dnsFallbackClient)
+      throws IOException {
+    List<InetAddress> resolvedAddresses = dnsFallbackClient.resolve(logicalUri.getHost());
+    if (resolvedAddresses == null) {
+      throw new IOException("DNS resolver returned null for " + logicalUri.getHost());
+    }
+    Set<InetAddress> addresses =
+        resolvedAddresses.stream()
+            .filter(Objects::nonNull)
+            .collect(Collectors.toCollection(LinkedHashSet::new));
+    if (addresses.isEmpty()) {
+      throw new IOException("DNS returned no addresses for " + logicalUri.getHost());
+    }
+
+    IOException lastException = null;
+    boolean receivedResponse = false;
+    for (InetAddress address : addresses) {
+      try {
+        List<URI> nodes =
+            getNodes(dnsFallbackClient.prepareRequestForAddress(executeRequest, address));
+        receivedResponse = true;
+        if (!nodes.isEmpty()) {
+          return nodes;
+        }
+        logger.log(
+            Level.FINE,
+            "/localnodes from "
+                + logicalUri.getHost()
+                + " at "
+                + address.getHostAddress()
+                + " returned no usable nodes; trying next DNS address");
+      } catch (IOException e) {
+        lastException = e;
+        logger.log(
+            Level.FINE,
+            "Failed /localnodes request to "
+                + logicalUri.getHost()
+                + " at "
+                + address.getHostAddress()
+                + "; trying next DNS address",
+            e);
+      }
+    }
+
+    if (!receivedResponse && lastException != null) {
+      throw lastException;
+    }
+    return Collections.emptyList();
+  }
+
+  private List<URI> getNodes(ExecutableHttpRequest preparedRequest) throws IOException {
     HttpExecuteResponse response = preparedRequest.call();
 
     try {

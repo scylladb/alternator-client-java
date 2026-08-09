@@ -116,7 +116,7 @@ public final class CrtSyncClientFactory {
             .build());
     builder.maxConcurrency(4);
 
-    return buildWithTls(builder, tlsConfig);
+    return new IpDnsFallbackSdkHttpClient(buildWithTls(builder, tlsConfig));
   }
 
   private static SdkHttpClient buildWithTls(AwsCrtHttpClient.Builder builder, TlsConfig tlsConfig) {
