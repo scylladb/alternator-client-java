@@ -39,23 +39,38 @@ import software.amazon.awssdk.http.HttpExecuteResponse;
 final class BoundedPollingAttempt {
 
   private static final int BUFFER_SIZE = 8 * 1024;
-  private static final ThreadPoolExecutor EXECUTOR =
-      new ThreadPoolExecutor(
-          4,
-          4,
-          60L,
-          TimeUnit.SECONDS,
-          new ArrayBlockingQueue<>(32),
-          new AttemptThreadFactory(),
-          new ThreadPoolExecutor.AbortPolicy());
+  private static final ThreadPoolExecutor EXECUTOR = newExecutor(4);
+  // A custom request implementation can ignore both interrupt and abort. Keep an independent
+  // two-worker lane for retained seeds so stuck learned-node transports cannot consume all
+  // recovery work, and one stuck seed cannot block a later seed or newer refresh generation.
+  private static final ThreadPoolExecutor SEED_EXECUTOR = newExecutor(2);
 
-  static {
-    EXECUTOR.allowCoreThreadTimeOut(true);
+  private static ThreadPoolExecutor newExecutor(int workers) {
+    ThreadPoolExecutor executor =
+        new ThreadPoolExecutor(
+            workers,
+            workers,
+            60L,
+            TimeUnit.SECONDS,
+            new ArrayBlockingQueue<>(32),
+            new AttemptThreadFactory(),
+            new ThreadPoolExecutor.AbortPolicy());
+    executor.allowCoreThreadTimeOut(true);
+    return executor;
   }
 
   private BoundedPollingAttempt() {}
 
   static Result execute(ExecutableHttpRequest request, long timeoutMillis, int maximumResponseBytes)
+      throws IOException {
+    return execute(request, timeoutMillis, maximumResponseBytes, false);
+  }
+
+  static Result execute(
+      ExecutableHttpRequest request,
+      long timeoutMillis,
+      int maximumResponseBytes,
+      boolean seedCandidate)
       throws IOException {
     if (maximumResponseBytes <= 0) {
       request.abort();
@@ -68,8 +83,9 @@ final class BoundedPollingAttempt {
     Control control = new Control(request);
     FutureTask<Result> future =
         new FutureTask<>(() -> executeOnWorker(request, control, maximumResponseBytes));
+    ThreadPoolExecutor executor = seedCandidate ? SEED_EXECUTOR : EXECUTOR;
     try {
-      EXECUTOR.execute(future);
+      executor.execute(future);
     } catch (RejectedExecutionException e) {
       control.abort();
       throw new IOException("Shared polling-attempt work queue is full", e);
@@ -79,12 +95,12 @@ final class BoundedPollingAttempt {
       return future.get(timeoutMillis, TimeUnit.MILLISECONDS);
     } catch (TimeoutException e) {
       future.cancel(true);
-      EXECUTOR.remove(future);
+      executor.remove(future);
       control.abort();
       throw timeout(timeoutMillis, e);
     } catch (InterruptedException e) {
       future.cancel(true);
-      EXECUTOR.remove(future);
+      executor.remove(future);
       control.abort();
       Thread.currentThread().interrupt();
       InterruptedIOException interrupted =

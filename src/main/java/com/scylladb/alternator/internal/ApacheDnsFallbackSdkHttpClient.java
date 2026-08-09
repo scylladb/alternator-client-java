@@ -91,6 +91,12 @@ final class ApacheDnsFallbackSdkHttpClient implements DnsFallbackSdkHttpClient {
   }
 
   @Override
+  public List<InetAddress> resolve(String hostname, long timeoutMillis, boolean seedCandidate)
+      throws IOException {
+    return resolver.resolve(hostname, timeoutMillis, seedCandidate);
+  }
+
+  @Override
   public ExecutableHttpRequest prepareRequestForAddress(
       HttpExecuteRequest request, InetAddress address) {
     if (closed.get()) {
@@ -174,7 +180,9 @@ final class ApacheDnsFallbackSdkHttpClient implements DnsFallbackSdkHttpClient {
     if (accumulated == null) {
       return failure;
     }
-    accumulated.addSuppressed(failure);
+    if (accumulated != failure) {
+      accumulated.addSuppressed(failure);
+    }
     return accumulated;
   }
 

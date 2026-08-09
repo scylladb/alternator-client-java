@@ -195,13 +195,44 @@ public class AlternatorDynamoDbClientWrapper implements AutoCloseable {
    */
   @Override
   public void close() {
+    RuntimeException failure = null;
     if (affinityInterceptor != null) {
-      affinityInterceptor.getPartitionKeyResolver().shutdown();
+      try {
+        affinityInterceptor.getPartitionKeyResolver().shutdown();
+      } catch (RuntimeException e) {
+        failure = accumulate(failure, e);
+      }
     }
-    liveNodes.shutdownAndWait();
+    try {
+      liveNodes.shutdownAndWait();
+    } catch (RuntimeException e) {
+      failure = accumulate(failure, e);
+    }
     if (pollingHttpClient != null) {
-      pollingHttpClient.close();
+      try {
+        pollingHttpClient.close();
+      } catch (RuntimeException e) {
+        failure = accumulate(failure, e);
+      }
     }
-    client.close();
+    try {
+      client.close();
+    } catch (RuntimeException e) {
+      failure = accumulate(failure, e);
+    }
+    if (failure != null) {
+      throw failure;
+    }
+  }
+
+  private static RuntimeException accumulate(
+      RuntimeException accumulated, RuntimeException failure) {
+    if (accumulated == null) {
+      return failure;
+    }
+    if (accumulated != failure) {
+      accumulated.addSuppressed(failure);
+    }
+    return accumulated;
   }
 }

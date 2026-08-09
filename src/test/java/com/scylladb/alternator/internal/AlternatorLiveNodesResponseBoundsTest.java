@@ -243,6 +243,75 @@ public class AlternatorLiveNodesResponseBoundsTest {
     assertTrue(elapsedMillis(started) < 500);
   }
 
+  @Test
+  public void testAggregateNodeCountLimitRetainsPreviousSnapshot() throws Exception {
+    LiveNodesPollingLimits limits =
+        new LiveNodesPollingLimits(100, 2, 100, 100, 100, 500, 1_000, 1_024, 1_024, 3, 1_024);
+
+    assertAggregateLimitRetainsPreviousSnapshot(
+        limits,
+        "[\"old-a.test\",\"old-b.test\"]",
+        "[\"new-a.test\",\"new-b.test\"]",
+        "[\"new-c.test\",\"new-d.test\"]");
+  }
+
+  @Test
+  public void testAggregateByteLimitRetainsPreviousSnapshot() throws Exception {
+    LiveNodesPollingLimits limits =
+        new LiveNodesPollingLimits(100, 2, 100, 100, 100, 500, 1_000, 1_024, 128, 10, 42);
+
+    assertAggregateLimitRetainsPreviousSnapshot(
+        limits,
+        "[\"old-a.test\",\"old-b.test\"]",
+        "[\"new-a-long.test\"]",
+        "[\"new-b-long.test\"]");
+  }
+
+  private static void assertAggregateLimitRetainsPreviousSnapshot(
+      LiveNodesPollingLimits limits,
+      String initialResponse,
+      String firstRefreshResponse,
+      String secondRefreshResponse)
+      throws Exception {
+    AtomicBoolean refresh = new AtomicBoolean();
+    SdkHttpClient client =
+        new SdkHttpClient() {
+          @Override
+          public ExecutableHttpRequest prepareRequest(HttpExecuteRequest request) {
+            String host = request.httpRequest().host();
+            String body = initialResponse;
+            if (refresh.get()) {
+              body = "old-a.test".equals(host) ? firstRefreshResponse : secondRefreshResponse;
+            }
+            return responseRequest(response(200, body));
+          }
+
+          @Override
+          public void close() {}
+
+          @Override
+          public String clientName() {
+            return "AggregateSnapshotLimitClient";
+          }
+        };
+    AlternatorLiveNodes liveNodes =
+        new AlternatorLiveNodes(
+            AlternatorConfig.builder().withSeedHost("seed.test").withScheme("http").build(),
+            client,
+            limits);
+    liveNodes.updateLiveNodes();
+    List<java.net.URI> previous = liveNodes.getLiveNodes();
+    assertEquals(2, previous.size());
+
+    refresh.set(true);
+    liveNodes.updateLiveNodes();
+
+    assertEquals(
+        "oversized aggregate must not publish a partial snapshot",
+        previous,
+        liveNodes.getLiveNodes());
+  }
+
   private interface AddressResponseFactory {
     HttpExecuteResponse create(InetAddress address) throws Exception;
   }

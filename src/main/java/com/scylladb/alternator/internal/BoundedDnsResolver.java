@@ -45,8 +45,13 @@ final class BoundedDnsResolver implements AutoCloseable {
   }
 
   private static final Service SHARED_SERVICE = new Service(4, 32, 64);
+  // Keep two resolver workers unavailable to learned-node lookups so a retained DNS seed can still
+  // recover the client after every general worker is stuck in a non-cancellable platform call,
+  // and one stuck seed cannot block the next retained seed.
+  private static final Service SHARED_SEED_SERVICE = new Service(2, 32, 64);
 
   private final Service service;
+  private final Service seedService;
   private final Object resolverIdentity;
   private final Resolver resolver;
   private final int timeoutMillis;
@@ -55,7 +60,13 @@ final class BoundedDnsResolver implements AutoCloseable {
 
   BoundedDnsResolver(
       Object resolverIdentity, Resolver resolver, int timeoutMillis, int maximumAnswers) {
-    this(SHARED_SERVICE, resolverIdentity, resolver, timeoutMillis, maximumAnswers);
+    this(
+        SHARED_SERVICE,
+        SHARED_SEED_SERVICE,
+        resolverIdentity,
+        resolver,
+        timeoutMillis,
+        maximumAnswers);
   }
 
   BoundedDnsResolver(
@@ -64,7 +75,18 @@ final class BoundedDnsResolver implements AutoCloseable {
       Resolver resolver,
       int timeoutMillis,
       int maximumAnswers) {
+    this(service, service, resolverIdentity, resolver, timeoutMillis, maximumAnswers);
+  }
+
+  BoundedDnsResolver(
+      Service service,
+      Service seedService,
+      Object resolverIdentity,
+      Resolver resolver,
+      int timeoutMillis,
+      int maximumAnswers) {
     this.service = service;
+    this.seedService = seedService;
     this.resolverIdentity = resolverIdentity;
     this.resolver = resolver;
     this.timeoutMillis = requirePositive(timeoutMillis, "timeoutMillis");
@@ -76,6 +98,11 @@ final class BoundedDnsResolver implements AutoCloseable {
   }
 
   List<InetAddress> resolve(String hostname, long callerTimeoutMillis) throws IOException {
+    return resolve(hostname, callerTimeoutMillis, false);
+  }
+
+  List<InetAddress> resolve(String hostname, long callerTimeoutMillis, boolean seedCandidate)
+      throws IOException {
     if (closed.isDone()) {
       throw new IOException("DNS resolver client is closed");
     }
@@ -84,7 +111,8 @@ final class BoundedDnsResolver implements AutoCloseable {
       throw timeout(hostname, 0, null);
     }
 
-    Service.Lease lease = service.acquire(resolverIdentity, resolver, hostname);
+    Service targetService = seedCandidate ? seedService : service;
+    Service.Lease lease = targetService.acquire(resolverIdentity, resolver, hostname);
     try {
       long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(waitMillis);
       List<InetAddress> result = null;

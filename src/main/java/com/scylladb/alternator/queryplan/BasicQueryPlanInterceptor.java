@@ -17,7 +17,12 @@ package com.scylladb.alternator.queryplan;
 
 import com.scylladb.alternator.internal.AlternatorLiveNodes;
 import com.scylladb.alternator.internal.LazyQueryPlan;
+import com.scylladb.alternator.routing.ClusterScope;
+import com.scylladb.alternator.routing.RoutingScope;
 import java.net.URI;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.Set;
 import software.amazon.awssdk.core.interceptor.Context;
 import software.amazon.awssdk.core.interceptor.ExecutionAttribute;
 import software.amazon.awssdk.core.interceptor.ExecutionAttributes;
@@ -40,6 +45,8 @@ import software.amazon.awssdk.http.SdkHttpRequest;
  */
 public class BasicQueryPlanInterceptor implements ExecutionInterceptor {
 
+  private static final int MAX_ROUTING_SCOPE_DEPTH = 64;
+
   /** Execution attribute key for storing the LazyQueryPlan per request. */
   protected static final ExecutionAttribute<LazyQueryPlan> QUERY_PLAN =
       new ExecutionAttribute<>("QueryPlanInterceptor.queryPlan");
@@ -58,6 +65,7 @@ public class BasicQueryPlanInterceptor implements ExecutionInterceptor {
   @Override
   public void beforeExecution(
       Context.BeforeExecution context, ExecutionAttributes executionAttributes) {
+    liveNodes.recordRequestActivity();
     // Create a query plan with random seed for pseudo-random load balancing
     executionAttributes.putAttribute(QUERY_PLAN, new LazyQueryPlan(liveNodes));
   }
@@ -67,7 +75,13 @@ public class BasicQueryPlanInterceptor implements ExecutionInterceptor {
       Context.ModifyHttpRequest context, ExecutionAttributes executionAttributes) {
     LazyQueryPlan plan = executionAttributes.getAttribute(QUERY_PLAN);
     if (plan == null || !plan.hasNext()) {
-      // No plan available, return original request
+      if (liveNodes.getLiveNodes().isEmpty()
+          || !permitsClusterRouting(liveNodes.getRoutingScope())) {
+        throw new IllegalStateException(
+            "No eligible live nodes remain for the configured routing scope");
+      }
+      // The request already exhausted a non-empty plan; preserve the established SDK retry
+      // behavior by returning the original endpoint.
       return context.httpRequest();
     }
 
@@ -81,6 +95,21 @@ public class BasicQueryPlanInterceptor implements ExecutionInterceptor {
         .port(targetUri.getPort())
         .putHeader("Connection", "keep-alive")
         .build();
+  }
+
+  private static boolean permitsClusterRouting(RoutingScope scope) {
+    Set<RoutingScope> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+    RoutingScope current = scope;
+    for (int depth = 0; current != null && depth < MAX_ROUTING_SCOPE_DEPTH; depth++) {
+      if (!seen.add(current)) {
+        return false;
+      }
+      if (current instanceof ClusterScope) {
+        return true;
+      }
+      current = current.getFallback();
+    }
+    return false;
   }
 
   /**

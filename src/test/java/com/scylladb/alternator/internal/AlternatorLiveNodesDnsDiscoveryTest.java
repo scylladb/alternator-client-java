@@ -206,7 +206,18 @@ public class AlternatorLiveNodesDnsDiscoveryTest {
             "[\"dual.test\"]",
             exchange -> hostHeader.set(exchange.getRequestHeaders().getFirst("Host")));
     int dnsPort = dnsServer.getAddress().getPort();
-    SdkHttpClient httpClient = apacheClient(host -> resolvedAddresses);
+    HttpServer badServer = null;
+    if (resolvedAddresses.length > 1 && !listenAddress.equals(resolvedAddresses[0])) {
+      badServer =
+          startServer(
+              resolvedAddresses[0],
+              dnsPort,
+              503,
+              "wrong address",
+              exchange -> hostHeader.set(exchange.getRequestHeaders().getFirst("Host")));
+    }
+    DnsResolver resolver = host -> resolvedAddresses;
+    SdkHttpClient httpClient = ApacheSyncClientFactory.createPollingClient(null, resolver);
     try {
       AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(dnsConfig(dnsPort), httpClient);
 
@@ -217,6 +228,9 @@ public class AlternatorLiveNodesDnsDiscoveryTest {
       assertEquals("dual.test:" + dnsPort, hostHeader.get());
     } finally {
       httpClient.close();
+      if (badServer != null) {
+        badServer.stop(0);
+      }
       dnsServer.stop(0);
     }
   }

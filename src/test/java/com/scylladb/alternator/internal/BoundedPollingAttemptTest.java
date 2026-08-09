@@ -67,6 +67,12 @@ public class BoundedPollingAttemptTest {
       }
       assertEquals("queued requests must never reach a saturated worker", 0, queuedCalls.get());
 
+      AtomicInteger seedCalls = new AtomicInteger();
+      BoundedPollingAttempt.Result seedRecovery =
+          BoundedPollingAttempt.execute(successfulRequest(seedCalls), 1_000, 16, true);
+      assertTrue("a retained seed must have reserved polling capacity", seedRecovery.isSuccess());
+      assertEquals(1, seedCalls.get());
+
       releaseWorkers.countDown();
       for (Future<BoundedPollingAttempt.Result> attempt : blockingAttempts) {
         assertTrue(attempt.get(1, TimeUnit.SECONDS).isSuccess());

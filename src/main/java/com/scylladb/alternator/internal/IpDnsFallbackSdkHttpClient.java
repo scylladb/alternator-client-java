@@ -133,6 +133,12 @@ final class IpDnsFallbackSdkHttpClient implements DnsFallbackSdkHttpClient {
   }
 
   @Override
+  public List<InetAddress> resolve(String hostname, long timeoutMillis, boolean seedCandidate)
+      throws IOException {
+    return resolver.resolve(hostname, timeoutMillis, seedCandidate);
+  }
+
+  @Override
   public ExecutableHttpRequest prepareRequestForAddress(
       HttpExecuteRequest request, InetAddress address) {
     if (closed.get()) {

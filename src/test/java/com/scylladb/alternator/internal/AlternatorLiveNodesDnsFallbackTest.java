@@ -21,9 +21,11 @@ import com.scylladb.alternator.AlternatorConfig;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.net.InetAddress;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -35,11 +37,40 @@ import software.amazon.awssdk.http.AbortableInputStream;
 import software.amazon.awssdk.http.ExecutableHttpRequest;
 import software.amazon.awssdk.http.HttpExecuteRequest;
 import software.amazon.awssdk.http.HttpExecuteResponse;
+import software.amazon.awssdk.http.SdkHttpClient;
 import software.amazon.awssdk.http.SdkHttpFullResponse;
 import software.amazon.awssdk.http.SdkHttpRequest;
 
 /** Deterministic negative DNS fallback tests for DRIVER-819 and GitHub issue #156. */
 public class AlternatorLiveNodesDnsFallbackTest {
+
+  @Test
+  public void testLiteralSeedBypassesResolverAndDnsSeedUsesReservedCapacity() throws Exception {
+    AtomicInteger resolutions = new AtomicInteger();
+    TestDnsFallbackClient literalClient =
+        new TestDnsFallbackClient(
+            hostname -> {
+              resolutions.incrementAndGet();
+              throw new IOException("literal address must not enter the DNS worker pool");
+            },
+            (request, address) -> response(200, "[\"127.0.0.1\"]"));
+    AlternatorLiveNodes literalNodes = new AlternatorLiveNodes(config("127.0.0.1"), literalClient);
+
+    literalNodes.updateLiveNodes();
+
+    assertEquals(0, resolutions.get());
+    assertEquals("127.0.0.1", literalNodes.nextAsURI().getHost());
+
+    TestDnsFallbackClient dnsClient =
+        new TestDnsFallbackClient(
+            hostname -> Collections.singletonList(address(1)),
+            (request, address) -> response(200, "[\"learned.test\"]"));
+    AlternatorLiveNodes dnsNodes = new AlternatorLiveNodes(config("seed.test"), dnsClient);
+
+    dnsNodes.updateLiveNodes();
+
+    assertEquals(Collections.singletonList(true), dnsClient.seedResolutionPriorities);
+  }
 
   @Test
   public void testTriesEveryUniqueAddressUntilLocalNodesIsUsable() throws Exception {
@@ -65,7 +96,7 @@ public class AlternatorLiveNodesDnsFallbackTest {
                 case 4:
                   return response(200, "[]");
                 case 5:
-                  return response(200, "[\"bad host\"]");
+                  return response(200, "[\"bad..name\"]");
                 case 6:
                   return responseWithoutBody(200);
                 default:
@@ -192,6 +223,53 @@ public class AlternatorLiveNodesDnsFallbackTest {
     assertEquals(expectedAttempts, attemptedAddressBytes(client));
   }
 
+  @Test(timeout = 5000)
+  public void testGlobalCycleBudgetLeavesSeedRecoveryAttemptAfterManyLearnedAddresses()
+      throws Exception {
+    AtomicInteger phase = new AtomicInteger();
+    TestDnsFallbackClient client =
+        new TestDnsFallbackClient(
+            hostname ->
+                "seed.test".equals(hostname)
+                    ? Arrays.asList(address(9))
+                    : Arrays.asList(address(1), address(2), address(3)),
+            (request, address) -> {
+              if (phase.get() == 0) {
+                return response(
+                    200,
+                    "[\"learned-a.test\",\"learned-b.test\","
+                        + "\"learned-c.test\",\"learned-d.test\"]");
+              }
+              if ("seed.test".equals(request.host())) {
+                return response(200, "[\"recovered.test\"]");
+              }
+              try {
+                Thread.sleep(30);
+              } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("interrupted simulated failed address", e);
+              }
+              return response(503, "temporarily unavailable");
+            });
+    LiveNodesPollingLimits limits =
+        new LiveNodesPollingLimits(100, 3, 100, 100, 200, 500, 800, 1_024, 1_024);
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config("seed.test"), client, limits);
+    liveNodes.updateLiveNodes();
+    assertEquals(4, liveNodes.getLiveNodes().size());
+
+    client.attempts.clear();
+    phase.set(1);
+    long started = System.nanoTime();
+    liveNodes.updateLiveNodes();
+
+    assertEquals("recovered.test", liveNodes.nextAsURI().getHost());
+    assertEquals(13, client.attempts.size());
+    assertEquals("seed.test@9", attemptedAddresses(client).get(12));
+    assertTrue(
+        "global discovery deadline must remain bounded",
+        TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) < 1_500);
+  }
+
   @Test
   public void testEmptyAndWhollyInvalidDataTryEveryAddressAndSeedWithoutPoisoningNodes()
       throws Exception {
@@ -230,7 +308,12 @@ public class AlternatorLiveNodesDnsFallbackTest {
 
     liveNodes.updateLiveNodes();
 
-    assertEquals("learned.test", liveNodes.nextAsURI().getHost());
+    List<URI> expectedNodes =
+        Arrays.asList(
+            new URI("http://learned.test:8000"),
+            new URI("http://bad-seed.test:8000"),
+            new URI("http://good-seed.test:8000"));
+    assertEquals(expectedNodes, liveNodes.getLiveNodes());
     assertEquals(
         Arrays.asList("bad-seed.test@1", "bad-seed.test@2", "good-seed.test@3", "good-seed.test@4"),
         attemptedAddresses(client));
@@ -239,7 +322,7 @@ public class AlternatorLiveNodesDnsFallbackTest {
     phase.set(1);
     liveNodes.updateLiveNodes();
 
-    assertEquals("learned.test", liveNodes.nextAsURI().getHost());
+    assertEquals(expectedNodes, liveNodes.getLiveNodes());
     assertEquals(
         Arrays.asList(
             "learned.test@5",
@@ -299,6 +382,253 @@ public class AlternatorLiveNodesDnsFallbackTest {
     assertEquals("new.test", liveNodes.nextAsURI().getHost());
   }
 
+  @Test
+  public void testMalformedJsonCannotShortCircuitAddressFallback() throws Exception {
+    TestDnsFallbackClient client =
+        new TestDnsFallbackClient(
+            hostname -> Arrays.asList(address(1), address(2)),
+            (request, address) ->
+                lastAddressByte(address) == 1
+                    ? response(200, "[\f\"poison.test\"]")
+                    : response(200, "[\"learned.test\"]"));
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config("seed.test"), client);
+
+    liveNodes.updateLiveNodes();
+
+    assertEquals("learned.test", liveNodes.nextAsURI().getHost());
+    assertEquals(Arrays.asList(1, 2), attemptedAddressBytes(client));
+  }
+
+  @Test
+  public void testMalformedUtf8CannotShortCircuitAddressFallback() throws Exception {
+    byte[] malformedUtf8 =
+        new byte[] {
+          '[',
+          '"',
+          'p',
+          'o',
+          'i',
+          's',
+          'o',
+          'n',
+          '.',
+          't',
+          'e',
+          's',
+          't',
+          '"',
+          ',',
+          '"',
+          'b',
+          'a',
+          'd',
+          (byte) 0xc3,
+          '.',
+          't',
+          'e',
+          's',
+          't',
+          '"',
+          ']'
+        };
+    TestDnsFallbackClient client =
+        new TestDnsFallbackClient(
+            hostname -> Arrays.asList(address(1), address(2)),
+            (request, address) ->
+                lastAddressByte(address) == 1
+                    ? response(200, malformedUtf8)
+                    : response(200, "[\"learned.test\"]"));
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config("seed.test"), client);
+
+    liveNodes.updateLiveNodes();
+
+    assertEquals("learned.test", liveNodes.nextAsURI().getHost());
+    assertEquals(Arrays.asList(1, 2), attemptedAddressBytes(client));
+  }
+
+  @Test
+  public void testAuthorityInjectionCannotShortCircuitAddressFallback() throws Exception {
+    TestDnsFallbackClient client =
+        new TestDnsFallbackClient(
+            hostname -> Arrays.asList(address(1), address(2)),
+            (request, address) ->
+                lastAddressByte(address) == 1
+                    ? response(200, "[\"userinfo@poison.test\"]")
+                    : response(200, "[\"learned.test\"]"));
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config("seed.test"), client);
+
+    liveNodes.updateLiveNodes();
+
+    assertEquals("learned.test", liveNodes.nextAsURI().getHost());
+    assertEquals(Arrays.asList(1, 2), attemptedAddressBytes(client));
+  }
+
+  @Test
+  public void testRuntimeRequestPreparationFailureTriesNextAddress() throws Exception {
+    List<Integer> preparations = new CopyOnWriteArrayList<>();
+    DnsFallbackSdkHttpClient client =
+        new DnsFallbackSdkHttpClient() {
+          @Override
+          public boolean supportsDnsFallback(String scheme) {
+            return true;
+          }
+
+          @Override
+          public List<InetAddress> resolve(String hostname) throws IOException {
+            return Arrays.asList(address(1), address(2));
+          }
+
+          @Override
+          public List<InetAddress> resolve(String hostname, long timeoutMillis) throws IOException {
+            return resolve(hostname);
+          }
+
+          @Override
+          public ExecutableHttpRequest prepareRequestForAddress(
+              HttpExecuteRequest request, InetAddress address) {
+            int addressByte = lastAddressByte(address);
+            preparations.add(addressByte);
+            if (addressByte == 1) {
+              throw new IllegalStateException("simulated transport preparation failure");
+            }
+            return new ExecutableHttpRequest() {
+              @Override
+              public HttpExecuteResponse call() {
+                return response(200, "[\"learned.test\"]");
+              }
+
+              @Override
+              public void abort() {}
+            };
+          }
+
+          @Override
+          public ExecutableHttpRequest prepareRequest(HttpExecuteRequest request) {
+            throw new AssertionError("address-aware path must be used");
+          }
+
+          @Override
+          public void close() {}
+
+          @Override
+          public String clientName() {
+            return "RuntimePreparationFailureClient";
+          }
+        };
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config("seed.test"), client);
+
+    liveNodes.updateLiveNodes();
+
+    assertEquals("learned.test", liveNodes.nextAsURI().getHost());
+    assertEquals(Arrays.asList(1, 2), preparations);
+  }
+
+  @Test
+  public void testLaterStartedRefreshCannotBeOverwrittenByOlderRefresh() throws Exception {
+    assertOverlappingRefreshes(true);
+  }
+
+  @Test
+  public void testLaterStartedRefreshPublishesAfterOlderRefresh() throws Exception {
+    assertOverlappingRefreshes(false);
+  }
+
+  private void assertOverlappingRefreshes(boolean newerCompletesFirst) throws Exception {
+    CountDownLatch firstResponseStarted = new CountDownLatch(1);
+    CountDownLatch releaseFirstResponse = new CountDownLatch(1);
+    CountDownLatch secondResponseStarted = new CountDownLatch(1);
+    CountDownLatch releaseSecondResponse = new CountDownLatch(1);
+    AtomicInteger calls = new AtomicInteger();
+    SdkHttpClient client =
+        new SdkHttpClient() {
+          @Override
+          public ExecutableHttpRequest prepareRequest(HttpExecuteRequest request) {
+            return new ExecutableHttpRequest() {
+              @Override
+              public HttpExecuteResponse call() throws IOException {
+                int call = calls.incrementAndGet();
+                if (call == 1) {
+                  firstResponseStarted.countDown();
+                  try {
+                    CountDownLatch release =
+                        newerCompletesFirst ? releaseFirstResponse : secondResponseStarted;
+                    if (!release.await(5, TimeUnit.SECONDS)) {
+                      throw new IOException("timed out waiting to complete older refresh");
+                    }
+                  } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("interrupted waiting to release older refresh", e);
+                  }
+                  return response(200, "[\"stale.test\"]");
+                }
+                secondResponseStarted.countDown();
+                if (!newerCompletesFirst) {
+                  try {
+                    if (!releaseSecondResponse.await(5, TimeUnit.SECONDS)) {
+                      throw new IOException("timed out waiting to complete newer refresh");
+                    }
+                  } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("interrupted waiting to release newer refresh", e);
+                  }
+                }
+                return response(200, "[\"fresh.test\"]");
+              }
+
+              @Override
+              public void abort() {}
+            };
+          }
+
+          @Override
+          public void close() {}
+
+          @Override
+          public String clientName() {
+            return "OverlappingRefreshClient";
+          }
+        };
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config("seed.test"), client);
+    AtomicReference<Throwable> failure = new AtomicReference<>();
+    Thread older = updater(liveNodes, failure);
+    Thread newer = updater(liveNodes, failure);
+
+    older.start();
+    assertTrue(firstResponseStarted.await(5, TimeUnit.SECONDS));
+    newer.start();
+    assertTrue(secondResponseStarted.await(5, TimeUnit.SECONDS));
+    if (newerCompletesFirst) {
+      newer.join(5_000);
+      assertFalse(newer.isAlive());
+      assertEquals("fresh.test", liveNodes.nextAsURI().getHost());
+      releaseFirstResponse.countDown();
+      older.join(5_000);
+    } else {
+      older.join(5_000);
+      assertFalse(older.isAlive());
+      assertEquals("stale.test", liveNodes.nextAsURI().getHost());
+      releaseSecondResponse.countDown();
+      newer.join(5_000);
+    }
+
+    assertFalse(older.isAlive());
+    assertFalse(newer.isAlive());
+    assertNull(failure.get());
+    assertEquals("fresh.test", liveNodes.nextAsURI().getHost());
+  }
+
+  private static Thread updater(
+      AlternatorLiveNodes liveNodes, AtomicReference<Throwable> updateFailure) {
+    return new Thread(
+        () -> {
+          try {
+            liveNodes.updateLiveNodes();
+          } catch (Throwable e) {
+            updateFailure.compareAndSet(null, e);
+          }
+        });
+  }
+
   private static AlternatorConfig config(String seedHost) {
     return AlternatorConfig.builder()
         .withSeedHost(seedHost)
@@ -334,10 +664,13 @@ public class AlternatorLiveNodesDnsFallbackTest {
   }
 
   private static HttpExecuteResponse response(int status, String body) {
-    byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+    return response(status, body.getBytes(StandardCharsets.UTF_8));
+  }
+
+  private static HttpExecuteResponse response(int status, byte[] body) {
     return HttpExecuteResponse.builder()
         .response(SdkHttpFullResponse.builder().statusCode(status).build())
-        .responseBody(AbortableInputStream.create(new ByteArrayInputStream(bytes)))
+        .responseBody(AbortableInputStream.create(new ByteArrayInputStream(body)))
         .build();
   }
 
@@ -367,6 +700,7 @@ public class AlternatorLiveNodesDnsFallbackTest {
 
   private static final class TestDnsFallbackClient implements DnsFallbackSdkHttpClient {
     final List<Attempt> attempts = new CopyOnWriteArrayList<>();
+    final List<Boolean> seedResolutionPriorities = new CopyOnWriteArrayList<>();
     private final Resolver resolver;
     private final AddressHandler handler;
 
@@ -387,6 +721,13 @@ public class AlternatorLiveNodesDnsFallbackTest {
 
     @Override
     public List<InetAddress> resolve(String hostname, long timeoutMillis) throws IOException {
+      return resolver.resolve(hostname);
+    }
+
+    @Override
+    public List<InetAddress> resolve(String hostname, long timeoutMillis, boolean seedCandidate)
+        throws IOException {
+      seedResolutionPriorities.add(seedCandidate);
       return resolver.resolve(hostname);
     }
 

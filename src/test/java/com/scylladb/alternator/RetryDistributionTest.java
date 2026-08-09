@@ -19,6 +19,9 @@ import static org.junit.Assert.*;
 
 import com.scylladb.alternator.internal.AlternatorLiveNodes;
 import com.scylladb.alternator.queryplan.BasicQueryPlanInterceptor;
+import com.scylladb.alternator.routing.ClusterScope;
+import com.scylladb.alternator.routing.DatacenterScope;
+import com.scylladb.alternator.routing.RoutingScope;
 import java.net.URI;
 import java.util.*;
 import java.util.stream.Collectors;
@@ -229,6 +232,79 @@ public class RetryDistributionTest {
         "Repeated calls after exhaustion return original request host", "127.0.0.1", third.host());
   }
 
+  @Test
+  public void testEmptyScopedPlanFailsInsteadOfUsingOriginalSeedEndpoint() {
+    MockAlternatorLiveNodes liveNodes =
+        new MockAlternatorLiveNodes(Collections.emptyList(), DatacenterScope.of("dc1", null));
+    BasicQueryPlanInterceptor interceptor = new BasicQueryPlanInterceptor(liveNodes);
+    ExecutionAttributes attrs = ExecutionAttributes.builder().build();
+    interceptor.beforeExecution(null, attrs);
+    SdkHttpRequest seedRequest =
+        SdkHttpRequest.builder()
+            .protocol("http")
+            .host("out-of-scope-seed.test")
+            .port(8000)
+            .method(software.amazon.awssdk.http.SdkHttpMethod.POST)
+            .encodedPath("/")
+            .build();
+
+    try {
+      interceptor.modifyHttpRequest(new MockModifyHttpRequestContext(seedRequest), attrs);
+      fail("Expected an empty scoped plan to fail closed");
+    } catch (IllegalStateException expected) {
+      assertTrue(expected.getMessage(), expected.getMessage().contains("routing scope"));
+    }
+  }
+
+  @Test
+  public void testExhaustedScopedPlanFailsInsteadOfUsingOriginalSeedEndpoint() throws Exception {
+    MockAlternatorLiveNodes liveNodes =
+        new MockAlternatorLiveNodes(createNodes(1), DatacenterScope.of("dc1", null));
+    BasicQueryPlanInterceptor interceptor = new BasicQueryPlanInterceptor(liveNodes);
+    ExecutionAttributes attrs = ExecutionAttributes.builder().build();
+    interceptor.beforeExecution(null, attrs);
+    SdkHttpRequest seedRequest =
+        SdkHttpRequest.builder()
+            .protocol("http")
+            .host("out-of-scope-seed.test")
+            .port(8000)
+            .method(software.amazon.awssdk.http.SdkHttpMethod.POST)
+            .encodedPath("/")
+            .build();
+    MockModifyHttpRequestContext context = new MockModifyHttpRequestContext(seedRequest);
+
+    assertEquals("127.0.0.1", interceptor.modifyHttpRequest(context, attrs).host());
+    try {
+      interceptor.modifyHttpRequest(context, attrs);
+      fail("Expected an exhausted scoped plan to fail closed");
+    } catch (IllegalStateException expected) {
+      assertTrue(expected.getMessage(), expected.getMessage().contains("routing scope"));
+    }
+  }
+
+  @Test
+  public void testExhaustedPlanUsesOriginalSeedWhenClusterFallbackIsConfigured() throws Exception {
+    MockAlternatorLiveNodes liveNodes =
+        new MockAlternatorLiveNodes(
+            createNodes(1), DatacenterScope.of("dc1", ClusterScope.create()));
+    BasicQueryPlanInterceptor interceptor = new BasicQueryPlanInterceptor(liveNodes);
+    ExecutionAttributes attrs = ExecutionAttributes.builder().build();
+    interceptor.beforeExecution(null, attrs);
+    SdkHttpRequest seedRequest =
+        SdkHttpRequest.builder()
+            .protocol("http")
+            .host("cluster-fallback-seed.test")
+            .port(8000)
+            .method(software.amazon.awssdk.http.SdkHttpMethod.POST)
+            .encodedPath("/")
+            .build();
+    MockModifyHttpRequestContext context = new MockModifyHttpRequestContext(seedRequest);
+
+    assertEquals("127.0.0.1", interceptor.modifyHttpRequest(context, attrs).host());
+    assertEquals(
+        "cluster-fallback-seed.test", interceptor.modifyHttpRequest(context, attrs).host());
+  }
+
   // ========== Test: verify actual node distribution via captured request URIs ==========
 
   /**
@@ -316,11 +392,17 @@ public class RetryDistributionTest {
         new java.util.concurrent.atomic.AtomicInteger(0);
 
     MockAlternatorLiveNodes(List<URI> nodes) {
+      this(nodes, ClusterScope.create());
+    }
+
+    MockAlternatorLiveNodes(List<URI> nodes, RoutingScope routingScope) {
       super(
           AlternatorConfig.builder()
-              .withSeedHosts(Collections.singletonList(nodes.get(0).getHost()))
-              .withScheme(nodes.get(0).getScheme())
-              .withPort(nodes.get(0).getPort())
+              .withSeedHosts(
+                  Collections.singletonList(nodes.isEmpty() ? "seed.test" : nodes.get(0).getHost()))
+              .withScheme(nodes.isEmpty() ? "http" : nodes.get(0).getScheme())
+              .withPort(nodes.isEmpty() ? 8000 : nodes.get(0).getPort())
+              .withRoutingScope(routingScope)
               .build());
       this.nodes = new ArrayList<>(nodes);
     }

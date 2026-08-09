@@ -21,6 +21,7 @@ import com.scylladb.alternator.AlternatorConfig;
 import com.scylladb.alternator.routing.ClusterScope;
 import com.scylladb.alternator.routing.DatacenterScope;
 import com.scylladb.alternator.routing.RackScope;
+import com.scylladb.alternator.routing.RoutingScope;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.net.URI;
@@ -267,6 +268,11 @@ public class AlternatorLiveNodesScopeFallbackTest {
 
     AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, scopeAwareClient);
 
+    assertEquals(
+        "an explicit cluster fallback authorizes the configured seed immediately",
+        "10.0.0.1",
+        liveNodes.nextAsURI().getHost());
+
     // This should NOT throw - the fallback chain should traverse Rack -> DC -> Cluster
     liveNodes.updateLiveNodes();
 
@@ -300,6 +306,20 @@ public class AlternatorLiveNodesScopeFallbackTest {
             .withRoutingScope(RackScope.of("dc1", "wrong-rack", null))
             .build();
     AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, emptyClient);
+
+    assertTrue(
+        "strict scoped seeds must not become routing targets", liveNodes.getLiveNodes().isEmpty());
+    try {
+      liveNodes.nextAsURI();
+      fail("Expected strict scope to have no routing target before discovery");
+    } catch (IllegalStateException expected) {
+      assertTrue(expected.getMessage(), expected.getMessage().contains("No live nodes"));
+    }
+
+    liveNodes.updateLiveNodes();
+    assertTrue(
+        "an authoritative terminal empty response must remain fail-closed",
+        liveNodes.getLiveNodes().isEmpty());
 
     try {
       liveNodes.checkIfRackAndDatacenterSetCorrectly();
@@ -424,7 +444,8 @@ public class AlternatorLiveNodesScopeFallbackTest {
   }
 
   @Test
-  public void testWhollyInvalidResponsesTraverseScopeFallbackAndRetainOldNodes() throws Exception {
+  public void testWhollyInvalidResponsesTraverseScopeFallbackAndRemainFailClosed()
+      throws Exception {
     ReachableHttpClient whollyInvalidClient = new ReachableHttpClient("[\"bad host\"]");
     AlternatorConfig config =
         AlternatorConfig.builder()
@@ -440,8 +461,307 @@ public class AlternatorLiveNodesScopeFallbackTest {
         "wholly invalid nonempty data must traverse Rack, DC, and Cluster",
         3,
         whollyInvalidClient.capturedRequests.size());
-    assertEquals(1, liveNodes.getLiveNodes().size());
-    assertEquals("10.0.0.1", liveNodes.getLiveNodes().get(0).getHost());
+    assertEquals(
+        "invalid discovery must retain the seed authorized by the explicit cluster fallback",
+        "10.0.0.1",
+        liveNodes.nextAsURI().getHost());
+  }
+
+  @Test(timeout = 1000)
+  public void testCyclicCustomRoutingScopeFailsBeforeDiscovery() throws Exception {
+    RoutingScope cyclic =
+        new RoutingScope() {
+          @Override
+          public String getName() {
+            return "Cyclic";
+          }
+
+          @Override
+          public String getDescription() {
+            return "cyclic test scope";
+          }
+
+          @Override
+          public RoutingScope getFallback() {
+            return this;
+          }
+
+          @Override
+          public String getLocalNodesQuery() {
+            return "dc=missing";
+          }
+        };
+    UnreachableHttpClient client = new UnreachableHttpClient();
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withSeedHost("seed.test")
+            .withScheme("http")
+            .withRoutingScope(cyclic)
+            .build();
+
+    try {
+      new AlternatorLiveNodes(config, client).updateLiveNodes();
+      fail("Expected cyclic routing scope to fail");
+    } catch (IOException expected) {
+      assertTrue(expected.getMessage(), expected.getMessage().contains("cycle"));
+    }
+    assertEquals("cycle must fail before network discovery", 0, client.callCount.get());
+  }
+
+  @Test
+  public void testAuthoritativeScopedEmptyClearsPreviouslyValidatedSnapshot() throws Exception {
+    AtomicInteger phase = new AtomicInteger();
+    SdkHttpClient client =
+        new SdkHttpClient() {
+          @Override
+          public ExecutableHttpRequest prepareRequest(HttpExecuteRequest request) {
+            return new ExecutableHttpRequest() {
+              @Override
+              public HttpExecuteResponse call() {
+                return response(200, phase.get() == 0 ? "[\"validated.test\"]" : "[]");
+              }
+
+              @Override
+              public void abort() {}
+            };
+          }
+
+          @Override
+          public void close() {}
+
+          @Override
+          public String clientName() {
+            return "ChangingScopedClient";
+          }
+        };
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withSeedHost("seed.test")
+            .withScheme("http")
+            .withRoutingScope(DatacenterScope.of("dc1", null))
+            .build();
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, client);
+
+    liveNodes.updateLiveNodes();
+    assertEquals("validated.test", liveNodes.nextAsURI().getHost());
+    phase.incrementAndGet();
+    liveNodes.updateLiveNodes();
+
+    assertTrue(
+        "authoritative empty scope must remove stale routing targets",
+        liveNodes.getLiveNodes().isEmpty());
+  }
+
+  @Test
+  public void testStrictPublishedScopeClearsWhenThatScopeBecomesEmpty() throws Exception {
+    AtomicInteger phase = new AtomicInteger();
+    SdkHttpClient client =
+        new SdkHttpClient() {
+          @Override
+          public ExecutableHttpRequest prepareRequest(HttpExecuteRequest request) {
+            return new ExecutableHttpRequest() {
+              @Override
+              public HttpExecuteResponse call() {
+                return response(200, phase.get() == 0 ? "[\"validated.test\"]" : "[]");
+              }
+
+              @Override
+              public void abort() {}
+            };
+          }
+
+          @Override
+          public void close() {}
+
+          @Override
+          public String clientName() {
+            return "ChangingClusterFallbackClient";
+          }
+        };
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withSeedHost("seed.test")
+            .withScheme("http")
+            .withRoutingScope(RackScope.of("dc1", "rack1", ClusterScope.create()))
+            .build();
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, client);
+
+    liveNodes.updateLiveNodes();
+    assertEquals("validated.test", liveNodes.nextAsURI().getHost());
+    phase.incrementAndGet();
+    liveNodes.updateLiveNodes();
+
+    assertTrue(
+        "an authoritative empty result must clear nodes published by that strict scope",
+        liveNodes.getLiveNodes().isEmpty());
+  }
+
+  @Test
+  public void testPrimaryEmptyClearsPrimaryOriginWhenFallbackFails() throws Exception {
+    AtomicInteger phase = new AtomicInteger();
+    AlternatorLiveNodes liveNodes =
+        new AlternatorLiveNodes(provenanceConfig(), provenanceClient(phase, true));
+
+    liveNodes.updateLiveNodes();
+    assertEquals("primary.test", liveNodes.nextAsURI().getHost());
+
+    phase.incrementAndGet();
+    liveNodes.updateLiveNodes();
+
+    assertTrue(
+        "primary authoritative empty must clear a primary-origin snapshot even if fallback fails",
+        liveNodes.getLiveNodes().isEmpty());
+  }
+
+  @Test
+  public void testPrimaryEmptyRetainsFallbackOriginWhenFallbackFails() throws Exception {
+    AtomicInteger phase = new AtomicInteger();
+    AlternatorLiveNodes liveNodes =
+        new AlternatorLiveNodes(provenanceConfig(), provenanceClient(phase, false));
+
+    liveNodes.updateLiveNodes();
+    assertEquals("fallback.test", liveNodes.nextAsURI().getHost());
+
+    phase.incrementAndGet();
+    liveNodes.updateLiveNodes();
+
+    assertEquals(
+        "failure cannot disprove a snapshot published by the fallback scope",
+        "fallback.test",
+        liveNodes.nextAsURI().getHost());
+  }
+
+  private static AlternatorConfig provenanceConfig() {
+    return AlternatorConfig.builder()
+        .withSeedHost("seed.test")
+        .withScheme("http")
+        .withRoutingScope(DatacenterScope.of("dc1", DatacenterScope.of("dc2", null)))
+        .build();
+  }
+
+  private static SdkHttpClient provenanceClient(AtomicInteger phase, boolean primaryOrigin) {
+    return new SdkHttpClient() {
+      @Override
+      public ExecutableHttpRequest prepareRequest(HttpExecuteRequest request) {
+        List<String> values = request.httpRequest().rawQueryParameters().get("dc");
+        String datacenter = values == null || values.isEmpty() ? "" : values.get(0);
+        return new ExecutableHttpRequest() {
+          @Override
+          public HttpExecuteResponse call() throws IOException {
+            if (phase.get() == 0) {
+              if ("dc1".equals(datacenter)) {
+                return response(200, primaryOrigin ? "[\"primary.test\"]" : "[]");
+              }
+              return response(200, "[\"fallback.test\"]");
+            }
+            if ("dc1".equals(datacenter)) {
+              return response(200, "[]");
+            }
+            throw new IOException("fallback unavailable");
+          }
+
+          @Override
+          public void abort() {}
+        };
+      }
+
+      @Override
+      public void close() {}
+
+      @Override
+      public String clientName() {
+        return "ProvenanceHttpClient";
+      }
+    };
+  }
+
+  @Test
+  public void testScopedFeatureProbeUsesDiscoverySeedWithoutRoutingIt() throws Exception {
+    AtomicInteger requests = new AtomicInteger();
+    SdkHttpClient client =
+        new SdkHttpClient() {
+          @Override
+          public ExecutableHttpRequest prepareRequest(HttpExecuteRequest request) {
+            boolean fakeRack = request.httpRequest().rawQueryParameters().containsKey("rack");
+            return new ExecutableHttpRequest() {
+              @Override
+              public HttpExecuteResponse call() {
+                requests.incrementAndGet();
+                return response(200, fakeRack ? "[]" : "[\"seed.test\"]");
+              }
+
+              @Override
+              public void abort() {}
+            };
+          }
+
+          @Override
+          public void close() {}
+
+          @Override
+          public String clientName() {
+            return "FeatureProbeClient";
+          }
+        };
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withSeedHost("seed.test")
+            .withScheme("http")
+            .withRoutingScope(DatacenterScope.of("dc1", null))
+            .build();
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, client);
+
+    assertTrue(liveNodes.checkIfRackDatacenterFeatureIsSupported());
+    assertEquals(2, requests.get());
+    assertTrue(
+        "feature probing must not authorize a scoped seed", liveNodes.getLiveNodes().isEmpty());
+  }
+
+  @Test
+  public void testClusterRefreshUnionsLearnedAndOriginalSeedResponses() throws Exception {
+    AtomicInteger phase = new AtomicInteger();
+    SdkHttpClient client =
+        new SdkHttpClient() {
+          @Override
+          public ExecutableHttpRequest prepareRequest(HttpExecuteRequest request) {
+            String host = request.httpRequest().host();
+            return new ExecutableHttpRequest() {
+              @Override
+              public HttpExecuteResponse call() {
+                if (phase.get() == 0) {
+                  return response(200, "[\"learned.test\"]");
+                }
+                return response(
+                    200, "learned.test".equals(host) ? "[\"dc1.test\"]" : "[\"dc2.test\"]");
+              }
+
+              @Override
+              public void abort() {}
+            };
+          }
+
+          @Override
+          public void close() {}
+
+          @Override
+          public String clientName() {
+            return "MultiDatacenterSeedClient";
+          }
+        };
+    AlternatorConfig config =
+        AlternatorConfig.builder().withSeedHost("seed.test").withScheme("http").build();
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, client);
+
+    liveNodes.updateLiveNodes();
+    assertEquals("learned.test", liveNodes.getLiveNodes().get(0).getHost());
+    phase.incrementAndGet();
+    liveNodes.updateLiveNodes();
+
+    List<String> hosts = new ArrayList<>();
+    for (URI node : liveNodes.getLiveNodes()) {
+      hosts.add(node.getHost());
+    }
+    assertEquals(Arrays.asList("dc1.test", "dc2.test"), hosts);
   }
 
   private static HttpExecuteResponse response(int status, String json) {

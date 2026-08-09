@@ -134,7 +134,7 @@ public class AlternatorLiveNodesClusterDiscoveryTest {
   }
 
   @Test
-  public void testClusterScopeKeepsSuccessfulDiscoveryWhenAnotherSeedFails() throws Exception {
+  public void testClusterScopePreservesLastKnownGoodWhenAnotherSeedFails() throws Exception {
     Map<String, String> responses = new HashMap<>();
     responses.put("dc1-node1.example.com", "[\"dc1-node1.example.com\"]");
     DiscoveryHttpClient httpClient =
@@ -153,11 +153,71 @@ public class AlternatorLiveNodesClusterDiscoveryTest {
     liveNodes.updateLiveNodes();
 
     assertEquals(
-        new LinkedHashSet<>(Arrays.asList("dc1-node1.example.com")),
+        new LinkedHashSet<>(Arrays.asList("dc1-node1.example.com", "dc2-node1.example.com")),
         hostSet(liveNodes.getLiveNodes()));
     assertEquals(
         new HashSet<>(Arrays.asList("dc1-node1.example.com", "dc2-node1.example.com")),
         capturedHostSet(httpClient.capturedRequests));
+  }
+
+  @Test
+  public void testPartialClusterRecoveryPrioritizesNewNodesWithinSnapshotLimit() throws Exception {
+    Map<String, String> responses = new HashMap<>();
+    Set<String> failingHosts = new HashSet<>();
+    responses.put("seed.example.com", "[\"old1.example.com\",\"old2.example.com\"]");
+    DiscoveryHttpClient httpClient = new DiscoveryHttpClient(responses, failingHosts);
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withSeedHost("seed.example.com")
+            .withScheme("http")
+            .withPort(8000)
+            .withRoutingScope(ClusterScope.create())
+            .build();
+    LiveNodesPollingLimits limits =
+        new LiveNodesPollingLimits(100, 2, 100, 100, 100, 500, 1_000, 1_024, 1_024, 2, 1_024);
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, httpClient, limits);
+
+    liveNodes.updateLiveNodes();
+    assertEquals(
+        new LinkedHashSet<>(Arrays.asList("old1.example.com", "old2.example.com")),
+        hostSet(liveNodes.getLiveNodes()));
+
+    responses.put("old1.example.com", "[\"recovered.example.com\"]");
+    failingHosts.add("old2.example.com");
+    failingHosts.add("seed.example.com");
+    liveNodes.updateLiveNodes();
+
+    assertEquals(
+        "newly confirmed nodes must not be discarded when the LKG union exceeds its bound",
+        new LinkedHashSet<>(Arrays.asList("recovered.example.com", "old1.example.com")),
+        hostSet(liveNodes.getLiveNodes()));
+  }
+
+  @Test
+  public void testClusterEmptyCandidateCannotDeleteAnotherPartitionsLastKnownGood()
+      throws Exception {
+    Map<String, String> responses = new HashMap<>();
+    responses.put("seed.example.com", "[\"dc-a-old.example.com\",\"dc-b.example.com\"]");
+    DiscoveryHttpClient httpClient = new DiscoveryHttpClient(responses);
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withSeedHost("seed.example.com")
+            .withScheme("http")
+            .withPort(8000)
+            .withRoutingScope(ClusterScope.create())
+            .build();
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, httpClient);
+
+    liveNodes.updateLiveNodes();
+    responses.put("dc-a-old.example.com", "[\"dc-a-new.example.com\"]");
+    responses.put("dc-b.example.com", "[]");
+    responses.put("seed.example.com", "[]");
+    liveNodes.updateLiveNodes();
+
+    assertEquals(
+        new LinkedHashSet<>(
+            Arrays.asList("dc-a-new.example.com", "dc-a-old.example.com", "dc-b.example.com")),
+        hostSet(liveNodes.getLiveNodes()));
   }
 
   @Test
@@ -191,8 +251,9 @@ public class AlternatorLiveNodesClusterDiscoveryTest {
         new LinkedHashSet<>(Arrays.asList("node2.example.com", "node3.example.com")),
         hostSet(liveNodes.getLiveNodes()));
     assertEquals(
-        new HashSet<>(Arrays.asList("node2.example.com", "node3.example.com")),
-        capturedHostSet(httpClient.capturedRequests));
+        "known live nodes are queried before the retained recovery seed",
+        Arrays.asList("node2.example.com", "node3.example.com", "seed.example.com"),
+        capturedHosts(httpClient.capturedRequests));
   }
 
   @Test
@@ -224,7 +285,8 @@ public class AlternatorLiveNodesClusterDiscoveryTest {
     liveNodes.updateLiveNodes();
 
     assertEquals(
-        new LinkedHashSet<>(Arrays.asList("recovered.example.com")),
+        new LinkedHashSet<>(
+            Arrays.asList("recovered.example.com", "node2.example.com", "node3.example.com")),
         hostSet(liveNodes.getLiveNodes()));
     assertEquals(
         Arrays.asList("node2.example.com", "node3.example.com", "seed.example.com"),

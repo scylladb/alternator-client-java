@@ -252,7 +252,7 @@ public class AlternatorLiveNodesTlsDnsFallbackTest {
       liveNodes.updateLiveNodes();
 
       assertEquals("learned.test", liveNodes.nextAsURI().getHost());
-      assertEquals("::1", resolvedHost.get());
+      assertNull("an IPv6 literal must bypass the DNS resolver callback", resolvedHost.get());
       assertEquals(1, requests.get());
       assertEquals("[::1]:" + port, host.get());
       assertNull("IP literals must not be sent as DNS SNI names", sni.get());

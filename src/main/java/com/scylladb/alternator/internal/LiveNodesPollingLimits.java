@@ -18,6 +18,8 @@ package com.scylladb.alternator.internal;
 /** Shared work and data limits for live-node discovery. */
 final class LiveNodesPollingLimits {
 
+  static final int DEFAULT_MAX_SNAPSHOT_NODES = 10_000;
+
   static final LiveNodesPollingLimits DEFAULT =
       new LiveNodesPollingLimits(
           3_000, 8, 3_000, 5_000, 10_000, 12_000, 30_000, 64 * 1024, 1024 * 1024);
@@ -31,6 +33,8 @@ final class LiveNodesPollingLimits {
   final int cycleTimeoutMillis;
   final int maxHeaderBytes;
   final int maxResponseBytes;
+  final int maxSnapshotNodes;
+  final int maxSnapshotBytes;
 
   LiveNodesPollingLimits(
       int dnsTimeoutMillis,
@@ -42,6 +46,32 @@ final class LiveNodesPollingLimits {
       int cycleTimeoutMillis,
       int maxHeaderBytes,
       int maxResponseBytes) {
+    this(
+        dnsTimeoutMillis,
+        maxDnsAddresses,
+        connectTimeoutMillis,
+        readTimeoutMillis,
+        attemptTimeoutMillis,
+        candidateTimeoutMillis,
+        cycleTimeoutMillis,
+        maxHeaderBytes,
+        maxResponseBytes,
+        DEFAULT_MAX_SNAPSHOT_NODES,
+        maxResponseBytes);
+  }
+
+  LiveNodesPollingLimits(
+      int dnsTimeoutMillis,
+      int maxDnsAddresses,
+      int connectTimeoutMillis,
+      int readTimeoutMillis,
+      int attemptTimeoutMillis,
+      int candidateTimeoutMillis,
+      int cycleTimeoutMillis,
+      int maxHeaderBytes,
+      int maxResponseBytes,
+      int maxSnapshotNodes,
+      int maxSnapshotBytes) {
     this.dnsTimeoutMillis = requirePositive(dnsTimeoutMillis, "dnsTimeoutMillis");
     this.maxDnsAddresses = requirePositive(maxDnsAddresses, "maxDnsAddresses");
     this.connectTimeoutMillis = requirePositive(connectTimeoutMillis, "connectTimeoutMillis");
@@ -51,6 +81,8 @@ final class LiveNodesPollingLimits {
     this.cycleTimeoutMillis = requirePositive(cycleTimeoutMillis, "cycleTimeoutMillis");
     this.maxHeaderBytes = requirePositive(maxHeaderBytes, "maxHeaderBytes");
     this.maxResponseBytes = requirePositive(maxResponseBytes, "maxResponseBytes");
+    this.maxSnapshotNodes = requirePositive(maxSnapshotNodes, "maxSnapshotNodes");
+    this.maxSnapshotBytes = requirePositive(maxSnapshotBytes, "maxSnapshotBytes");
   }
 
   private static int requirePositive(int value, String name) {

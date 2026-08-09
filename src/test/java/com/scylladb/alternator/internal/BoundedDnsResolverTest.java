@@ -34,6 +34,60 @@ import org.junit.Test;
 public class BoundedDnsResolverTest {
 
   @Test(timeout = 5000)
+  public void testStuckLearnedAndFirstSeedCannotConsumeAllReservedSeedCapacity() throws Exception {
+    BoundedDnsResolver.Service generalService = new BoundedDnsResolver.Service(1, 2, 8);
+    BoundedDnsResolver.Service seedService = new BoundedDnsResolver.Service(2, 2, 8);
+    CountDownLatch learnedEntered = new CountDownLatch(1);
+    CountDownLatch releaseLearned = new CountDownLatch(1);
+    CountDownLatch stalledSeedEntered = new CountDownLatch(1);
+    CountDownLatch releaseStalledSeed = new CountDownLatch(1);
+    BoundedDnsResolver resolver =
+        new BoundedDnsResolver(
+            generalService,
+            seedService,
+            new Object(),
+            hostname -> {
+              if ("learned.test".equals(hostname)) {
+                learnedEntered.countDown();
+                awaitIgnoringInterrupts(releaseLearned);
+              } else if ("stalled-seed.test".equals(hostname)) {
+                stalledSeedEntered.countDown();
+                awaitIgnoringInterrupts(releaseStalledSeed);
+              }
+              return Collections.singletonList(InetAddress.getByName("192.0.2.10"));
+            },
+            50,
+            8);
+    ExecutorService caller = Executors.newSingleThreadExecutor();
+    try {
+      Future<?> learned =
+          caller.submit(
+              () -> {
+                assertTimesOut(resolver, "learned.test", 50);
+                return null;
+              });
+      assertTrue(learnedEntered.await(1, TimeUnit.SECONDS));
+
+      assertTimesOut(resolver, "stalled-seed.test", 50, true);
+      assertTrue(stalledSeedEntered.await(1, TimeUnit.SECONDS));
+
+      assertEquals(
+          InetAddress.getByName("192.0.2.10"), resolver.resolve("seed.test", 500, true).get(0));
+      learned.get(1, TimeUnit.SECONDS);
+      assertEquals(1, generalService.activeWorkerCount());
+      assertTrue(seedService.activeWorkerCount() >= 1);
+      assertEquals(2, seedService.largestPoolSize());
+    } finally {
+      releaseLearned.countDown();
+      releaseStalledSeed.countDown();
+      caller.shutdownNow();
+      resolver.close();
+      generalService.close();
+      seedService.close();
+    }
+  }
+
+  @Test(timeout = 5000)
   public void testStuckHostIsCoalescedWithoutRetainedWaitersAndHealthyHostCanRecover()
       throws Exception {
     BoundedDnsResolver.Service service = new BoundedDnsResolver.Service(2, 4, 16);
@@ -238,8 +292,14 @@ public class BoundedDnsResolverTest {
 
   private static void assertTimesOut(
       BoundedDnsResolver resolver, String hostname, long timeoutMillis) throws Exception {
+    assertTimesOut(resolver, hostname, timeoutMillis, false);
+  }
+
+  private static void assertTimesOut(
+      BoundedDnsResolver resolver, String hostname, long timeoutMillis, boolean seedCandidate)
+      throws Exception {
     try {
-      resolver.resolve(hostname, timeoutMillis);
+      resolver.resolve(hostname, timeoutMillis, seedCandidate);
       fail("Expected DNS timeout");
     } catch (SocketTimeoutException expected) {
       // Expected.

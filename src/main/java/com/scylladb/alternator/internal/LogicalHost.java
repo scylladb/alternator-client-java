@@ -50,7 +50,9 @@ final class LogicalHost {
       return false;
     }
     for (String component : components) {
-      if (component.isEmpty() || component.length() > 3) {
+      if (component.isEmpty()
+          || component.length() > 3
+          || (component.length() > 1 && component.charAt(0) == '0')) {
         return false;
       }
       int value = 0;

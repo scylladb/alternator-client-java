@@ -66,6 +66,21 @@ public interface DnsFallbackSdkHttpClient extends SdkHttpClient {
   List<InetAddress> resolve(String hostname, long timeoutMillis) throws IOException;
 
   /**
+   * Resolves a hostname while allowing built-in clients to reserve capacity for configured seeds.
+   * Custom clients remain source-compatible and use their normal bounded resolver by default.
+   *
+   * @param hostname logical request hostname
+   * @param timeoutMillis caller's remaining resolution budget in milliseconds
+   * @param seedCandidate whether the hostname is a retained configured seed
+   * @return resolved addresses in resolver order
+   * @throws IOException if resolution fails or exceeds the deadline
+   */
+  default List<InetAddress> resolve(String hostname, long timeoutMillis, boolean seedCandidate)
+      throws IOException {
+    return resolve(hostname, timeoutMillis);
+  }
+
+  /**
    * Prepares a request that connects to {@code address} while preserving the logical request
    * endpoint.
    *

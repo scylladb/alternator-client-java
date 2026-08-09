@@ -15,8 +15,7 @@
  */
 package com.scylladb.alternator.internal;
 
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.*;
 
 import com.scylladb.alternator.AlternatorConfig;
 import java.io.ByteArrayInputStream;
@@ -24,6 +23,7 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.Test;
@@ -74,6 +74,86 @@ public class AlternatorLiveNodesShutdownTest {
     assertTrue("live-node thread should still be running", liveNodes.isRunning());
     assertNull("runtime polling failure should not escape", uncaught.get());
     assertTrue("live-node thread should stop", liveNodes.shutdownAndWait(5_000));
+  }
+
+  @Test(timeout = 5000)
+  public void testShutdownStopsBeforeWalkingRemainingCandidates() throws Exception {
+    AtomicBoolean slowPhase = new AtomicBoolean();
+    AtomicInteger slowPreparations = new AtomicInteger();
+    CountDownLatch slowPreparationStarted = new CountDownLatch(1);
+    StringBuilder discovered = new StringBuilder("[");
+    for (int i = 0; i < 100; i++) {
+      if (i > 0) {
+        discovered.append(',');
+      }
+      discovered.append("\"node-").append(i).append(".test\"");
+    }
+    discovered.append(']');
+    SdkHttpClient client =
+        new SdkHttpClient() {
+          @Override
+          public ExecutableHttpRequest prepareRequest(HttpExecuteRequest request) {
+            if (slowPhase.get()) {
+              slowPreparations.incrementAndGet();
+              slowPreparationStarted.countDown();
+              sleepIgnoringInterrupts(100);
+            }
+            return new ExecutableHttpRequest() {
+              @Override
+              public HttpExecuteResponse call() {
+                String body = slowPhase.get() ? "unavailable" : discovered.toString();
+                int status = slowPhase.get() ? 503 : 200;
+                return response(status, body);
+              }
+
+              @Override
+              public void abort() {}
+            };
+          }
+
+          @Override
+          public void close() {}
+
+          @Override
+          public String clientName() {
+            return "many-candidate-shutdown";
+          }
+        };
+    LiveNodesPollingLimits limits =
+        new LiveNodesPollingLimits(100, 2, 100, 100, 100, 2_000, 2_000, 1_024, 64 * 1_024);
+    AlternatorLiveNodes liveNodes =
+        new AlternatorLiveNodes(
+            AlternatorConfig.builder().withSeedHost("seed.test").withScheme("http").build(),
+            client,
+            limits);
+    liveNodes.updateLiveNodes();
+    slowPhase.set(true);
+    liveNodes.start();
+
+    assertTrue(slowPreparationStarted.await(1, TimeUnit.SECONDS));
+    assertTrue(
+        "shutdown should stop after the in-progress preparation", liveNodes.shutdownAndWait(500));
+    assertEquals(1, slowPreparations.get());
+  }
+
+  private static HttpExecuteResponse response(int status, String body) {
+    return HttpExecuteResponse.builder()
+        .response(SdkHttpFullResponse.builder().statusCode(status).build())
+        .responseBody(
+            AbortableInputStream.create(
+                new ByteArrayInputStream(body.getBytes(StandardCharsets.UTF_8))))
+        .build();
+  }
+
+  private static void sleepIgnoringInterrupts(long millis) {
+    long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+    while (System.nanoTime() < deadline) {
+      try {
+        TimeUnit.NANOSECONDS.sleep(deadline - System.nanoTime());
+      } catch (InterruptedException ignored) {
+        // Model synchronous preparation that cannot be cancelled mid-call.
+      }
+    }
   }
 
   private static final class BlockingShutdownHttpClient implements SdkHttpClient {

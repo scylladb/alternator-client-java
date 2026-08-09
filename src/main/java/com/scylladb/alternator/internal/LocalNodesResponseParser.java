@@ -16,6 +16,7 @@
 package com.scylladb.alternator.internal;
 
 import java.io.IOException;
+import java.net.IDN;
 import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -29,17 +30,23 @@ import java.util.logging.Logger;
 final class LocalNodesResponseParser {
   private final String alternatorScheme;
   private final int alternatorPort;
+  private final int maximumNodes;
 
   private static final Logger logger = Logger.getLogger(LocalNodesResponseParser.class.getName());
 
   LocalNodesResponseParser(String alternatorScheme, int alternatorPort) {
+    this(alternatorScheme, alternatorPort, LiveNodesPollingLimits.DEFAULT_MAX_SNAPSHOT_NODES);
+  }
+
+  LocalNodesResponseParser(String alternatorScheme, int alternatorPort, int maximumNodes) {
     this.alternatorScheme = alternatorScheme;
     this.alternatorPort = alternatorPort;
+    this.maximumNodes = maximumNodes;
   }
 
   List<URI> parse(String responseBody) throws InvalidLocalNodesResponseException {
     Set<URI> nodes = new LinkedHashSet<>();
-    Set<String> hosts = new JsonStringArrayParser(responseBody).parse();
+    Set<String> hosts = new JsonStringArrayParser(responseBody, maximumNodes).parse();
     int invalidHosts = 0;
     String invalidSample = null;
     for (String host : hosts) {
@@ -80,17 +87,84 @@ final class LocalNodesResponseParser {
   }
 
   URI hostToURI(String host) throws URISyntaxException, MalformedURLException {
-    URI uri =
-        new URI(
-            alternatorScheme,
-            null,
-            LogicalHost.withoutBrackets(host),
-            alternatorPort,
-            null,
-            null,
-            null);
+    boolean bracketed = host != null && host.startsWith("[") && host.endsWith("]");
+    String logicalHost = LogicalHost.withoutBrackets(host);
+    if (logicalHost == null || logicalHost.isEmpty()) {
+      throw new URISyntaxException(String.valueOf(host), "Host is empty");
+    }
+    if (bracketed && logicalHost.indexOf(':') < 0) {
+      throw new URISyntaxException(String.valueOf(host), "Only IPv6 literals may be bracketed");
+    }
+    String normalizedHost = normalizeDnsHost(logicalHost);
+    URI uri = new URI(alternatorScheme, null, normalizedHost, alternatorPort, null, null, null);
+    if (uri.getHost() == null
+        || !LogicalHost.sameEndpoint(normalizedHost, uri.getHost())
+        || uri.getUserInfo() != null
+        || (uri.getRawPath() != null && !uri.getRawPath().isEmpty())
+        || uri.getRawQuery() != null
+        || uri.getRawFragment() != null
+        || uri.getPort() != alternatorPort) {
+      throw new URISyntaxException(String.valueOf(host), "Invalid host-only endpoint");
+    }
     uri.toURL();
     return uri;
+  }
+
+  private static String normalizeDnsHost(String host) throws URISyntaxException {
+    if (host.indexOf(':') >= 0 || LogicalHost.isIpLiteral(host)) {
+      return host;
+    }
+    boolean absolute = host.endsWith(".");
+    String dnsName = absolute ? host.substring(0, host.length() - 1) : host;
+    if (dnsName.isEmpty()) {
+      throw new URISyntaxException(host, "DNS hostname is empty");
+    }
+    final String asciiName;
+    try {
+      asciiName = IDN.toASCII(dnsName, IDN.USE_STD3_ASCII_RULES);
+    } catch (IllegalArgumentException e) {
+      throw new URISyntaxException(host, "Invalid DNS hostname: " + e.getMessage());
+    }
+    if (asciiName.isEmpty() || asciiName.length() > 253) {
+      throw new URISyntaxException(host, "DNS hostname exceeds the maximum length");
+    }
+    if (looksLikeLegacyIpv4Literal(asciiName)) {
+      throw new URISyntaxException(host, "Ambiguous numeric IPv4 host syntax is not allowed");
+    }
+    return absolute ? asciiName + "." : asciiName;
+  }
+
+  private static boolean looksLikeLegacyIpv4Literal(String host) {
+    String[] components = host.split("\\.", -1);
+    if (components.length > 4) {
+      return false;
+    }
+    for (String component : components) {
+      if (component.isEmpty()) {
+        return false;
+      }
+      int offset =
+          component.length() > 2
+                  && component.charAt(0) == '0'
+                  && (component.charAt(1) == 'x' || component.charAt(1) == 'X')
+              ? 2
+              : 0;
+      if (offset == component.length()) {
+        return false;
+      }
+      for (int index = offset; index < component.length(); index++) {
+        char character = component.charAt(index);
+        boolean digit = character >= '0' && character <= '9';
+        boolean hexadecimal =
+            offset == 2
+                && ((character >= 'a' && character <= 'f')
+                    || (character >= 'A' && character <= 'F'));
+        if (!digit && !hexadecimal) {
+          return false;
+        }
+      }
+    }
+    return true;
   }
 
   static class InvalidLocalNodesResponseException extends IOException {
@@ -101,10 +175,12 @@ final class LocalNodesResponseParser {
 
   private static final class JsonStringArrayParser {
     private final String body;
+    private final int maximumValues;
     private int pos = 0;
 
-    private JsonStringArrayParser(String body) {
+    private JsonStringArrayParser(String body, int maximumValues) {
       this.body = body != null ? body : "";
+      this.maximumValues = maximumValues;
     }
 
     private Set<String> parse() throws InvalidLocalNodesResponseException {
@@ -118,7 +194,10 @@ final class LocalNodesResponseParser {
       }
 
       while (true) {
-        values.add(parseString());
+        if (values.add(parseString()) && values.size() > maximumValues) {
+          throw invalid(
+              "/localnodes response contains more than " + maximumValues + " unique nodes");
+        }
         skipWhitespace();
         if (peek(']')) {
           pos++;
@@ -138,6 +217,9 @@ final class LocalNodesResponseParser {
           return value.toString();
         }
         if (ch != '\\') {
+          if (ch < 0x20) {
+            throw invalid("unescaped control character in /localnodes JSON response");
+          }
           value.append(ch);
           continue;
         }
@@ -208,9 +290,13 @@ final class LocalNodesResponseParser {
     }
 
     private void skipWhitespace() {
-      while (pos < body.length() && Character.isWhitespace(body.charAt(pos))) {
+      while (pos < body.length() && isJsonWhitespace(body.charAt(pos))) {
         pos++;
       }
+    }
+
+    private static boolean isJsonWhitespace(char character) {
+      return character == ' ' || character == '\t' || character == '\r' || character == '\n';
     }
 
     private InvalidLocalNodesResponseException invalid(String message) {

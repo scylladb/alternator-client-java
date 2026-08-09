@@ -207,6 +207,7 @@ public class AffinityQueryPlanInterceptor extends BasicQueryPlanInterceptor {
   @Override
   public void beforeExecution(
       Context.BeforeExecution context, ExecutionAttributes executionAttributes) {
+    liveNodes.recordRequestActivity();
     LazyQueryPlan plan = getQueryPlan(context.request());
     if (plan == null) {
       plan = new LazyQueryPlan(liveNodes);

@@ -30,6 +30,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.http.conn.DnsResolver;
 import org.junit.Test;
@@ -141,6 +142,33 @@ public class ApacheDnsFallbackSdkHttpClientTest {
     assertTrue(baseClient.closed.get());
   }
 
+  @Test
+  public void testCloseContinuesWhenAddressClientsThrowTheSameFailure() throws Exception {
+    InetAddress address = InetAddress.getByName("192.0.2.5");
+    RuntimeException sharedFailure = new RuntimeException("address close failed");
+    AtomicInteger addressCloses = new AtomicInteger();
+    TrackingClient baseClient = new TrackingClient();
+    ApacheDnsFallbackSdkHttpClient client =
+        new ApacheDnsFallbackSdkHttpClient(
+            baseClient,
+            hostname -> new InetAddress[] {address},
+            (hostname, resolvedAddress) -> new FailingCloseClient(sharedFailure, addressCloses));
+
+    client.prepareRequestForAddress(
+        HttpExecuteRequest.builder().request(logicalRequest()).build(), address);
+    client.prepareRequestForAddress(
+        HttpExecuteRequest.builder().request(logicalRequest()).build(), address);
+
+    try {
+      client.close();
+      fail("Expected address-client close failure");
+    } catch (RuntimeException failure) {
+      assertSame(sharedFailure, failure);
+    }
+    assertEquals(2, addressCloses.get());
+    assertTrue("delegate must still be closed", baseClient.closed.get());
+  }
+
   @Test(timeout = 5000)
   public void testClientCloseReleasesStalledAddressRequestBeforeClosingDelegate() throws Exception {
     InetAddress address = InetAddress.getByName("192.0.2.4");
@@ -242,6 +270,40 @@ public class ApacheDnsFallbackSdkHttpClientTest {
     @Override
     public String clientName() {
       return "BlockingCloseClient";
+    }
+  }
+
+  private static final class FailingCloseClient implements SdkHttpClient {
+    private final RuntimeException failure;
+    private final AtomicInteger closes;
+
+    FailingCloseClient(RuntimeException failure, AtomicInteger closes) {
+      this.failure = failure;
+      this.closes = closes;
+    }
+
+    @Override
+    public ExecutableHttpRequest prepareRequest(HttpExecuteRequest request) {
+      return new ExecutableHttpRequest() {
+        @Override
+        public HttpExecuteResponse call() {
+          throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void abort() {}
+      };
+    }
+
+    @Override
+    public void close() {
+      closes.incrementAndGet();
+      throw failure;
+    }
+
+    @Override
+    public String clientName() {
+      return "FailingCloseClient";
     }
   }
 
