@@ -29,6 +29,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.Test;
 import software.amazon.awssdk.http.AbortableInputStream;
@@ -288,6 +290,140 @@ public class AlternatorLiveNodesScopeFallbackTest {
   }
 
   @Test
+  public void testStrictWrongScopeAuthoritativeEmptyProducesClearValidationError()
+      throws Exception {
+    ReachableHttpClient emptyClient = new ReachableHttpClient("[]");
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withSeedHost("10.0.0.1")
+            .withScheme("http")
+            .withRoutingScope(RackScope.of("dc1", "wrong-rack", null))
+            .build();
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, emptyClient);
+
+    try {
+      liveNodes.checkIfRackAndDatacenterSetCorrectly();
+      fail("Expected strict wrong scope validation to fail");
+    } catch (AlternatorLiveNodes.ValidationError e) {
+      assertTrue(e.getMessage(), e.getMessage().contains("returned empty list"));
+    } catch (AlternatorLiveNodes.FailedToCheck e) {
+      fail("A valid [] is authoritative, not a connectivity failure: " + e);
+    }
+  }
+
+  @Test
+  public void testAuthoritativeEmptySurvivesOtherCandidateErrorsForScopeValidation()
+      throws Exception {
+    SdkHttpClient errorThenEmpty =
+        new SdkHttpClient() {
+          @Override
+          public ExecutableHttpRequest prepareRequest(HttpExecuteRequest request) {
+            boolean shouldFail = "error.test".equals(request.httpRequest().host());
+            return new ExecutableHttpRequest() {
+              @Override
+              public HttpExecuteResponse call() throws IOException {
+                if (shouldFail) {
+                  throw new IOException("simulated candidate failure");
+                }
+                return response(200, "[]");
+              }
+
+              @Override
+              public void abort() {}
+            };
+          }
+
+          @Override
+          public void close() {}
+
+          @Override
+          public String clientName() {
+            return "ErrorThenEmptyClient";
+          }
+        };
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withSeedHosts(Arrays.asList("error.test", "empty.test"))
+            .withScheme("http")
+            .withRoutingScope(RackScope.of("dc1", "wrong-rack", null))
+            .build();
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, errorThenEmpty);
+
+    try {
+      liveNodes.checkIfRackAndDatacenterSetCorrectly();
+      fail("Expected authoritative empty validation failure");
+    } catch (AlternatorLiveNodes.ValidationError expected) {
+      assertTrue(expected.getMessage(), expected.getMessage().contains("returned empty list"));
+    }
+  }
+
+  @Test
+  public void testNonSuccessMissingAndMalformedResponsesAreNotAuthoritativeEmpty()
+      throws Exception {
+    assertValidationCheckFailsAsConnectivityError(response(503, "temporarily unavailable"));
+    assertValidationCheckFailsAsConnectivityError(
+        HttpExecuteResponse.builder()
+            .response(SdkHttpFullResponse.builder().statusCode(200).build())
+            .build());
+    assertValidationCheckFailsAsConnectivityError(response(200, "not-json"));
+  }
+
+  @Test(timeout = 5000)
+  public void testStalledPrimaryScopeRetainsBudgetForHealthyFallbackScope() throws Exception {
+    CountDownLatch releasePrimary = new CountDownLatch(1);
+    SdkHttpClient stalledPrimary =
+        new SdkHttpClient() {
+          @Override
+          public ExecutableHttpRequest prepareRequest(HttpExecuteRequest request) {
+            boolean primaryScope = request.httpRequest().rawQueryParameters().containsKey("rack");
+            return new ExecutableHttpRequest() {
+              @Override
+              public HttpExecuteResponse call() {
+                if (primaryScope) {
+                  boolean released = false;
+                  while (!released) {
+                    try {
+                      released = releasePrimary.await(20, TimeUnit.MILLISECONDS);
+                    } catch (InterruptedException ignored) {
+                      // Model a transport call that ignores interrupt and abort.
+                    }
+                  }
+                }
+                return response(200, "[\"fallback.test\"]");
+              }
+
+              @Override
+              public void abort() {}
+            };
+          }
+
+          @Override
+          public void close() {}
+
+          @Override
+          public String clientName() {
+            return "StalledPrimaryScopeClient";
+          }
+        };
+    LiveNodesPollingLimits limits =
+        new LiveNodesPollingLimits(100, 2, 100, 100, 250, 250, 600, 1024, 1024);
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withSeedHost("seed.test")
+            .withScheme("http")
+            .withRoutingScope(RackScope.of("dc1", "wrong-rack", ClusterScope.create()))
+            .build();
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, stalledPrimary, limits);
+
+    try {
+      liveNodes.updateLiveNodes();
+      assertEquals("fallback.test", liveNodes.nextAsURI().getHost());
+    } finally {
+      releasePrimary.countDown();
+    }
+  }
+
+  @Test
   public void testWhollyInvalidResponsesTraverseScopeFallbackAndRetainOldNodes() throws Exception {
     ReachableHttpClient whollyInvalidClient = new ReachableHttpClient("[\"bad host\"]");
     AlternatorConfig config =
@@ -306,6 +442,55 @@ public class AlternatorLiveNodesScopeFallbackTest {
         whollyInvalidClient.capturedRequests.size());
     assertEquals(1, liveNodes.getLiveNodes().size());
     assertEquals("10.0.0.1", liveNodes.getLiveNodes().get(0).getHost());
+  }
+
+  private static HttpExecuteResponse response(int status, String json) {
+    byte[] body = json.getBytes(StandardCharsets.UTF_8);
+    return HttpExecuteResponse.builder()
+        .response(SdkHttpFullResponse.builder().statusCode(status).build())
+        .responseBody(AbortableInputStream.create(new ByteArrayInputStream(body)))
+        .build();
+  }
+
+  private static void assertValidationCheckFailsAsConnectivityError(HttpExecuteResponse response) {
+    SdkHttpClient client =
+        new SdkHttpClient() {
+          @Override
+          public ExecutableHttpRequest prepareRequest(HttpExecuteRequest request) {
+            return new ExecutableHttpRequest() {
+              @Override
+              public HttpExecuteResponse call() {
+                return response;
+              }
+
+              @Override
+              public void abort() {}
+            };
+          }
+
+          @Override
+          public void close() {}
+
+          @Override
+          public String clientName() {
+            return "NonAuthoritativeResponseClient";
+          }
+        };
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withSeedHost("seed.test")
+            .withScheme("http")
+            .withRoutingScope(RackScope.of("dc1", "wrong-rack", null))
+            .build();
+
+    try {
+      new AlternatorLiveNodes(config, client).checkIfRackAndDatacenterSetCorrectly();
+      fail("Expected response to be treated as a failed check");
+    } catch (AlternatorLiveNodes.FailedToCheck expected) {
+      // Expected: only a parsed HTTP 200 [] is authoritative.
+    } catch (AlternatorLiveNodes.ValidationError error) {
+      fail("Response must not be treated as authoritative empty: " + error);
+    }
   }
 
   /**

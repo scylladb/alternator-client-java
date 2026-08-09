@@ -21,13 +21,14 @@ import com.scylladb.alternator.routing.DatacenterScope;
 import com.scylladb.alternator.routing.RackScope;
 import com.scylladb.alternator.routing.RoutingScope;
 import java.io.IOException;
-import java.io.InputStream;
-import java.net.HttpURLConnection;
 import java.net.InetAddress;
 import java.net.MalformedURLException;
+import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -35,10 +36,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
-import software.amazon.awssdk.http.AbortableInputStream;
 import software.amazon.awssdk.http.ExecutableHttpRequest;
 import software.amazon.awssdk.http.HttpExecuteRequest;
-import software.amazon.awssdk.http.HttpExecuteResponse;
 import software.amazon.awssdk.http.SdkHttpClient;
 import software.amazon.awssdk.http.SdkHttpMethod;
 import software.amazon.awssdk.http.SdkHttpRequest;
@@ -66,6 +65,7 @@ public class AlternatorLiveNodes extends Thread {
   private final AtomicBoolean pollingClientClosed = new AtomicBoolean(false);
   private final AtomicLong lastActivityTime = new AtomicLong(0);
   private final LocalNodesResponseParser localNodesResponseParser;
+  private final LiveNodesPollingLimits pollingLimits;
 
   private static Logger logger = Logger.getLogger(AlternatorLiveNodes.class.getName());
 
@@ -347,7 +347,7 @@ public class AlternatorLiveNodes extends Thread {
    * @since 2.0.0
    */
   public AlternatorLiveNodes(AlternatorConfig config) {
-    this(config, createDefaultPollingClient(config), true);
+    this(config, createDefaultPollingClient(config), true, LiveNodesPollingLimits.DEFAULT);
   }
 
   /**
@@ -363,11 +363,21 @@ public class AlternatorLiveNodes extends Thread {
    * @since 2.1.0
    */
   public AlternatorLiveNodes(AlternatorConfig config, SdkHttpClient pollingHttpClient) {
-    this(config, pollingHttpClient, false);
+    this(config, pollingHttpClient, false, LiveNodesPollingLimits.DEFAULT);
+  }
+
+  AlternatorLiveNodes(
+      AlternatorConfig config,
+      SdkHttpClient pollingHttpClient,
+      LiveNodesPollingLimits pollingLimits) {
+    this(config, pollingHttpClient, false, pollingLimits);
   }
 
   private AlternatorLiveNodes(
-      AlternatorConfig config, SdkHttpClient pollingHttpClient, boolean ownsPollingClient) {
+      AlternatorConfig config,
+      SdkHttpClient pollingHttpClient,
+      boolean ownsPollingClient,
+      LiveNodesPollingLimits pollingLimits) {
     if (config == null) {
       throw new RuntimeException("config cannot be null");
     }
@@ -386,6 +396,7 @@ public class AlternatorLiveNodes extends Thread {
     this.config = config;
     this.pollingHttpClient = pollingHttpClient;
     this.ownsPollingClient = ownsPollingClient;
+    this.pollingLimits = Objects.requireNonNull(pollingLimits, "pollingLimits");
     try {
       this.validate();
     } catch (ValidationError e) {
@@ -525,27 +536,25 @@ public class AlternatorLiveNodes extends Thread {
   }
 
   private URI withPathAndQuery(URI uri, String path, String query) throws URISyntaxException {
-    return new URI(uri.getScheme(), null, uri.getHost(), uri.getPort(), path, query, null);
-  }
-
-  // Utility function for reading the entire contents of an input stream
-  // (which we assume will be fairly short)
-  private static String streamToString(InputStream stream) throws IOException {
-    if (stream == null) {
-      return "";
-    }
-    Scanner s = new Scanner(stream).useDelimiter("\\A");
-    String result = s.hasNext() ? s.next() : "";
-    stream.close();
-    return result;
+    return new URI(
+        uri.getScheme(),
+        null,
+        LogicalHost.withoutBrackets(uri.getHost()),
+        uri.getPort(),
+        path,
+        query,
+        null);
   }
 
   void updateLiveNodes() throws IOException {
     RoutingScope scope = this.config.getRoutingScope();
     IOException lastException = null;
+    long cycleDeadline = deadlineAfterMillis(pollingLimits.cycleTimeoutMillis);
     while (scope != null) {
       try {
-        List<URI> nodes = getNodesForScope(scope);
+        long scopeDeadline =
+            fairDeadline(cycleDeadline, pollingLimits.cycleTimeoutMillis, countScopes(scope));
+        List<URI> nodes = getNodesForScope(scope, scopeDeadline);
         if (!nodes.isEmpty()) {
           liveNodes.set(nodes);
           logger.log(
@@ -579,22 +588,37 @@ public class AlternatorLiveNodes extends Thread {
   }
 
   private List<URI> getNodesForScope(RoutingScope scope) throws IOException {
+    return getNodesForScope(scope, deadlineAfterMillis(pollingLimits.cycleTimeoutMillis));
+  }
+
+  private List<URI> getNodesForScope(RoutingScope scope, long cycleDeadline) throws IOException {
     String query = scope.getLocalNodesQuery();
     String requestQuery = query.isEmpty() ? null : query;
+    List<URI> liveCandidates = liveDiscoveryCandidates();
+    List<URI> seedCandidates = initialDiscoveryCandidates(liveCandidates);
 
     DiscoveryAttempt liveAttempt =
-        discoverNodes(scope, liveDiscoveryCandidates(), requestQuery, "live node");
+        discoverNodes(
+            scope, liveCandidates, requestQuery, "live node", cycleDeadline, seedCandidates.size());
     if (!liveAttempt.nodes.isEmpty()) {
       return liveAttempt.nodes;
     }
+    if (deadlineExpired(cycleDeadline)) {
+      if (liveAttempt.authoritativeEmpty) {
+        return Collections.emptyList();
+      }
+      throw deadlineExceeded("live-node discovery cycle");
+    }
 
     DiscoveryAttempt seedAttempt =
-        discoverNodes(
-            scope, initialDiscoveryCandidates(liveAttempt.candidates), requestQuery, "seed node");
+        discoverNodes(scope, seedCandidates, requestQuery, "seed node", cycleDeadline, 0);
     if (!seedAttempt.nodes.isEmpty()) {
       return seedAttempt.nodes;
     }
 
+    if (liveAttempt.authoritativeEmpty || seedAttempt.authoritativeEmpty) {
+      return Collections.emptyList();
+    }
     if (seedAttempt.lastException != null) {
       throw seedAttempt.lastException;
     }
@@ -605,36 +629,84 @@ public class AlternatorLiveNodes extends Thread {
   }
 
   private DiscoveryAttempt discoverNodes(
-      RoutingScope scope, List<URI> candidates, String requestQuery, String candidateDescription) {
+      RoutingScope scope,
+      List<URI> candidates,
+      String requestQuery,
+      String candidateDescription,
+      long cycleDeadline,
+      int followingCandidateCount) {
     IOException lastException = null;
+    boolean authoritativeEmpty = false;
     Set<URI> nodes = new LinkedHashSet<>();
-    for (URI candidate : candidates) {
+    int failedCandidates = 0;
+    URI firstFailedCandidate = null;
+    for (int index = 0; index < candidates.size(); index++) {
+      if (deadlineExpired(cycleDeadline)) {
+        lastException = deadlineExceeded("live-node discovery cycle");
+        break;
+      }
+      URI candidate = candidates.get(index);
       try {
-        List<URI> discoveredNodes =
-            getNodes(withPathAndRawQuery(candidate, "/localnodes", requestQuery));
-        if (!discoveredNodes.isEmpty()) {
+        int remainingCandidates = candidates.size() - index + followingCandidateCount;
+        long candidateDeadline =
+            fairDeadline(cycleDeadline, pollingLimits.candidateTimeoutMillis, remainingCandidates);
+        CandidateResult result =
+            getNodes(
+                withPathAndRawQuery(candidate, "/localnodes", requestQuery), candidateDeadline);
+        if (result.nodes.isEmpty()) {
+          authoritativeEmpty = true;
+        } else {
           if (!(scope instanceof ClusterScope)) {
-            return new DiscoveryAttempt(candidates, discoveredNodes, lastException);
+            logCandidateFailures(
+                scope, candidateDescription, failedCandidates, firstFailedCandidate, lastException);
+            return new DiscoveryAttempt(result.nodes, lastException, authoritativeEmpty);
           }
-          nodes.addAll(discoveredNodes);
+          nodes.addAll(result.nodes);
         }
       } catch (IOException e) {
-        logger.log(
-            Level.WARNING,
-            "Failed to contact "
-                + candidateDescription
-                + " "
-                + candidate
-                + " for "
-                + scope.getDescription(),
-            e);
+        failedCandidates++;
+        if (firstFailedCandidate == null) {
+          firstFailedCandidate = candidate;
+        }
         lastException = e;
+        if (deadlineExpired(cycleDeadline)) {
+          break;
+        }
       } catch (URISyntaxException e) {
         throw new RuntimeException(e);
       }
     }
 
-    return new DiscoveryAttempt(candidates, new ArrayList<>(nodes), lastException);
+    logCandidateFailures(
+        scope, candidateDescription, failedCandidates, firstFailedCandidate, lastException);
+    return new DiscoveryAttempt(new ArrayList<>(nodes), lastException, authoritativeEmpty);
+  }
+
+  private static void logCandidateFailures(
+      RoutingScope scope,
+      String candidateDescription,
+      int failedCandidates,
+      URI firstFailedCandidate,
+      IOException lastException) {
+    if (failedCandidates == 0) {
+      return;
+    }
+    String cause =
+        lastException == null
+            ? "unknown"
+            : lastException.getClass().getSimpleName()
+                + ": "
+                + LocalNodesResponseParser.boundedLogSample(lastException.getMessage());
+    logger.log(
+        Level.WARNING,
+        "Failed to contact {0} {1}(s) for {2}; first candidate={3}; last failure={4}",
+        new Object[] {
+          failedCandidates,
+          candidateDescription,
+          scope.getDescription(),
+          LocalNodesResponseParser.boundedLogSample(String.valueOf(firstFailedCandidate)),
+          cause
+        });
   }
 
   private List<URI> liveDiscoveryCandidates() {
@@ -648,73 +720,112 @@ public class AlternatorLiveNodes extends Thread {
   }
 
   private static class DiscoveryAttempt {
-    final List<URI> candidates;
     final List<URI> nodes;
     final IOException lastException;
+    final boolean authoritativeEmpty;
 
-    DiscoveryAttempt(List<URI> candidates, List<URI> nodes, IOException lastException) {
-      this.candidates = candidates;
+    DiscoveryAttempt(List<URI> nodes, IOException lastException, boolean authoritativeEmpty) {
       this.nodes = nodes;
       this.lastException = lastException;
+      this.authoritativeEmpty = authoritativeEmpty;
     }
   }
 
   private URI withPathAndRawQuery(URI uri, String path, String rawQuery) throws URISyntaxException {
     URI withoutQuery =
-        new URI(uri.getScheme(), null, uri.getHost(), uri.getPort(), path, null, null);
+        new URI(
+            uri.getScheme(),
+            null,
+            LogicalHost.withoutBrackets(uri.getHost()),
+            uri.getPort(),
+            path,
+            null,
+            null);
     if (rawQuery == null || rawQuery.isEmpty()) {
       return withoutQuery;
     }
     try {
       return new URI(withoutQuery.toASCIIString() + "?" + rawQuery);
     } catch (URISyntaxException e) {
-      return new URI(uri.getScheme(), null, uri.getHost(), uri.getPort(), path, rawQuery, null);
+      return new URI(
+          uri.getScheme(),
+          null,
+          LogicalHost.withoutBrackets(uri.getHost()),
+          uri.getPort(),
+          path,
+          rawQuery,
+          null);
     }
   }
 
-  private List<URI> getNodes(URI uri) throws IOException {
+  private CandidateResult getNodes(URI uri, long candidateDeadline) throws IOException {
     SdkHttpRequest sdkRequest =
         SdkHttpRequest.builder()
             .uri(uri)
             .method(SdkHttpMethod.GET)
-            .putHeader("Host", uri.getHost() + ":" + uri.getPort())
+            .putHeader("Host", LogicalHost.authority(uri.getHost(), uri.getPort()))
             .putHeader("Connection", "keep-alive")
             .build();
     HttpExecuteRequest executeRequest = HttpExecuteRequest.builder().request(sdkRequest).build();
     if (pollingHttpClient instanceof DnsFallbackSdkHttpClient) {
       DnsFallbackSdkHttpClient dnsFallbackClient = (DnsFallbackSdkHttpClient) pollingHttpClient;
       if (dnsFallbackClient.supportsDnsFallback(uri.getScheme())) {
-        return getNodesByResolvedAddress(uri, executeRequest, dnsFallbackClient);
+        return getNodesByResolvedAddress(uri, executeRequest, dnsFallbackClient, candidateDeadline);
       }
     }
-    return getNodes(pollingHttpClient.prepareRequest(executeRequest));
+    long attemptDeadline = fairDeadline(candidateDeadline, pollingLimits.attemptTimeoutMillis, 1);
+    remainingMillis(attemptDeadline, "/localnodes request preparation");
+    return getNodes(pollingHttpClient.prepareRequest(executeRequest), attemptDeadline);
   }
 
-  private List<URI> getNodesByResolvedAddress(
-      URI logicalUri, HttpExecuteRequest executeRequest, DnsFallbackSdkHttpClient dnsFallbackClient)
+  private CandidateResult getNodesByResolvedAddress(
+      URI logicalUri,
+      HttpExecuteRequest executeRequest,
+      DnsFallbackSdkHttpClient dnsFallbackClient,
+      long candidateDeadline)
       throws IOException {
-    List<InetAddress> resolvedAddresses = dnsFallbackClient.resolve(logicalUri.getHost());
+    List<InetAddress> resolvedAddresses =
+        dnsFallbackClient.resolve(
+            LogicalHost.withoutBrackets(logicalUri.getHost()),
+            remainingMillis(candidateDeadline, "DNS resolution"));
     if (resolvedAddresses == null) {
       throw new IOException("DNS resolver returned null for " + logicalUri.getHost());
     }
-    Set<InetAddress> addresses =
-        resolvedAddresses.stream()
-            .filter(Objects::nonNull)
-            .collect(Collectors.toCollection(LinkedHashSet::new));
+    Set<InetAddress> addresses = new LinkedHashSet<>();
+    for (InetAddress address : resolvedAddresses) {
+      if (address != null) {
+        addresses.add(address);
+        if (addresses.size() == pollingLimits.maxDnsAddresses) {
+          break;
+        }
+      }
+    }
     if (addresses.isEmpty()) {
       throw new IOException("DNS returned no addresses for " + logicalUri.getHost());
     }
 
     IOException lastException = null;
-    boolean receivedResponse = false;
-    for (InetAddress address : addresses) {
+    boolean authoritativeEmpty = false;
+    List<InetAddress> addressList = new ArrayList<>(addresses);
+    for (int index = 0; index < addressList.size(); index++) {
+      if (deadlineExpired(candidateDeadline)) {
+        lastException = deadlineExceeded("/localnodes address attempts");
+        break;
+      }
+      InetAddress address = addressList.get(index);
       try {
-        List<URI> nodes =
-            getNodes(dnsFallbackClient.prepareRequestForAddress(executeRequest, address));
-        receivedResponse = true;
-        if (!nodes.isEmpty()) {
-          return nodes;
+        long attemptDeadline =
+            fairDeadline(
+                candidateDeadline, pollingLimits.attemptTimeoutMillis, addressList.size() - index);
+        remainingMillis(attemptDeadline, "/localnodes request preparation");
+        CandidateResult result =
+            getNodes(
+                dnsFallbackClient.prepareRequestForAddress(executeRequest, address),
+                attemptDeadline);
+        if (!result.nodes.isEmpty()) {
+          return result;
         }
+        authoritativeEmpty = true;
         logger.log(
             Level.FINE,
             "/localnodes from "
@@ -730,43 +841,52 @@ public class AlternatorLiveNodes extends Thread {
                 + logicalUri.getHost()
                 + " at "
                 + address.getHostAddress()
-                + "; trying next DNS address",
-            e);
+                + "; trying next DNS address: "
+                + e.getClass().getSimpleName()
+                + ": "
+                + LocalNodesResponseParser.boundedLogSample(e.getMessage()));
+        if (deadlineExpired(candidateDeadline)) {
+          break;
+        }
       }
     }
 
-    if (!receivedResponse && lastException != null) {
+    if (authoritativeEmpty) {
+      return CandidateResult.authoritativeEmpty();
+    }
+    if (lastException != null) {
       throw lastException;
     }
-    return Collections.emptyList();
+    throw new IOException("No /localnodes address attempt completed for " + logicalUri.getHost());
   }
 
-  private List<URI> getNodes(ExecutableHttpRequest preparedRequest) throws IOException {
-    HttpExecuteResponse response = preparedRequest.call();
-
+  private CandidateResult getNodes(ExecutableHttpRequest preparedRequest, long attemptDeadline)
+      throws IOException {
+    long timeoutMillis;
     try {
-      int statusCode = response.httpResponse().statusCode();
-      if (statusCode != HttpURLConnection.HTTP_OK) {
-        // Consume and close the response body to release the connection
-        response.responseBody().ifPresent(this::consumeAndClose);
-        return Collections.emptyList();
-      }
-
-      Optional<AbortableInputStream> bodyOpt = response.responseBody();
-      if (!bodyOpt.isPresent()) {
-        return Collections.emptyList();
-      }
-
-      String responseStr;
-      try (AbortableInputStream body = bodyOpt.get()) {
-        responseStr = streamToString(body);
-      }
-
-      return parseLocalNodesResponse(responseStr);
-    } catch (IOException e) {
-      // Ensure the response body is consumed on error
-      response.responseBody().ifPresent(this::consumeAndClose);
+      timeoutMillis = remainingMillis(attemptDeadline, "/localnodes request");
+    } catch (IOException | RuntimeException e) {
+      abortPreparedRequest(preparedRequest);
       throw e;
+    }
+    BoundedPollingAttempt.Result response =
+        BoundedPollingAttempt.execute(
+            preparedRequest, timeoutMillis, pollingLimits.maxResponseBytes);
+    if (response.statusCode != 200) {
+      throw new IOException("/localnodes returned HTTP status " + response.statusCode);
+    }
+    if (!response.isSuccess()) {
+      throw new IOException("/localnodes returned HTTP 200 without a response body");
+    }
+    String responseBody = new String(response.body, StandardCharsets.UTF_8);
+    return new CandidateResult(parseLocalNodesResponse(responseBody));
+  }
+
+  private static void abortPreparedRequest(ExecutableHttpRequest preparedRequest) {
+    try {
+      preparedRequest.abort();
+    } catch (RuntimeException ignored) {
+      // Best-effort cleanup for a request that never reached the polling worker.
     }
   }
 
@@ -774,30 +894,72 @@ public class AlternatorLiveNodes extends Thread {
     try {
       return localNodesResponseParser.parse(responseStr);
     } catch (LocalNodesResponseParser.InvalidLocalNodesResponseException e) {
-      logger.log(Level.WARNING, "Malformed /localnodes response: " + responseStr);
+      String response = responseStr == null ? "" : responseStr;
+      logger.log(
+          Level.WARNING,
+          "Malformed /localnodes response: characters={0}, hash={1}, sample={2}",
+          new Object[] {
+            response.length(),
+            Integer.toHexString(response.hashCode()),
+            LocalNodesResponseParser.boundedLogSample(response)
+          });
       throw e;
     }
   }
 
-  /**
-   * Consumes and closes an AbortableInputStream to release the underlying connection back to the
-   * pool.
-   */
-  private void consumeAndClose(AbortableInputStream stream) {
-    try {
-      // Read remaining bytes to ensure the connection can be reused
-      byte[] buf = new byte[1024];
-      while (stream.read(buf) != -1) {
-        // discard
-      }
-      stream.close();
-    } catch (IOException e) {
-      try {
-        stream.abort();
-      } catch (Exception abortEx) {
-        logger.log(Level.WARNING, "Failed to abort AbortableInputStream during cleanup", abortEx);
-      }
+  private static final class CandidateResult {
+    final List<URI> nodes;
+
+    CandidateResult(List<URI> nodes) {
+      this.nodes = nodes;
     }
+
+    static CandidateResult authoritativeEmpty() {
+      return new CandidateResult(Collections.emptyList());
+    }
+  }
+
+  private static long deadlineAfterMillis(long timeoutMillis) {
+    return System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
+  }
+
+  private static int countScopes(RoutingScope scope) {
+    int count = 0;
+    for (RoutingScope current = scope; current != null; current = current.getFallback()) {
+      count++;
+    }
+    return count;
+  }
+
+  private static long fairDeadline(long outerDeadline, long maximumMillis, int remainingItems)
+      throws SocketTimeoutException {
+    long now = System.nanoTime();
+    long remainingNanos = outerDeadline - now;
+    if (remainingNanos <= 0) {
+      throw deadlineExceeded("live-node discovery cycle");
+    }
+    long fairNanos = remainingNanos / Math.max(1, remainingItems);
+    fairNanos = Math.max(TimeUnit.MILLISECONDS.toNanos(1), fairNanos);
+    long budgetNanos =
+        Math.min(remainingNanos, Math.min(TimeUnit.MILLISECONDS.toNanos(maximumMillis), fairNanos));
+    return now + budgetNanos;
+  }
+
+  private static long remainingMillis(long deadline, String operation)
+      throws SocketTimeoutException {
+    long remainingNanos = deadline - System.nanoTime();
+    if (remainingNanos <= 0) {
+      throw deadlineExceeded(operation);
+    }
+    return Math.max(1, TimeUnit.NANOSECONDS.toMillis(remainingNanos));
+  }
+
+  private static SocketTimeoutException deadlineExceeded(String operation) {
+    return new SocketTimeoutException(operation + " exceeded its deadline");
+  }
+
+  private static boolean deadlineExpired(long deadline) {
+    return deadline - System.nanoTime() <= 0;
   }
 
   /**
@@ -877,7 +1039,7 @@ public class AlternatorLiveNodes extends Thread {
           new URI(
               uri.getScheme(),
               null,
-              uri.getHost(),
+              LogicalHost.withoutBrackets(uri.getHost()),
               uri.getPort(),
               uri.getPath(),
               "rack=fakeRack",
@@ -887,8 +1049,13 @@ public class AlternatorLiveNodes extends Thread {
       throw new FailedToCheck("Invalid URI: " + uri, e);
     }
     try {
-      List<URI> hostsWithFakeRack = getNodes(fakeRackUrl);
-      List<URI> hostsWithoutRack = getNodes(uri);
+      long cycleDeadline = deadlineAfterMillis(pollingLimits.cycleTimeoutMillis);
+      List<URI> hostsWithFakeRack =
+          getNodes(
+                  fakeRackUrl, fairDeadline(cycleDeadline, pollingLimits.candidateTimeoutMillis, 2))
+              .nodes;
+      List<URI> hostsWithoutRack =
+          getNodes(uri, fairDeadline(cycleDeadline, pollingLimits.candidateTimeoutMillis, 1)).nodes;
       if (hostsWithoutRack.isEmpty()) {
         // This should not normally happen.
         // If list of nodes is empty, it is impossible to conclude if it supports rack/datacenter

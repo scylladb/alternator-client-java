@@ -102,7 +102,7 @@ public class IpDnsFallbackSdkHttpClientTest {
     }
     assertTrue(delegate.closed.get());
     assertTrue(client.isTimeoutExecutorShutdown());
-    assertTrue(client.isResolverExecutorShutdown());
+    assertTrue(client.isResolverClosed());
   }
 
   @Test(timeout = 5000)
@@ -129,7 +129,7 @@ public class IpDnsFallbackSdkHttpClientTest {
               return Collections.singletonList(InetAddress.getLoopbackAddress());
             },
             systemSslSocketFactory(),
-            new IpDnsFallbackSdkHttpClient.Limits(100, 1_000, 1_000, 2_000, 1024, 1024));
+            limits(100, 1_000, 1_000, 2_000, 1024, 1024));
     try {
       assertDnsTimesOut(client);
       assertTrue(resolverEntered.await(1, TimeUnit.SECONDS));
@@ -141,17 +141,20 @@ public class IpDnsFallbackSdkHttpClientTest {
       client.close();
     }
     assertTrue(delegate.closed.get());
-    assertTrue(client.isResolverExecutorShutdown());
+    assertTrue(client.isResolverClosed());
   }
 
   @Test
   public void testDefaultBoundsAreFinite() {
     assertEquals(3_000, IpDnsFallbackSdkHttpClient.DEFAULT_LIMITS.dnsTimeoutMillis);
+    assertEquals(8, IpDnsFallbackSdkHttpClient.DEFAULT_LIMITS.maxDnsAddresses);
     assertEquals(3_000, IpDnsFallbackSdkHttpClient.DEFAULT_LIMITS.connectTimeoutMillis);
     assertEquals(5_000, IpDnsFallbackSdkHttpClient.DEFAULT_LIMITS.readTimeoutMillis);
-    assertEquals(10_000, IpDnsFallbackSdkHttpClient.DEFAULT_LIMITS.responseTimeoutMillis);
+    assertEquals(10_000, IpDnsFallbackSdkHttpClient.DEFAULT_LIMITS.attemptTimeoutMillis);
+    assertEquals(12_000, IpDnsFallbackSdkHttpClient.DEFAULT_LIMITS.candidateTimeoutMillis);
+    assertEquals(30_000, IpDnsFallbackSdkHttpClient.DEFAULT_LIMITS.cycleTimeoutMillis);
     assertEquals(64 * 1024, IpDnsFallbackSdkHttpClient.DEFAULT_LIMITS.maxHeaderBytes);
-    assertEquals(1024 * 1024, IpDnsFallbackSdkHttpClient.DEFAULT_LIMITS.maxBodyBytes);
+    assertEquals(1024 * 1024, IpDnsFallbackSdkHttpClient.DEFAULT_LIMITS.maxResponseBytes);
   }
 
   @Test(timeout = 5000)
@@ -176,7 +179,7 @@ public class IpDnsFallbackSdkHttpClientTest {
               return Collections.singletonList(InetAddress.getLoopbackAddress());
             },
             systemSslSocketFactory(),
-            new IpDnsFallbackSdkHttpClient.Limits(4_000, 1_000, 1_000, 4_000, 1024, 1024));
+            limits(4_000, 1_000, 1_000, 4_000, 1024, 1024));
     ExecutorService caller = Executors.newSingleThreadExecutor();
     try {
       Future<?> resolution = caller.submit(() -> client.resolve("blocked.test"));
@@ -186,7 +189,7 @@ public class IpDnsFallbackSdkHttpClientTest {
 
       assertFutureFailedWithIOException(resolution);
       assertTrue(delegate.closed.get());
-      assertTrue(client.isResolverExecutorShutdown());
+      assertTrue(client.isResolverClosed());
     } finally {
       releaseResolver.countDown();
       client.close();
@@ -195,7 +198,8 @@ public class IpDnsFallbackSdkHttpClientTest {
   }
 
   @Test
-  public void testChunkedErrorResponseIsReturnedAndSocketIsReleased() throws Exception {
+  public void testChunkedErrorResponseIsReturnedWithoutDrainingAndSocketIsReleased()
+      throws Exception {
     InetAddress loopback = InetAddress.getByName("127.0.0.1");
     HttpServer server = HttpServer.create(new InetSocketAddress(loopback, 0), 0);
     server.createContext(
@@ -216,11 +220,73 @@ public class IpDnsFallbackSdkHttpClientTest {
               client, logicalRequest("http", "logical.test", port, "/localnodes"), loopback);
 
       assertEquals(503, response.httpResponse().statusCode());
-      assertEquals("temporarily unavailable", readBody(response));
+      assertEquals("", readBody(response));
       assertEquals(0, client.activeRequestCount());
     } finally {
       client.close();
       server.stop(0);
+    }
+  }
+
+  @Test(timeout = 5000)
+  public void testEndlessErrorBodyIsNotDrained() throws Exception {
+    CountDownLatch clientClosedSocket = new CountDownLatch(1);
+    try (RawServer server =
+        new RawServer(
+            socket -> {
+              readRequestHeaders(socket.getInputStream());
+              socket
+                  .getOutputStream()
+                  .write(
+                      "HTTP/1.1 503 Unavailable\r\nTransfer-Encoding: chunked\r\n\r\n"
+                          .getBytes(StandardCharsets.US_ASCII));
+              socket.getOutputStream().flush();
+              while (socket.getInputStream().read() >= 0) {
+                // An endless response producer stops only when the client closes the socket.
+              }
+              clientClosedSocket.countDown();
+            })) {
+      IpDnsFallbackSdkHttpClient client = new IpDnsFallbackSdkHttpClient(new TrackingClient());
+      try {
+        HttpExecuteResponse response =
+            addressedRequest(client, logicalRequest(server.port()), server.address()).call();
+
+        assertEquals(503, response.httpResponse().statusCode());
+        assertEquals("", readBody(response));
+        assertTrue(clientClosedSocket.await(1, TimeUnit.SECONDS));
+        server.await();
+      } finally {
+        client.close();
+      }
+    }
+  }
+
+  @Test
+  public void testInterim100And103ResponsesAreConsumedBeforeFinalResponse() throws Exception {
+    String rawResponse =
+        "HTTP/1.1 100 Continue\r\n"
+            + "X-Interim: one\r\n\r\n"
+            + "HTTP/1.1 103 Early Hints\r\n"
+            + "Link: </metadata>; rel=preload\r\n\r\n"
+            + "HTTP/1.1 200 OK\r\n"
+            + "Content-Length: 2\r\n\r\n[]";
+    try (RawServer server =
+        new RawServer(
+            socket -> {
+              readRequestHeaders(socket.getInputStream());
+              socket.getOutputStream().write(rawResponse.getBytes(StandardCharsets.ISO_8859_1));
+              socket.getOutputStream().flush();
+            })) {
+      IpDnsFallbackSdkHttpClient client = new IpDnsFallbackSdkHttpClient(new TrackingClient());
+      try {
+        HttpExecuteResponse response =
+            addressedRequest(client, logicalRequest(server.port()), server.address()).call();
+        assertEquals(200, response.httpResponse().statusCode());
+        assertEquals("[]", readBody(response));
+        server.await();
+      } finally {
+        client.close();
+      }
     }
   }
 
@@ -313,8 +379,7 @@ public class IpDnsFallbackSdkHttpClientTest {
             })) {
       ScheduledExecutorService timeoutScheduler = Executors.newSingleThreadScheduledExecutor();
       try {
-        IpDnsFallbackSdkHttpClient.Limits limits =
-            new IpDnsFallbackSdkHttpClient.Limits(1_000, 1_000, 200, 1024, 1024);
+        LiveNodesPollingLimits limits = limits(1_000, 1_000, 200, 1024, 1024);
         OneShotAddressedHttpRequest request =
             new OneShotAddressedHttpRequest(
                 HttpExecuteRequest.builder().request(logicalRequest(server.port())).build(),
@@ -357,11 +422,11 @@ public class IpDnsFallbackSdkHttpClientTest {
   public void testRejectsOversizedHeadersAndBodies() throws Exception {
     assertRawResponseRejected(
         "HTTP/1.1 200 OK\r\nX-Large: " + "x".repeat(256) + "\r\n\r\n",
-        new IpDnsFallbackSdkHttpClient.Limits(1_000, 1_000, 2_000, 128, 1024),
+        limits(1_000, 1_000, 2_000, 128, 1024),
         "headers exceed");
     assertRawResponseRejected(
         "HTTP/1.1 200 OK\r\nContent-Length: 32\r\n\r\n" + "x".repeat(32),
-        new IpDnsFallbackSdkHttpClient.Limits(1_000, 1_000, 2_000, 1024, 16),
+        limits(1_000, 1_000, 2_000, 1024, 16),
         "body exceeds");
   }
 
@@ -442,8 +507,7 @@ public class IpDnsFallbackSdkHttpClientTest {
   }
 
   private static void assertRawResponseRejected(
-      String rawResponse, IpDnsFallbackSdkHttpClient.Limits limits, String expectedMessage)
-      throws Exception {
+      String rawResponse, LiveNodesPollingLimits limits, String expectedMessage) throws Exception {
     try (RawServer server =
         new RawServer(
             socket -> {
@@ -485,8 +549,36 @@ public class IpDnsFallbackSdkHttpClientTest {
         null,
         hostname -> Collections.singletonList(InetAddress.getLoopbackAddress()),
         systemSslSocketFactory(),
-        new IpDnsFallbackSdkHttpClient.Limits(
-            connectTimeout, readTimeout, responseTimeout, maxHeaderBytes, maxBodyBytes));
+        limits(connectTimeout, readTimeout, responseTimeout, maxHeaderBytes, maxBodyBytes));
+  }
+
+  private static LiveNodesPollingLimits limits(
+      int connectTimeout,
+      int readTimeout,
+      int attemptTimeout,
+      int maxHeaderBytes,
+      int maxResponseBytes) {
+    return limits(
+        3_000, connectTimeout, readTimeout, attemptTimeout, maxHeaderBytes, maxResponseBytes);
+  }
+
+  private static LiveNodesPollingLimits limits(
+      int dnsTimeout,
+      int connectTimeout,
+      int readTimeout,
+      int attemptTimeout,
+      int maxHeaderBytes,
+      int maxResponseBytes) {
+    return new LiveNodesPollingLimits(
+        dnsTimeout,
+        8,
+        connectTimeout,
+        readTimeout,
+        attemptTimeout,
+        Math.max(attemptTimeout, 1_000),
+        Math.max(attemptTimeout, 2_000),
+        maxHeaderBytes,
+        maxResponseBytes);
   }
 
   private static SSLSocketFactory systemSslSocketFactory() {

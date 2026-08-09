@@ -52,6 +52,11 @@ class UserAgentSdkHttpClient implements SdkHttpClient, DnsFallbackSdkHttpClient 
   }
 
   @Override
+  public List<InetAddress> resolve(String hostname, long timeoutMillis) throws IOException {
+    return dnsFallbackDelegate().resolve(hostname, timeoutMillis);
+  }
+
+  @Override
   public ExecutableHttpRequest prepareRequestForAddress(
       HttpExecuteRequest request, InetAddress address) {
     return dnsFallbackDelegate().prepareRequestForAddress(transform(request), address);

@@ -28,7 +28,9 @@ import software.amazon.awssdk.http.SdkHttpClient;
  *
  * <p>{@link AlternatorLiveNodes} uses this capability to validate each DNS address independently.
  * Implementations must retain the logical hostname anywhere it affects HTTP Host, TLS server name
- * indication and certificate verification, or request-signing inputs.
+ * indication and certificate verification, or request-signing inputs. The Alternator-provided
+ * implementations also enforce bounded DNS and request execution; custom implementations are
+ * responsible for honoring the same timeout and cancellation contract.
  *
  * @since 2.0.6
  */
@@ -50,6 +52,18 @@ public interface DnsFallbackSdkHttpClient extends SdkHttpClient {
    * @throws IOException if resolution fails
    */
   List<InetAddress> resolve(String hostname) throws IOException;
+
+  /**
+   * Resolves the logical hostname without waiting longer than the caller's remaining discovery
+   * budget. Implementations with an internal resolver deadline must use the shorter deadline and
+   * must not fall back to an unbounded synchronous resolution call.
+   *
+   * @param hostname logical request hostname
+   * @param timeoutMillis caller's remaining resolution budget in milliseconds
+   * @return resolved addresses in resolver order
+   * @throws IOException if resolution fails or exceeds the deadline
+   */
+  List<InetAddress> resolve(String hostname, long timeoutMillis) throws IOException;
 
   /**
    * Prepares a request that connects to {@code address} while preserving the logical request

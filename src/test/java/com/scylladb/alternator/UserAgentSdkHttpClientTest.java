@@ -70,6 +70,8 @@ public class UserAgentSdkHttpClientTest {
 
   private static class MockDnsFallbackClient extends MockSdkHttpClient
       implements DnsFallbackSdkHttpClient {
+    long capturedTimeoutMillis = -1;
+
     @Override
     public boolean supportsDnsFallback(String scheme) {
       return true;
@@ -81,10 +83,26 @@ public class UserAgentSdkHttpClientTest {
     }
 
     @Override
+    public List<InetAddress> resolve(String hostname, long timeoutMillis) throws IOException {
+      capturedTimeoutMillis = timeoutMillis;
+      return resolve(hostname);
+    }
+
+    @Override
     public ExecutableHttpRequest prepareRequestForAddress(
         HttpExecuteRequest request, InetAddress address) {
       return prepareRequest(request);
     }
+  }
+
+  @Test
+  public void testDnsFallbackForwardsCallerResolutionDeadline() throws Exception {
+    MockDnsFallbackClient mockClient = new MockDnsFallbackClient();
+    UserAgentSdkHttpClient client =
+        new UserAgentSdkHttpClient(mockClient, AlternatorUserAgent.defaultUserAgent());
+
+    assertEquals(InetAddress.getByName("127.0.0.1"), client.resolve("logical.test", 17).get(0));
+    assertEquals(17, mockClient.capturedTimeoutMillis);
   }
 
   @Test

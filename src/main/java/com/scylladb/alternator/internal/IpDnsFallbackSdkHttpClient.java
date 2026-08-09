@@ -17,27 +17,18 @@ package com.scylladb.alternator.internal;
 
 import com.scylladb.alternator.TlsConfig;
 import java.io.IOException;
-import java.io.InterruptedIOException;
 import java.net.InetAddress;
-import java.net.SocketTimeoutException;
 import java.security.GeneralSecurityException;
 import java.security.SecureRandom;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.CancellationException;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Future;
-import java.util.concurrent.FutureTask;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocketFactory;
@@ -56,67 +47,21 @@ import software.amazon.awssdk.http.SdkHttpClient;
  */
 final class IpDnsFallbackSdkHttpClient implements DnsFallbackSdkHttpClient {
 
-  static final Limits DEFAULT_LIMITS =
-      new Limits(3_000, 3_000, 5_000, 10_000, 64 * 1024, 1024 * 1024);
+  static final LiveNodesPollingLimits DEFAULT_LIMITS = LiveNodesPollingLimits.DEFAULT;
+
+  private static final Resolver SYSTEM_RESOLVER =
+      hostname -> Arrays.asList(InetAddress.getAllByName(hostname));
 
   interface Resolver {
     List<InetAddress> resolve(String hostname) throws IOException;
   }
 
-  static final class Limits {
-    final int dnsTimeoutMillis;
-    final int connectTimeoutMillis;
-    final int readTimeoutMillis;
-    final int responseTimeoutMillis;
-    final int maxHeaderBytes;
-    final int maxBodyBytes;
-
-    Limits(
-        int connectTimeoutMillis,
-        int readTimeoutMillis,
-        int responseTimeoutMillis,
-        int maxHeaderBytes,
-        int maxBodyBytes) {
-      this(
-          3_000,
-          connectTimeoutMillis,
-          readTimeoutMillis,
-          responseTimeoutMillis,
-          maxHeaderBytes,
-          maxBodyBytes);
-    }
-
-    Limits(
-        int dnsTimeoutMillis,
-        int connectTimeoutMillis,
-        int readTimeoutMillis,
-        int responseTimeoutMillis,
-        int maxHeaderBytes,
-        int maxBodyBytes) {
-      this.dnsTimeoutMillis = requirePositive(dnsTimeoutMillis, "dnsTimeoutMillis");
-      this.connectTimeoutMillis = requirePositive(connectTimeoutMillis, "connectTimeoutMillis");
-      this.readTimeoutMillis = requirePositive(readTimeoutMillis, "readTimeoutMillis");
-      this.responseTimeoutMillis = requirePositive(responseTimeoutMillis, "responseTimeoutMillis");
-      this.maxHeaderBytes = requirePositive(maxHeaderBytes, "maxHeaderBytes");
-      this.maxBodyBytes = requirePositive(maxBodyBytes, "maxBodyBytes");
-    }
-
-    private static int requirePositive(int value, String name) {
-      if (value <= 0) {
-        throw new IllegalArgumentException(name + " must be positive");
-      }
-      return value;
-    }
-  }
-
   private final SdkHttpClient delegate;
-  private final Resolver resolver;
+  private final BoundedDnsResolver resolver;
   private final SSLSocketFactory sslSocketFactory;
   private final boolean verifyHostname;
-  private final Limits limits;
+  private final LiveNodesPollingLimits limits;
   private final Set<OneShotAddressedHttpRequest> activeRequests = ConcurrentHashMap.newKeySet();
-  private final Set<Future<?>> activeResolutions = ConcurrentHashMap.newKeySet();
-  private final ThreadPoolExecutor resolverExecutor;
   private final ScheduledThreadPoolExecutor timeoutExecutor;
   private final AtomicBoolean closed = new AtomicBoolean(false);
   private final Object lifecycleLock = new Object();
@@ -130,7 +75,7 @@ final class IpDnsFallbackSdkHttpClient implements DnsFallbackSdkHttpClient {
   }
 
   IpDnsFallbackSdkHttpClient(SdkHttpClient delegate, TlsConfig tlsConfig) {
-    this(delegate, tlsConfig, hostname -> Arrays.asList(InetAddress.getAllByName(hostname)));
+    this(delegate, tlsConfig, SYSTEM_RESOLVER);
   }
 
   IpDnsFallbackSdkHttpClient(SdkHttpClient delegate, TlsConfig tlsConfig, Resolver resolver) {
@@ -142,21 +87,31 @@ final class IpDnsFallbackSdkHttpClient implements DnsFallbackSdkHttpClient {
       TlsConfig tlsConfig,
       Resolver resolver,
       SSLSocketFactory sslSocketFactory,
-      Limits limits) {
+      LiveNodesPollingLimits limits) {
+    this(delegate, tlsConfig, resolver, sslSocketFactory, limits, null);
+  }
+
+  IpDnsFallbackSdkHttpClient(
+      SdkHttpClient delegate,
+      TlsConfig tlsConfig,
+      Resolver resolver,
+      SSLSocketFactory sslSocketFactory,
+      LiveNodesPollingLimits limits,
+      BoundedDnsResolver.Service resolverService) {
     this.delegate = delegate;
-    this.resolver = resolver;
+    this.resolver =
+        resolverService == null
+            ? new BoundedDnsResolver(
+                resolver, resolver::resolve, limits.dnsTimeoutMillis, limits.maxDnsAddresses)
+            : new BoundedDnsResolver(
+                resolverService,
+                resolver,
+                resolver::resolve,
+                limits.dnsTimeoutMillis,
+                limits.maxDnsAddresses);
     this.sslSocketFactory = sslSocketFactory;
     this.verifyHostname = tlsConfig == null || tlsConfig.isVerifyHostname();
     this.limits = limits;
-    this.resolverExecutor =
-        new ThreadPoolExecutor(
-            1,
-            1,
-            0L,
-            TimeUnit.MILLISECONDS,
-            new ArrayBlockingQueue<>(1),
-            new ResolverThreadFactory(),
-            new ThreadPoolExecutor.AbortPolicy());
     this.timeoutExecutor = new ScheduledThreadPoolExecutor(1, new AddressTimeoutThreadFactory());
     this.timeoutExecutor.setRemoveOnCancelPolicy(true);
     this.timeoutExecutor.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
@@ -169,48 +124,12 @@ final class IpDnsFallbackSdkHttpClient implements DnsFallbackSdkHttpClient {
 
   @Override
   public List<InetAddress> resolve(String hostname) throws IOException {
-    FutureTask<List<InetAddress>> resolution = new FutureTask<>(() -> resolver.resolve(hostname));
-    synchronized (lifecycleLock) {
-      if (closed.get()) {
-        throw new IOException("HTTP client is closed");
-      }
-      activeResolutions.add(resolution);
-      try {
-        resolverExecutor.execute(resolution);
-      } catch (RejectedExecutionException e) {
-        activeResolutions.remove(resolution);
-        resolution.cancel(true);
-        throw new IOException("DNS resolver is busy or the HTTP client is closed", e);
-      }
-    }
+    return resolver.resolve(hostname);
+  }
 
-    try {
-      return resolution.get(limits.dnsTimeoutMillis, TimeUnit.MILLISECONDS);
-    } catch (TimeoutException e) {
-      SocketTimeoutException timeout =
-          new SocketTimeoutException(
-              "DNS resolution for " + hostname + " exceeded " + limits.dnsTimeoutMillis + " ms");
-      timeout.initCause(e);
-      throw timeout;
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
-      InterruptedIOException interrupted =
-          new InterruptedIOException("Interrupted while resolving " + hostname);
-      interrupted.initCause(e);
-      throw interrupted;
-    } catch (CancellationException e) {
-      throw new IOException("DNS resolution was cancelled because the HTTP client closed", e);
-    } catch (ExecutionException e) {
-      Throwable cause = e.getCause();
-      if (cause instanceof IOException) {
-        throw (IOException) cause;
-      }
-      throw new IOException("DNS resolution failed for " + hostname, cause);
-    } finally {
-      resolution.cancel(true);
-      activeResolutions.remove(resolution);
-      resolverExecutor.purge();
-    }
+  @Override
+  public List<InetAddress> resolve(String hostname, long timeoutMillis) throws IOException {
+    return resolver.resolve(hostname, timeoutMillis);
   }
 
   @Override
@@ -237,7 +156,7 @@ final class IpDnsFallbackSdkHttpClient implements DnsFallbackSdkHttpClient {
               activeRequests.add(addressedRequest);
               try {
                 return timeoutExecutor.schedule(
-                    timeoutTask, limits.responseTimeoutMillis, TimeUnit.MILLISECONDS);
+                    timeoutTask, limits.attemptTimeoutMillis, TimeUnit.MILLISECONDS);
               } catch (RejectedExecutionException e) {
                 activeRequests.remove(addressedRequest);
                 addressedRequest.abortForClientClose();
@@ -264,15 +183,13 @@ final class IpDnsFallbackSdkHttpClient implements DnsFallbackSdkHttpClient {
       if (!closed.compareAndSet(false, true)) {
         return;
       }
-      activeResolutions.forEach(resolution -> resolution.cancel(true));
+      resolver.close();
       activeRequests.forEach(OneShotAddressedHttpRequest::abortForClientClose);
-      resolverExecutor.shutdownNow();
       timeoutExecutor.shutdownNow();
     }
     try {
       delegate.close();
     } finally {
-      activeResolutions.clear();
       activeRequests.clear();
     }
   }
@@ -290,8 +207,8 @@ final class IpDnsFallbackSdkHttpClient implements DnsFallbackSdkHttpClient {
     return timeoutExecutor.isShutdown();
   }
 
-  boolean isResolverExecutorShutdown() {
-    return resolverExecutor.isShutdown();
+  boolean isResolverClosed() {
+    return resolver.isClosed();
   }
 
   private static SSLSocketFactory defaultSslSocketFactory(TlsConfig tlsConfig) {
@@ -313,15 +230,6 @@ final class IpDnsFallbackSdkHttpClient implements DnsFallbackSdkHttpClient {
     @Override
     public Thread newThread(Runnable runnable) {
       Thread thread = new Thread(runnable, "alternator-addressed-poll-timeout");
-      thread.setDaemon(true);
-      return thread;
-    }
-  }
-
-  private static final class ResolverThreadFactory implements ThreadFactory {
-    @Override
-    public Thread newThread(Runnable runnable) {
-      Thread thread = new Thread(runnable, "alternator-bounded-dns-resolver");
       thread.setDaemon(true);
       return thread;
     }

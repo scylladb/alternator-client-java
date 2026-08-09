@@ -165,13 +165,15 @@ public class AlternatorLiveNodesDnsFallbackTest {
   }
 
   @Test(timeout = 5000)
-  public void testAllFailedAddressesAreAttemptedOnceAndCycleIsBounded() throws Exception {
+  public void testFailedAddressAnswersAreDeduplicatedAndCapped() throws Exception {
     List<InetAddress> resolved = new ArrayList<>();
     List<Integer> expectedAttempts = new ArrayList<>();
     for (int i = 1; i <= 32; i++) {
       resolved.add(address(i));
       resolved.add(address(i));
-      expectedAttempts.add(i);
+      if (i <= LiveNodesPollingLimits.DEFAULT.maxDnsAddresses) {
+        expectedAttempts.add(i);
+      }
     }
     AtomicInteger resolutions = new AtomicInteger();
     TestDnsFallbackClient client =
@@ -380,6 +382,11 @@ public class AlternatorLiveNodesDnsFallbackTest {
 
     @Override
     public List<InetAddress> resolve(String hostname) throws IOException {
+      return resolver.resolve(hostname);
+    }
+
+    @Override
+    public List<InetAddress> resolve(String hostname, long timeoutMillis) throws IOException {
       return resolver.resolve(hostname);
     }
 

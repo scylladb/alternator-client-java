@@ -18,10 +18,17 @@ package com.scylladb.alternator.internal;
 import static org.junit.Assert.*;
 
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.net.InetAddress;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.http.conn.DnsResolver;
@@ -134,6 +141,48 @@ public class ApacheDnsFallbackSdkHttpClientTest {
     assertTrue(baseClient.closed.get());
   }
 
+  @Test(timeout = 5000)
+  public void testClientCloseReleasesStalledAddressRequestBeforeClosingDelegate() throws Exception {
+    InetAddress address = InetAddress.getByName("192.0.2.4");
+    BlockingCloseClient baseClient = new BlockingCloseClient();
+    StalledAddressClient addressClient = new StalledAddressClient();
+    ApacheDnsFallbackSdkHttpClient client =
+        new ApacheDnsFallbackSdkHttpClient(
+            baseClient,
+            hostname -> new InetAddress[] {address},
+            (hostname, resolvedAddress) -> addressClient);
+    ExecutableHttpRequest request =
+        client.prepareRequestForAddress(
+            HttpExecuteRequest.builder().request(logicalRequest()).build(), address);
+    ExecutorService executor = Executors.newFixedThreadPool(2);
+    try {
+      Future<?> requestCall = executor.submit(() -> request.call());
+      assertTrue(addressClient.callEntered.await(1, TimeUnit.SECONDS));
+
+      Future<?> close = executor.submit(client::close);
+
+      assertTrue(
+          "addressed transport must close before a blocking delegate close",
+          addressClient.closed.await(500, TimeUnit.MILLISECONDS));
+      try {
+        requestCall.get(500, TimeUnit.MILLISECONDS);
+        fail("Expected closing the addressed client to release its stalled request");
+      } catch (ExecutionException expected) {
+        assertTrue(expected.getCause().toString(), expected.getCause() instanceof IOException);
+      }
+      assertTrue(baseClient.closeEntered.await(500, TimeUnit.MILLISECONDS));
+      assertFalse("delegate close should still be blocked", close.isDone());
+
+      baseClient.releaseClose.countDown();
+      close.get(500, TimeUnit.MILLISECONDS);
+    } finally {
+      baseClient.releaseClose.countDown();
+      addressClient.closed.countDown();
+      client.close();
+      executor.shutdownNow();
+    }
+  }
+
   private static SdkHttpRequest logicalRequest() {
     return SdkHttpRequest.builder()
         .uri(URI.create("https://logical.test:8043/localnodes?dc=dc1"))
@@ -172,6 +221,70 @@ public class ApacheDnsFallbackSdkHttpClientTest {
     @Override
     public String clientName() {
       return "TrackingClient";
+    }
+  }
+
+  private static final class BlockingCloseClient implements SdkHttpClient {
+    private final CountDownLatch closeEntered = new CountDownLatch(1);
+    private final CountDownLatch releaseClose = new CountDownLatch(1);
+
+    @Override
+    public ExecutableHttpRequest prepareRequest(HttpExecuteRequest request) {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void close() {
+      closeEntered.countDown();
+      awaitIgnoringInterrupts(releaseClose);
+    }
+
+    @Override
+    public String clientName() {
+      return "BlockingCloseClient";
+    }
+  }
+
+  private static final class StalledAddressClient implements SdkHttpClient {
+    private final CountDownLatch callEntered = new CountDownLatch(1);
+    private final CountDownLatch closed = new CountDownLatch(1);
+
+    @Override
+    public ExecutableHttpRequest prepareRequest(HttpExecuteRequest request) {
+      return new ExecutableHttpRequest() {
+        @Override
+        public HttpExecuteResponse call() throws IOException {
+          callEntered.countDown();
+          awaitIgnoringInterrupts(closed);
+          throw new IOException("address client closed");
+        }
+
+        @Override
+        public void abort() {
+          closed.countDown();
+        }
+      };
+    }
+
+    @Override
+    public void close() {
+      closed.countDown();
+    }
+
+    @Override
+    public String clientName() {
+      return "StalledAddressClient";
+    }
+  }
+
+  private static void awaitIgnoringInterrupts(CountDownLatch latch) {
+    boolean complete = false;
+    while (!complete) {
+      try {
+        complete = latch.await(20, TimeUnit.MILLISECONDS);
+      } catch (InterruptedException ignored) {
+        // Model a close/call path that only the test's explicit release can unblock.
+      }
     }
   }
 }

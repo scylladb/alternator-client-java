@@ -124,7 +124,7 @@ public final class ApacheSyncClientFactory {
   private static DnsResolver pinnedResolver(
       DnsResolver fallbackResolver, String logicalHostname, InetAddress address) {
     return hostname -> {
-      if (hostname.equalsIgnoreCase(logicalHostname)) {
+      if (LogicalHost.sameEndpoint(hostname, logicalHostname)) {
         return new InetAddress[] {address};
       }
       return fallbackResolver.resolve(hostname);

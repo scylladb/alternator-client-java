@@ -63,13 +63,14 @@ final class OneShotAddressedHttpRequest implements ExecutableHttpRequest {
   }
 
   private static final int MAX_LINE_BYTES = 8 * 1024;
+  private static final int MAX_INTERIM_RESPONSES = 8;
   private static final int BUFFER_SIZE = 8 * 1024;
 
   private final HttpExecuteRequest executeRequest;
   private final InetAddress address;
   private final SSLSocketFactory sslSocketFactory;
   private final boolean verifyHostname;
-  private final IpDnsFallbackSdkHttpClient.Limits limits;
+  private final LiveNodesPollingLimits limits;
   private final Lifecycle lifecycle;
   private final AtomicBoolean called = new AtomicBoolean(false);
   private final AtomicBoolean aborted = new AtomicBoolean(false);
@@ -82,7 +83,7 @@ final class OneShotAddressedHttpRequest implements ExecutableHttpRequest {
       InetAddress address,
       SSLSocketFactory sslSocketFactory,
       boolean verifyHostname,
-      IpDnsFallbackSdkHttpClient.Limits limits,
+      LiveNodesPollingLimits limits,
       Lifecycle lifecycle) {
     this.executeRequest = Objects.requireNonNull(executeRequest, "executeRequest");
     this.address = Objects.requireNonNull(address, "address");
@@ -109,7 +110,7 @@ final class OneShotAddressedHttpRequest implements ExecutableHttpRequest {
       if (timedOut.get()) {
         SocketTimeoutException timeout =
             new SocketTimeoutException(
-                "Addressed polling request exceeded " + limits.responseTimeoutMillis + " ms");
+                "Addressed polling request exceeded " + limits.attemptTimeoutMillis + " ms");
         timeout.initCause(e);
         throw timeout;
       }
@@ -162,8 +163,9 @@ final class OneShotAddressedHttpRequest implements ExecutableHttpRequest {
 
   private SSLSocket createTlsSocket(Socket rawSocket, String logicalHost, int port)
       throws IOException {
+    String tlsPeerName = LogicalHost.tlsPeerName(logicalHost);
     SSLSocket tlsSocket =
-        (SSLSocket) sslSocketFactory.createSocket(rawSocket, logicalHost, port, true);
+        (SSLSocket) sslSocketFactory.createSocket(rawSocket, tlsPeerName, port, true);
     if (!socket.compareAndSet(rawSocket, tlsSocket)) {
       closeQuietly(tlsSocket);
       throw abortedException(null);
@@ -174,9 +176,9 @@ final class OneShotAddressedHttpRequest implements ExecutableHttpRequest {
     }
 
     SSLParameters parameters = tlsSocket.getSSLParameters();
-    if (!isIpLiteral(logicalHost)) {
+    if (!LogicalHost.isIpLiteral(tlsPeerName)) {
       parameters.setServerNames(
-          Collections.singletonList(new SNIHostName(IDN.toASCII(logicalHost))));
+          Collections.singletonList(new SNIHostName(IDN.toASCII(tlsPeerName))));
     }
     if (verifyHostname) {
       parameters.setEndpointIdentificationAlgorithm("HTTPS");
@@ -223,13 +225,32 @@ final class OneShotAddressedHttpRequest implements ExecutableHttpRequest {
 
   private HttpExecuteResponse readResponse(InputStream input) throws IOException {
     HeaderBudget headerBudget = new HeaderBudget(limits.maxHeaderBytes);
-    String statusLine = readLine(input, headerBudget);
-    if (statusLine == null) {
-      throw new EOFException("Server closed before sending an HTTP status line");
+    int interimResponses = 0;
+    ParsedStatus status;
+    Map<String, List<String>> headers;
+    while (true) {
+      String statusLine = readLine(input, headerBudget);
+      if (statusLine == null) {
+        throw new EOFException("Server closed before sending an HTTP status line");
+      }
+      status = parseStatus(statusLine);
+      headers = readHeaders(input, headerBudget);
+      if (status.statusCode < 100 || status.statusCode >= 200) {
+        break;
+      }
+      if (status.statusCode == 101) {
+        throw new IOException("HTTP protocol switching is not supported for polling");
+      }
+      if (++interimResponses > MAX_INTERIM_RESPONSES) {
+        throw new IOException(
+            "HTTP response contains more than " + MAX_INTERIM_RESPONSES + " interim responses");
+      }
     }
-    ParsedStatus status = parseStatus(statusLine);
-    Map<String, List<String>> headers = readHeaders(input, headerBudget);
-    byte[] body = readBody(input, status.statusCode, headers);
+    // Polling callers only consume successful /localnodes bodies. Returning a non-success status
+    // immediately lets the shared attempt wrapper abort and close the socket without draining an
+    // arbitrarily slow or endless error body.
+    byte[] body =
+        status.statusCode == 200 ? readBody(input, status.statusCode, headers) : new byte[0];
 
     SdkHttpFullResponse response =
         SdkHttpFullResponse.builder()
@@ -290,12 +311,12 @@ final class OneShotAddressedHttpRequest implements ExecutableHttpRequest {
     }
     if (!contentLength.isEmpty()) {
       long length = parseContentLength(contentLength);
-      if (length > limits.maxBodyBytes) {
-        throw new IOException("HTTP response body exceeds " + limits.maxBodyBytes + " bytes");
+      if (length > limits.maxResponseBytes) {
+        throw new IOException("HTTP response body exceeds " + limits.maxResponseBytes + " bytes");
       }
       return readExactly(input, (int) length);
     }
-    return readUntilEnd(input, limits.maxBodyBytes);
+    return readUntilEnd(input, limits.maxResponseBytes);
   }
 
   private byte[] readChunkedBody(InputStream input) throws IOException {
@@ -314,8 +335,8 @@ final class OneShotAddressedHttpRequest implements ExecutableHttpRequest {
       } catch (NumberFormatException e) {
         throw new IOException("Malformed HTTP chunk size", e);
       }
-      if (chunkSize < 0 || chunkSize > limits.maxBodyBytes - body.size()) {
-        throw new IOException("HTTP response body exceeds " + limits.maxBodyBytes + " bytes");
+      if (chunkSize < 0 || chunkSize > limits.maxResponseBytes - body.size()) {
+        throw new IOException("HTTP response body exceeds " + limits.maxResponseBytes + " bytes");
       }
       if (chunkSize == 0) {
         readTrailers(input, framingBudget);
@@ -533,9 +554,7 @@ final class OneShotAddressedHttpRequest implements ExecutableHttpRequest {
   }
 
   private static String logicalAuthority(URI uri) {
-    String host = uri.getHost();
-    String formattedHost = host.indexOf(':') >= 0 ? "[" + host + "]" : host;
-    return uri.getPort() >= 0 ? formattedHost + ":" + uri.getPort() : formattedHost;
+    return LogicalHost.authority(uri.getHost(), uri.getPort());
   }
 
   private static int effectivePort(URI uri, String scheme) throws IOException {
@@ -549,33 +568,6 @@ final class OneShotAddressedHttpRequest implements ExecutableHttpRequest {
       return 443;
     }
     throw new IOException("Unsupported addressed polling scheme: " + scheme);
-  }
-
-  private static boolean isIpLiteral(String host) {
-    if (host.indexOf(':') >= 0) {
-      return true;
-    }
-    String[] components = host.split("\\.", -1);
-    if (components.length != 4) {
-      return false;
-    }
-    for (String component : components) {
-      if (component.isEmpty() || component.length() > 3) {
-        return false;
-      }
-      int value = 0;
-      for (int i = 0; i < component.length(); i++) {
-        char ch = component.charAt(i);
-        if (ch < '0' || ch > '9') {
-          return false;
-        }
-        value = value * 10 + ch - '0';
-      }
-      if (value > 255) {
-        return false;
-      }
-    }
-    return true;
   }
 
   private static void validateRequest(HttpExecuteRequest request) {

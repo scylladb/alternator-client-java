@@ -104,6 +104,11 @@ public final class CrtSyncClientFactory {
   /**
    * Creates a small sync HTTP client for LiveNodes polling using CRT.
    *
+   * <p>Per-address live-node fallback uses a direct one-shot socket because CRT does not expose a
+   * public per-request connect-address override. Consequently, addressed polling requests do not
+   * traverse an HTTP proxy configured for the CRT delegate. Ordinary, non-addressed delegate
+   * requests retain the delegate's proxy behavior.
+   *
    * @param tlsConfig the TLS configuration
    * @return a configured SdkHttpClient with small pool size
    */

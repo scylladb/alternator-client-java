@@ -20,7 +20,9 @@ import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -36,24 +38,57 @@ final class LocalNodesResponseParser {
   }
 
   List<URI> parse(String responseBody) throws InvalidLocalNodesResponseException {
-    List<URI> nodes = new ArrayList<>();
-    List<String> hosts = new JsonStringArrayParser(responseBody).parse();
+    Set<URI> nodes = new LinkedHashSet<>();
+    Set<String> hosts = new JsonStringArrayParser(responseBody).parse();
+    int invalidHosts = 0;
+    String invalidSample = null;
     for (String host : hosts) {
       try {
         nodes.add(hostToURI(host));
       } catch (URISyntaxException | MalformedURLException e) {
-        logger.log(Level.WARNING, "Invalid host: " + host, e);
+        invalidHosts++;
+        if (invalidSample == null) {
+          invalidSample = boundedLogSample(host);
+        }
       }
+    }
+    if (invalidHosts > 0) {
+      logger.log(
+          Level.WARNING,
+          "Ignored {0} invalid unique /localnodes host entries; first sample: {1}",
+          new Object[] {invalidHosts, invalidSample});
     }
     if (!hosts.isEmpty() && nodes.isEmpty()) {
       throw new InvalidLocalNodesResponseException(
           "/localnodes response contained no usable host entries");
     }
-    return nodes;
+    return new ArrayList<>(nodes);
+  }
+
+  static String boundedLogSample(String value) {
+    final int maximumCharacters = 160;
+    String source = value == null ? "null" : value;
+    StringBuilder sample = new StringBuilder(Math.min(source.length(), maximumCharacters) + 3);
+    for (int i = 0; i < source.length() && sample.length() < maximumCharacters; i++) {
+      char character = source.charAt(i);
+      sample.append(Character.isISOControl(character) ? '?' : character);
+    }
+    if (sample.length() < source.length()) {
+      sample.append("...");
+    }
+    return sample.toString();
   }
 
   URI hostToURI(String host) throws URISyntaxException, MalformedURLException {
-    URI uri = new URI(alternatorScheme, null, host, alternatorPort, null, null, null);
+    URI uri =
+        new URI(
+            alternatorScheme,
+            null,
+            LogicalHost.withoutBrackets(host),
+            alternatorPort,
+            null,
+            null,
+            null);
     uri.toURL();
     return uri;
   }
@@ -72,8 +107,8 @@ final class LocalNodesResponseParser {
       this.body = body != null ? body : "";
     }
 
-    private List<String> parse() throws InvalidLocalNodesResponseException {
-      List<String> values = new ArrayList<>();
+    private Set<String> parse() throws InvalidLocalNodesResponseException {
+      Set<String> values = new LinkedHashSet<>();
       expect('[');
       skipWhitespace();
       if (peek(']')) {

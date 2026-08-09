@@ -16,6 +16,7 @@
 package com.scylladb.alternator.internal;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
 
 import com.scylladb.alternator.AlternatorConfig;
 import com.scylladb.alternator.TlsConfig;
@@ -24,6 +25,7 @@ import com.sun.net.httpserver.HttpsExchange;
 import com.sun.net.httpserver.HttpsParameters;
 import com.sun.net.httpserver.HttpsServer;
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -46,6 +48,7 @@ import javax.net.ssl.SNIServerName;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSession;
+import org.junit.Assume;
 import org.junit.Test;
 import software.amazon.awssdk.http.SdkHttpClient;
 
@@ -92,12 +95,59 @@ public class AlternatorLiveNodesTlsDnsFallbackTest {
           + "yjoeeX+TJXvn2ikLiFiBbnmFyzBNMDEwDQYJYIZIAWUDBAIBBQAEIF5jNwwiL7lDQpqD+8CjSm5v5uwIvP6zKzffcbE4X/zN"
           + "BBSzS/pH6sWmlZgkwx6kxmCPv+WcZgICJxA=";
 
+  private static final String IPV6_KEYSTORE_BASE64 =
+      "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";
+
   @Test(timeout = 15000)
   public void testApacheHttpsFallbackPreservesLogicalHostnameAndSni() throws Exception {
     assertHttpsFallback(
         (tlsConfig, badAddress, goodAddress) ->
             ApacheSyncClientFactory.createPollingClient(
                 tlsConfig, hostname -> new InetAddress[] {badAddress, goodAddress}));
+  }
+
+  @Test(timeout = 15000)
+  public void testApacheHttpsFallbackNormalizesTrailingDotOnlyForTlsIdentity() throws Exception {
+    assertHttpsFallback(
+        (tlsConfig, badAddress, goodAddress) ->
+            ApacheSyncClientFactory.createPollingClient(
+                tlsConfig, hostname -> new InetAddress[] {badAddress, goodAddress}),
+        "logical.test.",
+        "logical.test");
   }
 
   @Test(timeout = 15000)
@@ -108,6 +158,111 @@ public class AlternatorLiveNodesTlsDnsFallbackTest {
                 TlsConfig.systemDefault(),
                 hostname -> Arrays.asList(badAddress, goodAddress),
                 TlsContextFactory.createSslContext(tlsConfig).getSocketFactory()));
+  }
+
+  @Test(timeout = 15000)
+  public void testCrtHttpsFallbackNormalizesTrailingDotOnlyForTlsIdentity() throws Exception {
+    assertHttpsFallback(
+        (tlsConfig, badAddress, goodAddress) ->
+            CrtSyncClientFactory.createPollingClient(
+                TlsConfig.systemDefault(),
+                hostname -> Arrays.asList(badAddress, goodAddress),
+                TlsContextFactory.createSslContext(tlsConfig).getSocketFactory()),
+        "logical.test.",
+        "logical.test");
+  }
+
+  @Test(timeout = 15000)
+  public void testApacheHttpsFallbackUsesBracketedIpv6AuthorityAndIpCertificateIdentity()
+      throws Exception {
+    assertIpv6HttpsFallback(
+        (tlsConfig, ipv6Loopback, resolvedHost) ->
+            ApacheSyncClientFactory.createPollingClient(
+                tlsConfig,
+                hostname -> {
+                  resolvedHost.set(hostname);
+                  return new InetAddress[] {ipv6Loopback};
+                }));
+  }
+
+  @Test(timeout = 15000)
+  public void testCrtHttpsFallbackUsesBracketedIpv6AuthorityAndIpCertificateIdentity()
+      throws Exception {
+    assertIpv6HttpsFallback(
+        (tlsConfig, ipv6Loopback, resolvedHost) ->
+            CrtSyncClientFactory.createPollingClient(
+                TlsConfig.systemDefault(),
+                hostname -> {
+                  resolvedHost.set(hostname);
+                  return Arrays.asList(ipv6Loopback);
+                },
+                TlsContextFactory.createSslContext(tlsConfig).getSocketFactory()));
+  }
+
+  private static void assertIpv6HttpsFallback(Ipv6PollingClientFactory clientFactory)
+      throws Exception {
+    InetAddress ipv6Loopback = InetAddress.getByName("::1");
+    KeyStore keyStore = loadKeyStore(IPV6_KEYSTORE_BASE64);
+    X509Certificate certificate = (X509Certificate) keyStore.getCertificate("ipv6");
+    assertEquals(1, certificate.getSubjectAlternativeNames().size());
+    assertEquals(7, certificate.getSubjectAlternativeNames().iterator().next().get(0));
+
+    AtomicInteger requests = new AtomicInteger();
+    AtomicReference<String> host = new AtomicReference<>();
+    AtomicReference<String> sni = new AtomicReference<>();
+    HttpsServer server;
+    try {
+      server =
+          startServer(
+              serverContext(keyStore),
+              ipv6Loopback,
+              0,
+              200,
+              "[\"learned.test\"]",
+              requests,
+              host,
+              sni);
+    } catch (IOException exception) {
+      Assume.assumeNoException("IPv6 loopback is unavailable", exception);
+      return;
+    }
+
+    Path caCertificate = Files.createTempFile("ipv6-loopback-test-ca", ".cer");
+    Files.write(caCertificate, certificate.getEncoded());
+    AtomicReference<String> resolvedHost = new AtomicReference<>();
+    SdkHttpClient client = null;
+    try {
+      TlsConfig certificateTrust =
+          TlsConfig.builder()
+              .withCaCertPath(caCertificate)
+              .withTrustSystemCaCerts(false)
+              .withVerifyHostname(true)
+              .build();
+      client = clientFactory.create(certificateTrust, ipv6Loopback, resolvedHost);
+      int port = server.getAddress().getPort();
+      AlternatorLiveNodes liveNodes =
+          new AlternatorLiveNodes(
+              AlternatorConfig.builder()
+                  .withSeedHost("::1")
+                  .withScheme("https")
+                  .withPort(port)
+                  .build(),
+              client);
+
+      liveNodes.updateLiveNodes();
+
+      assertEquals("learned.test", liveNodes.nextAsURI().getHost());
+      assertEquals("::1", resolvedHost.get());
+      assertEquals(1, requests.get());
+      assertEquals("[::1]:" + port, host.get());
+      assertNull("IP literals must not be sent as DNS SNI names", sni.get());
+    } finally {
+      if (client != null) {
+        client.close();
+      }
+      server.stop(0);
+      Files.deleteIfExists(caCertificate);
+    }
   }
 
   @Test(timeout = 15000)
@@ -215,6 +370,12 @@ public class AlternatorLiveNodesTlsDnsFallbackTest {
   }
 
   private static void assertHttpsFallback(PollingClientFactory clientFactory) throws Exception {
+    assertHttpsFallback(clientFactory, "logical.test", "logical.test");
+  }
+
+  private static void assertHttpsFallback(
+      PollingClientFactory clientFactory, String logicalHost, String expectedTlsHost)
+      throws Exception {
     KeyStore keyStore = loadKeyStore();
     Path caCertificate = Files.createTempFile("logical-test-ca", ".cer");
     Certificate certificate = keyStore.getCertificate("logical");
@@ -268,7 +429,7 @@ public class AlternatorLiveNodesTlsDnsFallbackTest {
       client = clientFactory.create(tlsConfig, badAddress, goodAddress);
       AlternatorConfig config =
           AlternatorConfig.builder()
-              .withSeedHost("logical.test")
+              .withSeedHost(logicalHost)
               .withScheme("https")
               .withPort(port)
               .build();
@@ -279,10 +440,10 @@ public class AlternatorLiveNodesTlsDnsFallbackTest {
       assertEquals("learned.test", liveNodes.nextAsURI().getHost());
       assertEquals(1, badRequests.get());
       assertEquals(1, goodRequests.get());
-      assertEquals("logical.test:" + port, badHost.get());
-      assertEquals("logical.test:" + port, goodHost.get());
-      assertEquals("logical.test", badSni.get());
-      assertEquals("logical.test", goodSni.get());
+      assertEquals(logicalHost + ":" + port, badHost.get());
+      assertEquals(logicalHost + ":" + port, goodHost.get());
+      assertEquals(expectedTlsHost, badSni.get());
+      assertEquals(expectedTlsHost, goodSni.get());
     } finally {
       if (client != null) {
         client.close();
@@ -298,8 +459,12 @@ public class AlternatorLiveNodesTlsDnsFallbackTest {
   }
 
   private static KeyStore loadKeyStore() throws Exception {
+    return loadKeyStore(KEYSTORE_BASE64);
+  }
+
+  private static KeyStore loadKeyStore(String encodedKeyStore) throws Exception {
     KeyStore keyStore = KeyStore.getInstance("PKCS12");
-    byte[] encoded = Base64.getDecoder().decode(KEYSTORE_BASE64);
+    byte[] encoded = Base64.getDecoder().decode(encodedKeyStore);
     try (ByteArrayInputStream input = new ByteArrayInputStream(encoded)) {
       keyStore.load(input, KEYSTORE_PASSWORD);
     }
@@ -324,7 +489,7 @@ public class AlternatorLiveNodesTlsDnsFallbackTest {
       AtomicInteger requestCount,
       AtomicReference<String> host,
       AtomicReference<String> sni)
-      throws Exception {
+      throws IOException {
     HttpsServer server = HttpsServer.create(new InetSocketAddress(address, port), 0);
     server.setHttpsConfigurator(
         new HttpsConfigurator(context) {
@@ -366,6 +531,12 @@ public class AlternatorLiveNodesTlsDnsFallbackTest {
 
   private interface PollingClientFactory {
     SdkHttpClient create(TlsConfig tlsConfig, InetAddress badAddress, InetAddress goodAddress)
+        throws Exception;
+  }
+
+  private interface Ipv6PollingClientFactory {
+    SdkHttpClient create(
+        TlsConfig tlsConfig, InetAddress ipv6Loopback, AtomicReference<String> resolvedHost)
         throws Exception;
   }
 }
