@@ -20,6 +20,7 @@ import com.scylladb.alternator.TlsConfig;
 import java.time.Duration;
 import java.util.function.Consumer;
 import java.util.logging.Logger;
+import javax.net.ssl.SSLSocketFactory;
 import software.amazon.awssdk.http.SdkHttpClient;
 import software.amazon.awssdk.http.SdkHttpConfigurationOption;
 import software.amazon.awssdk.http.crt.AwsCrtHttpClient;
@@ -108,6 +109,32 @@ public final class CrtSyncClientFactory {
    */
   public static SdkHttpClient createPollingClient(TlsConfig tlsConfig) {
     validateTlsConfig(tlsConfig);
+    AwsCrtHttpClient.Builder builder = pollingClientBuilder();
+    return new IpDnsFallbackSdkHttpClient(buildWithTls(builder, tlsConfig), tlsConfig);
+  }
+
+  static SdkHttpClient createPollingClient(
+      TlsConfig tlsConfig, IpDnsFallbackSdkHttpClient.Resolver resolver) {
+    validateTlsConfig(tlsConfig);
+    AwsCrtHttpClient.Builder builder = pollingClientBuilder();
+    return new IpDnsFallbackSdkHttpClient(buildWithTls(builder, tlsConfig), tlsConfig, resolver);
+  }
+
+  static SdkHttpClient createPollingClient(
+      TlsConfig tlsConfig,
+      IpDnsFallbackSdkHttpClient.Resolver resolver,
+      SSLSocketFactory sslSocketFactory) {
+    validateTlsConfig(tlsConfig);
+    AwsCrtHttpClient.Builder builder = pollingClientBuilder();
+    return new IpDnsFallbackSdkHttpClient(
+        buildWithTls(builder, tlsConfig),
+        tlsConfig,
+        resolver,
+        sslSocketFactory,
+        IpDnsFallbackSdkHttpClient.DEFAULT_LIMITS);
+  }
+
+  private static AwsCrtHttpClient.Builder pollingClientBuilder() {
     AwsCrtHttpClient.Builder builder = AwsCrtHttpClient.builder();
     builder.tcpKeepAliveConfiguration(
         TcpKeepAliveConfiguration.builder()
@@ -115,8 +142,7 @@ public final class CrtSyncClientFactory {
             .keepAliveTimeout(Duration.ofSeconds(30))
             .build());
     builder.maxConcurrency(4);
-
-    return new IpDnsFallbackSdkHttpClient(buildWithTls(builder, tlsConfig));
+    return builder;
   }
 
   private static SdkHttpClient buildWithTls(AwsCrtHttpClient.Builder builder, TlsConfig tlsConfig) {

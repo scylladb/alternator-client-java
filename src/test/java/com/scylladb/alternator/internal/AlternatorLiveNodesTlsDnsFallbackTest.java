@@ -34,6 +34,7 @@ import java.security.KeyStore;
 import java.security.SecureRandom;
 import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -45,7 +46,6 @@ import javax.net.ssl.SNIServerName;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSession;
-import org.apache.http.conn.DnsResolver;
 import org.junit.Test;
 import software.amazon.awssdk.http.SdkHttpClient;
 
@@ -93,7 +93,128 @@ public class AlternatorLiveNodesTlsDnsFallbackTest {
           + "BBSzS/pH6sWmlZgkwx6kxmCPv+WcZgICJxA=";
 
   @Test(timeout = 15000)
-  public void testHttpsFallbackPreservesLogicalHostnameAndSni() throws Exception {
+  public void testApacheHttpsFallbackPreservesLogicalHostnameAndSni() throws Exception {
+    assertHttpsFallback(
+        (tlsConfig, badAddress, goodAddress) ->
+            ApacheSyncClientFactory.createPollingClient(
+                tlsConfig, hostname -> new InetAddress[] {badAddress, goodAddress}));
+  }
+
+  @Test(timeout = 15000)
+  public void testCrtHttpsFallbackPreservesLogicalHostnameAndSni() throws Exception {
+    assertHttpsFallback(
+        (tlsConfig, badAddress, goodAddress) ->
+            CrtSyncClientFactory.createPollingClient(
+                TlsConfig.systemDefault(),
+                hostname -> Arrays.asList(badAddress, goodAddress),
+                TlsContextFactory.createSslContext(tlsConfig).getSocketFactory()));
+  }
+
+  @Test(timeout = 15000)
+  public void testCrtHttpsFallbackRejectsCertificateForDifferentLogicalHostname() throws Exception {
+    KeyStore keyStore = loadKeyStore();
+    Certificate certificate = keyStore.getCertificate("logical");
+    Path caCertificate = Files.createTempFile("logical-test-ca", ".cer");
+    Files.write(caCertificate, certificate.getEncoded());
+    InetAddress address = InetAddress.getByName("127.0.0.1");
+    AtomicInteger requests = new AtomicInteger();
+    HttpsServer server = null;
+    SdkHttpClient client = null;
+    try {
+      server =
+          startServer(
+              serverContext(keyStore),
+              address,
+              0,
+              200,
+              "[\"learned.test\"]",
+              requests,
+              new AtomicReference<>(),
+              new AtomicReference<>());
+      TlsConfig certificateTrust =
+          TlsConfig.builder()
+              .withCaCertPath(caCertificate)
+              .withTrustSystemCaCerts(false)
+              .withVerifyHostname(true)
+              .build();
+      client =
+          CrtSyncClientFactory.createPollingClient(
+              TlsConfig.systemDefault(),
+              hostname -> Arrays.asList(address),
+              TlsContextFactory.createSslContext(certificateTrust).getSocketFactory());
+      AlternatorLiveNodes liveNodes =
+          new AlternatorLiveNodes(
+              AlternatorConfig.builder()
+                  .withSeedHost("different.test")
+                  .withScheme("https")
+                  .withPort(server.getAddress().getPort())
+                  .build(),
+              client);
+
+      liveNodes.updateLiveNodes();
+
+      assertEquals("different.test", liveNodes.nextAsURI().getHost());
+      assertEquals("TLS hostname validation must fail before an HTTP request", 0, requests.get());
+    } finally {
+      if (client != null) {
+        client.close();
+      }
+      if (server != null) {
+        server.stop(0);
+      }
+      Files.deleteIfExists(caCertificate);
+    }
+  }
+
+  @Test(timeout = 15000)
+  public void testCrtHttpsFallbackHonorsTrustAll() throws Exception {
+    InetAddress address = InetAddress.getByName("127.0.0.1");
+    AtomicInteger requests = new AtomicInteger();
+    AtomicReference<String> host = new AtomicReference<>();
+    AtomicReference<String> sni = new AtomicReference<>();
+    HttpsServer server = null;
+    SdkHttpClient client = null;
+    try {
+      server =
+          startServer(
+              serverContext(loadKeyStore()),
+              address,
+              0,
+              200,
+              "[\"learned.test\"]",
+              requests,
+              host,
+              sni);
+      client =
+          CrtSyncClientFactory.createPollingClient(
+              TlsConfig.trustAll(), hostname -> Arrays.asList(address));
+      int port = server.getAddress().getPort();
+      AlternatorLiveNodes liveNodes =
+          new AlternatorLiveNodes(
+              AlternatorConfig.builder()
+                  .withSeedHost("different.test")
+                  .withScheme("https")
+                  .withPort(port)
+                  .build(),
+              client);
+
+      liveNodes.updateLiveNodes();
+
+      assertEquals("learned.test", liveNodes.nextAsURI().getHost());
+      assertEquals(1, requests.get());
+      assertEquals("different.test:" + port, host.get());
+      assertEquals("different.test", sni.get());
+    } finally {
+      if (client != null) {
+        client.close();
+      }
+      if (server != null) {
+        server.stop(0);
+      }
+    }
+  }
+
+  private static void assertHttpsFallback(PollingClientFactory clientFactory) throws Exception {
     KeyStore keyStore = loadKeyStore();
     Path caCertificate = Files.createTempFile("logical-test-ca", ".cer");
     Certificate certificate = keyStore.getCertificate("logical");
@@ -138,14 +259,13 @@ public class AlternatorLiveNodesTlsDnsFallbackTest {
               badRequests,
               badHost,
               badSni);
-      DnsResolver resolver = hostname -> new InetAddress[] {badAddress, goodAddress};
       TlsConfig tlsConfig =
           TlsConfig.builder()
               .withCaCertPath(caCertificate)
               .withTrustSystemCaCerts(false)
               .withVerifyHostname(true)
               .build();
-      client = ApacheSyncClientFactory.createPollingClient(tlsConfig, resolver);
+      client = clientFactory.create(tlsConfig, badAddress, goodAddress);
       AlternatorConfig config =
           AlternatorConfig.builder()
               .withSeedHost("logical.test")
@@ -242,5 +362,10 @@ public class AlternatorLiveNodesTlsDnsFallbackTest {
       }
     }
     return null;
+  }
+
+  private interface PollingClientFactory {
+    SdkHttpClient create(TlsConfig tlsConfig, InetAddress badAddress, InetAddress goodAddress)
+        throws Exception;
   }
 }

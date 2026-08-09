@@ -770,12 +770,12 @@ public class AlternatorLiveNodes extends Thread {
     }
   }
 
-  private List<URI> parseLocalNodesResponse(String responseStr) {
+  private List<URI> parseLocalNodesResponse(String responseStr) throws IOException {
     try {
       return localNodesResponseParser.parse(responseStr);
     } catch (LocalNodesResponseParser.InvalidLocalNodesResponseException e) {
       logger.log(Level.WARNING, "Malformed /localnodes response: " + responseStr);
-      return Collections.emptyList();
+      throw e;
     }
   }
 

@@ -287,6 +287,27 @@ public class AlternatorLiveNodesScopeFallbackTest {
         nodeHosts.contains("10.0.0.1"));
   }
 
+  @Test
+  public void testWhollyInvalidResponsesTraverseScopeFallbackAndRetainOldNodes() throws Exception {
+    ReachableHttpClient whollyInvalidClient = new ReachableHttpClient("[\"bad host\"]");
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withSeedNode(URI.create("http://10.0.0.1:8000"))
+            .withRoutingScope(
+                RackScope.of("dc1", "rack1", DatacenterScope.of("dc1", ClusterScope.create())))
+            .build();
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, whollyInvalidClient);
+
+    liveNodes.updateLiveNodes();
+
+    assertEquals(
+        "wholly invalid nonempty data must traverse Rack, DC, and Cluster",
+        3,
+        whollyInvalidClient.capturedRequests.size());
+    assertEquals(1, liveNodes.getLiveNodes().size());
+    assertEquals("10.0.0.1", liveNodes.getLiveNodes().get(0).getHost());
+  }
+
   /**
    * Verifies that repeated updateLiveNodes() calls with all-unreachable discovered nodes should
    * eventually try the seed nodes, allowing recovery if the seeds are still alive.

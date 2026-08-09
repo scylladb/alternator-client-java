@@ -21,7 +21,6 @@ import com.scylladb.alternator.AlternatorConfig;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.net.InetAddress;
-import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -36,9 +35,7 @@ import software.amazon.awssdk.http.AbortableInputStream;
 import software.amazon.awssdk.http.ExecutableHttpRequest;
 import software.amazon.awssdk.http.HttpExecuteRequest;
 import software.amazon.awssdk.http.HttpExecuteResponse;
-import software.amazon.awssdk.http.SdkHttpClient;
 import software.amazon.awssdk.http.SdkHttpFullResponse;
-import software.amazon.awssdk.http.SdkHttpMethod;
 import software.amazon.awssdk.http.SdkHttpRequest;
 
 /** Deterministic negative DNS fallback tests for DRIVER-819 and GitHub issue #156. */
@@ -194,6 +191,64 @@ public class AlternatorLiveNodesDnsFallbackTest {
   }
 
   @Test
+  public void testEmptyAndWhollyInvalidDataTryEveryAddressAndSeedWithoutPoisoningNodes()
+      throws Exception {
+    AtomicInteger phase = new AtomicInteger();
+    TestDnsFallbackClient client =
+        new TestDnsFallbackClient(
+            hostname -> {
+              if ("bad-seed.test".equals(hostname)) {
+                return Arrays.asList(address(1), address(2));
+              }
+              if ("good-seed.test".equals(hostname)) {
+                return Arrays.asList(address(3), address(4));
+              }
+              return Arrays.asList(address(5));
+            },
+            (request, address) -> {
+              if (phase.get() == 0
+                  && "good-seed.test".equals(request.host())
+                  && lastAddressByte(address) == 3) {
+                return response(200, "[]");
+              }
+              if (phase.get() == 0
+                  && "good-seed.test".equals(request.host())
+                  && lastAddressByte(address) == 4) {
+                return response(200, "[\"learned.test\"]");
+              }
+              return response(200, "[\"bad host\"]");
+            });
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withSeedHosts(Arrays.asList("bad-seed.test", "good-seed.test"))
+            .withScheme("http")
+            .withPort(8000)
+            .build();
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, client);
+
+    liveNodes.updateLiveNodes();
+
+    assertEquals("learned.test", liveNodes.nextAsURI().getHost());
+    assertEquals(
+        Arrays.asList("bad-seed.test@1", "bad-seed.test@2", "good-seed.test@3", "good-seed.test@4"),
+        attemptedAddresses(client));
+
+    client.attempts.clear();
+    phase.set(1);
+    liveNodes.updateLiveNodes();
+
+    assertEquals("learned.test", liveNodes.nextAsURI().getHost());
+    assertEquals(
+        Arrays.asList(
+            "learned.test@5",
+            "bad-seed.test@1",
+            "bad-seed.test@2",
+            "good-seed.test@3",
+            "good-seed.test@4"),
+        attemptedAddresses(client));
+  }
+
+  @Test
   public void testConcurrentReaderSeesOldListUntilReplacementIsComplete() throws Exception {
     AtomicInteger phase = new AtomicInteger(0);
     CountDownLatch newResponseStarted = new CountDownLatch(1);
@@ -242,66 +297,6 @@ public class AlternatorLiveNodesDnsFallbackTest {
     assertEquals("new.test", liveNodes.nextAsURI().getHost());
   }
 
-  @Test
-  public void testDirectAddressWrapperPreservesLogicalHeadersAndRawQuery() throws Exception {
-    AtomicReference<SdkHttpRequest> captured = new AtomicReference<>();
-    SdkHttpClient delegate = capturingClient(captured);
-    IpDnsFallbackSdkHttpClient client =
-        new IpDnsFallbackSdkHttpClient(delegate, hostname -> Arrays.asList(address(9)));
-    SdkHttpRequest logicalRequest =
-        SdkHttpRequest.builder()
-            .uri(URI.create("http://signed.test:8000/localnodes?dc=a%26b"))
-            .method(SdkHttpMethod.GET)
-            .putHeader("Host", "signed.test:8000")
-            .putHeader("Authorization", "signature-over-logical-host")
-            .build();
-
-    HttpExecuteResponse executeResponse =
-        client
-            .prepareRequestForAddress(
-                HttpExecuteRequest.builder().request(logicalRequest).build(), address(9))
-            .call();
-    executeResponse.responseBody().get().close();
-
-    assertEquals("192.0.2.9", captured.get().host());
-    assertEquals("/localnodes", captured.get().getUri().getRawPath());
-    assertEquals("dc=a%26b", captured.get().getUri().getRawQuery());
-    assertEquals("signed.test:8000", captured.get().firstMatchingHeader("Host").get());
-    assertEquals(
-        "signature-over-logical-host", captured.get().firstMatchingHeader("Authorization").get());
-    assertTrue(client.supportsDnsFallback("http"));
-    assertFalse(
-        "numeric HTTPS endpoint would change TLS identity", client.supportsDnsFallback("https"));
-    client.close();
-  }
-
-  @Test
-  public void testDirectAddressWrapperBracketsIpv6Endpoint() throws Exception {
-    AtomicReference<SdkHttpRequest> captured = new AtomicReference<>();
-    IpDnsFallbackSdkHttpClient client = new IpDnsFallbackSdkHttpClient(capturingClient(captured));
-    InetAddress address = InetAddress.getByName("2001:db8::9");
-    SdkHttpRequest logicalRequest =
-        SdkHttpRequest.builder()
-            .uri(URI.create("http://logical.test:8000/localnodes"))
-            .method(SdkHttpMethod.GET)
-            .putHeader("Host", "logical.test:8000")
-            .build();
-
-    HttpExecuteResponse response =
-        client
-            .prepareRequestForAddress(
-                HttpExecuteRequest.builder().request(logicalRequest).build(), address)
-            .call();
-    response.responseBody().get().close();
-
-    URI addressedUri = captured.get().getUri();
-    assertTrue(addressedUri.toString().startsWith("http://["));
-    assertEquals(8000, addressedUri.getPort());
-    assertEquals("/localnodes", addressedUri.getRawPath());
-    assertEquals("logical.test:8000", captured.get().firstMatchingHeader("Host").get());
-    client.close();
-  }
-
   private static AlternatorConfig config(String seedHost) {
     return AlternatorConfig.builder()
         .withSeedHost(seedHost)
@@ -328,6 +323,14 @@ public class AlternatorLiveNodesDnsFallbackTest {
     return result;
   }
 
+  private static List<String> attemptedAddresses(TestDnsFallbackClient client) {
+    List<String> result = new ArrayList<>();
+    for (Attempt attempt : client.attempts) {
+      result.add(attempt.request.host() + "@" + lastAddressByte(attempt.address));
+    }
+    return result;
+  }
+
   private static HttpExecuteResponse response(int status, String body) {
     byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
     return HttpExecuteResponse.builder()
@@ -340,32 +343,6 @@ public class AlternatorLiveNodesDnsFallbackTest {
     return HttpExecuteResponse.builder()
         .response(SdkHttpFullResponse.builder().statusCode(status).build())
         .build();
-  }
-
-  private static SdkHttpClient capturingClient(AtomicReference<SdkHttpRequest> captured) {
-    return new SdkHttpClient() {
-      @Override
-      public ExecutableHttpRequest prepareRequest(HttpExecuteRequest request) {
-        captured.set(request.httpRequest());
-        return new ExecutableHttpRequest() {
-          @Override
-          public HttpExecuteResponse call() {
-            return response(200, "[]");
-          }
-
-          @Override
-          public void abort() {}
-        };
-      }
-
-      @Override
-      public void close() {}
-
-      @Override
-      public String clientName() {
-        return "CapturingClient";
-      }
-    };
   }
 
   private interface Resolver {

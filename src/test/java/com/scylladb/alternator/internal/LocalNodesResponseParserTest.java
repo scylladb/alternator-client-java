@@ -53,6 +53,12 @@ public class LocalNodesResponseParserTest {
   }
 
   @Test
+  public void rejectsNonemptyArraysWithNoUsableHosts() throws Exception {
+    assertMalformed("[\"bad host\"]");
+    assertMalformed("[\"bad host\",\"also bad host\"]");
+  }
+
+  @Test
   public void rejectsMalformedBodies() throws Exception {
     assertMalformed("");
     assertMalformed("not-json");

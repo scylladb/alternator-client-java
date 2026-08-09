@@ -37,12 +37,17 @@ final class LocalNodesResponseParser {
 
   List<URI> parse(String responseBody) throws InvalidLocalNodesResponseException {
     List<URI> nodes = new ArrayList<>();
-    for (String host : new JsonStringArrayParser(responseBody).parse()) {
+    List<String> hosts = new JsonStringArrayParser(responseBody).parse();
+    for (String host : hosts) {
       try {
         nodes.add(hostToURI(host));
       } catch (URISyntaxException | MalformedURLException e) {
         logger.log(Level.WARNING, "Invalid host: " + host, e);
       }
+    }
+    if (!hosts.isEmpty() && nodes.isEmpty()) {
+      throw new InvalidLocalNodesResponseException(
+          "/localnodes response contained no usable host entries");
     }
     return nodes;
   }

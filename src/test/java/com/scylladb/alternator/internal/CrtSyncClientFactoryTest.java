@@ -163,9 +163,7 @@ public class CrtSyncClientFactoryTest {
     assertTrue(client instanceof DnsFallbackSdkHttpClient);
     DnsFallbackSdkHttpClient fallbackClient = (DnsFallbackSdkHttpClient) client;
     assertTrue(fallbackClient.supportsDnsFallback("http"));
-    assertFalse(
-        "CRT cannot override the connect address while retaining logical TLS identity",
-        fallbackClient.supportsDnsFallback("https"));
+    assertTrue(fallbackClient.supportsDnsFallback("https"));
     client.close();
   }
 
