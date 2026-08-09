@@ -20,6 +20,8 @@ import static org.junit.Assert.*;
 import java.io.ByteArrayInputStream;
 import java.net.InetAddress;
 import java.net.URI;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.http.conn.DnsResolver;
@@ -98,6 +100,38 @@ public class ApacheDnsFallbackSdkHttpClientTest {
     assertTrue(baseClient.closed.get());
     assertTrue(addressClient.get().closed.get());
     response.responseBody().get().close();
+  }
+
+  @Test
+  public void testCompletedAddressRequestsDoNotAccumulateClients() throws Exception {
+    InetAddress address = InetAddress.getByName("192.0.2.3");
+    TrackingClient baseClient = new TrackingClient();
+    List<TrackingClient> addressClients = new ArrayList<>();
+    ApacheDnsFallbackSdkHttpClient client =
+        new ApacheDnsFallbackSdkHttpClient(
+            baseClient,
+            hostname -> new InetAddress[] {address},
+            (hostname, resolvedAddress) -> {
+              TrackingClient created = new TrackingClient();
+              addressClients.add(created);
+              return created;
+            });
+
+    for (int i = 0; i < 32; i++) {
+      HttpExecuteResponse response =
+          client
+              .prepareRequestForAddress(
+                  HttpExecuteRequest.builder().request(logicalRequest()).build(), address)
+              .call();
+      response.responseBody().get().close();
+      assertTrue(
+          "completed request must close its one-shot client", addressClients.get(i).closed.get());
+    }
+
+    assertEquals(32, addressClients.size());
+    assertFalse(baseClient.closed.get());
+    client.close();
+    assertTrue(baseClient.closed.get());
   }
 
   private static SdkHttpRequest logicalRequest() {

@@ -167,6 +167,32 @@ public class AlternatorLiveNodesDnsFallbackTest {
     assertEquals(3, resolutionAttempt.get());
   }
 
+  @Test(timeout = 5000)
+  public void testAllFailedAddressesAreAttemptedOnceAndCycleIsBounded() throws Exception {
+    List<InetAddress> resolved = new ArrayList<>();
+    List<Integer> expectedAttempts = new ArrayList<>();
+    for (int i = 1; i <= 32; i++) {
+      resolved.add(address(i));
+      resolved.add(address(i));
+      expectedAttempts.add(i);
+    }
+    AtomicInteger resolutions = new AtomicInteger();
+    TestDnsFallbackClient client =
+        new TestDnsFallbackClient(
+            hostname -> {
+              resolutions.incrementAndGet();
+              return resolved;
+            },
+            (request, address) -> response(503, "temporarily unavailable"));
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config("seed.test"), client);
+
+    liveNodes.updateLiveNodes();
+
+    assertEquals("seed.test", liveNodes.nextAsURI().getHost());
+    assertEquals("hostname must be resolved once for the cycle", 1, resolutions.get());
+    assertEquals(expectedAttempts, attemptedAddressBytes(client));
+  }
+
   @Test
   public void testConcurrentReaderSeesOldListUntilReplacementIsComplete() throws Exception {
     AtomicInteger phase = new AtomicInteger(0);

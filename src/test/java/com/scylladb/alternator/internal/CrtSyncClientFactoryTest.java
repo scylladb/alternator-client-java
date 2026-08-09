@@ -160,6 +160,12 @@ public class CrtSyncClientFactoryTest {
   public void testCreatePollingClient() {
     SdkHttpClient client = CrtSyncClientFactory.createPollingClient(null);
     assertNotNull("Should create polling client", client);
+    assertTrue(client instanceof DnsFallbackSdkHttpClient);
+    DnsFallbackSdkHttpClient fallbackClient = (DnsFallbackSdkHttpClient) client;
+    assertTrue(fallbackClient.supportsDnsFallback("http"));
+    assertFalse(
+        "CRT cannot override the connect address while retaining logical TLS identity",
+        fallbackClient.supportsDnsFallback("https"));
     client.close();
   }
 

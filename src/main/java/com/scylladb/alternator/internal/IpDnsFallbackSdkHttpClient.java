@@ -24,7 +24,15 @@ import software.amazon.awssdk.http.HttpExecuteRequest;
 import software.amazon.awssdk.http.SdkHttpClient;
 import software.amazon.awssdk.http.SdkHttpRequest;
 
-/** Address-aware wrapper for transports that can safely use a numeric HTTP request endpoint. */
+/**
+ * Address-aware wrapper for transports that can safely use a numeric HTTP request endpoint.
+ *
+ * <p>HTTPS is intentionally unsupported. The public {@code AwsCrtHttpClient.Builder} API does not
+ * expose a DNS resolver, a connection-address override, or the underlying CRT TLS server-name
+ * option. Replacing the URI hostname would therefore change SNI and certificate verification to the
+ * numeric address. Implementing the required address/server-name split would require unstable AWS
+ * SDK internal APIs or a separate HTTP transport implementation.
+ */
 final class IpDnsFallbackSdkHttpClient implements DnsFallbackSdkHttpClient {
 
   interface Resolver {
@@ -45,6 +53,7 @@ final class IpDnsFallbackSdkHttpClient implements DnsFallbackSdkHttpClient {
 
   @Override
   public boolean supportsDnsFallback(String scheme) {
+    // A logical Host header is sufficient for plain HTTP. It cannot restore TLS identity.
     return "http".equalsIgnoreCase(scheme);
   }
 
