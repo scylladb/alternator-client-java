@@ -160,10 +160,6 @@ public class CrtSyncClientFactoryTest {
   public void testCreatePollingClient() {
     SdkHttpClient client = CrtSyncClientFactory.createPollingClient(null);
     assertNotNull("Should create polling client", client);
-    assertTrue(client instanceof DnsFallbackSdkHttpClient);
-    DnsFallbackSdkHttpClient fallbackClient = (DnsFallbackSdkHttpClient) client;
-    assertTrue(fallbackClient.supportsDnsFallback("http"));
-    assertTrue(fallbackClient.supportsDnsFallback("https"));
     client.close();
   }
 

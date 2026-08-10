@@ -148,52 +148,61 @@ public class AlternatorLiveNodesDnsDiscoveryTest {
     }
   }
 
-  /** Verifies Apache retries another resolved address after an application-level failure. */
+  /** Verifies refresh retries the original DNS seed after every learned node is unavailable. */
   @Test(timeout = 10000)
-  public void testApacheDnsFallbackAfterNonSuccessfulLocalNodesResponse() throws Exception {
-    InetAddress goodAddress = InetAddress.getByName("127.0.0.1");
-    InetAddress badAddress = InetAddress.getByName("127.0.0.2");
-    AtomicInteger badRequests = new AtomicInteger();
-    AtomicInteger goodRequests = new AtomicInteger();
-    AtomicReference<String> badHostHeader = new AtomicReference<>();
-    AtomicReference<String> goodHostHeader = new AtomicReference<>();
-    HttpServer goodServer =
+  public void testRefreshReresolvesInitialDnsEntrypoint() throws Exception {
+    InetAddress initialSeedAddress = InetAddress.getByName("127.0.0.2");
+    InetAddress oldNodeAddress = InetAddress.getByName("127.0.0.3");
+    InetAddress recoveredAddress = InetAddress.getByName("127.0.0.4");
+    AtomicInteger recoveryRequests = new AtomicInteger();
+    AtomicReference<String> recoveryHostHeader = new AtomicReference<>();
+
+    HttpServer initialSeedServer =
         startServer(
-            goodAddress,
-            0,
-            200,
-            "[\"learned.test\"]",
-            exchange -> {
-              goodRequests.incrementAndGet();
-              goodHostHeader.set(exchange.getRequestHeaders().getFirst("Host"));
-            });
-    int dnsPort = goodServer.getAddress().getPort();
-    HttpServer badServer =
+            initialSeedAddress,
+            "[\"127.0.0.3\"]",
+            exchange -> exchange.getResponseHeaders().add("Connection", "close"));
+    int dnsPort = initialSeedServer.getAddress().getPort();
+    HttpServer oldNodeServer =
+        startServer(oldNodeAddress, dnsPort, "[\"127.0.0.3\"]", exchange -> {});
+    HttpServer recoveredServer =
         startServer(
-            badAddress,
+            recoveredAddress,
             dnsPort,
-            503,
-            "temporarily unavailable",
+            "[\"127.0.0.4\"]",
             exchange -> {
-              badRequests.incrementAndGet();
-              badHostHeader.set(exchange.getRequestHeaders().getFirst("Host"));
+              recoveryRequests.incrementAndGet();
+              recoveryHostHeader.set(exchange.getRequestHeaders().getFirst("Host"));
             });
-    DnsResolver resolver = hostname -> new InetAddress[] {badAddress, goodAddress};
-    SdkHttpClient httpClient = ApacheSyncClientFactory.createPollingClient(null, resolver);
+
+    AtomicReference<InetAddress[]> dnsAnswers =
+        new AtomicReference<>(new InetAddress[] {initialSeedAddress});
+    SdkHttpClient httpClient =
+        apacheClient(
+            hostname ->
+                "dual.test".equals(hostname)
+                    ? dnsAnswers.get()
+                    : InetAddress.getAllByName(hostname));
     try {
       AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(dnsConfig(dnsPort), httpClient);
 
       liveNodes.updateLiveNodes();
+      assertEquals("127.0.0.3", liveNodes.nextAsURI().getHost());
 
-      assertEquals("learned.test", liveNodes.nextAsURI().getHost());
-      assertEquals(1, badRequests.get());
-      assertEquals(1, goodRequests.get());
-      assertEquals("dual.test:" + dnsPort, badHostHeader.get());
-      assertEquals("dual.test:" + dnsPort, goodHostHeader.get());
+      initialSeedServer.stop(0);
+      oldNodeServer.stop(0);
+      dnsAnswers.set(new InetAddress[] {oldNodeAddress, recoveredAddress});
+
+      liveNodes.updateLiveNodes();
+
+      assertEquals("127.0.0.4", liveNodes.nextAsURI().getHost());
+      assertEquals(1, recoveryRequests.get());
+      assertEquals("dual.test:" + dnsPort, recoveryHostHeader.get());
     } finally {
       httpClient.close();
-      badServer.stop(0);
-      goodServer.stop(0);
+      initialSeedServer.stop(0);
+      oldNodeServer.stop(0);
+      recoveredServer.stop(0);
     }
   }
 
@@ -206,18 +215,7 @@ public class AlternatorLiveNodesDnsDiscoveryTest {
             "[\"dual.test\"]",
             exchange -> hostHeader.set(exchange.getRequestHeaders().getFirst("Host")));
     int dnsPort = dnsServer.getAddress().getPort();
-    HttpServer badServer = null;
-    if (resolvedAddresses.length > 1 && !listenAddress.equals(resolvedAddresses[0])) {
-      badServer =
-          startServer(
-              resolvedAddresses[0],
-              dnsPort,
-              503,
-              "wrong address",
-              exchange -> hostHeader.set(exchange.getRequestHeaders().getFirst("Host")));
-    }
-    DnsResolver resolver = host -> resolvedAddresses;
-    SdkHttpClient httpClient = ApacheSyncClientFactory.createPollingClient(null, resolver);
+    SdkHttpClient httpClient = apacheClient(host -> resolvedAddresses);
     try {
       AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(dnsConfig(dnsPort), httpClient);
 
@@ -228,9 +226,6 @@ public class AlternatorLiveNodesDnsDiscoveryTest {
       assertEquals("dual.test:" + dnsPort, hostHeader.get());
     } finally {
       httpClient.close();
-      if (badServer != null) {
-        badServer.stop(0);
-      }
       dnsServer.stop(0);
     }
   }
@@ -257,15 +252,11 @@ public class AlternatorLiveNodesDnsDiscoveryTest {
   private HttpServer startServer(
       InetAddress listenAddress, String responseBody, ExchangeObserver observer)
       throws IOException {
-    return startServer(listenAddress, 0, 200, responseBody, observer);
+    return startServer(listenAddress, 0, responseBody, observer);
   }
 
   private HttpServer startServer(
-      InetAddress listenAddress,
-      int listenPort,
-      int statusCode,
-      String responseBody,
-      ExchangeObserver observer)
+      InetAddress listenAddress, int listenPort, String responseBody, ExchangeObserver observer)
       throws IOException {
     HttpServer httpServer = HttpServer.create(new InetSocketAddress(listenAddress, listenPort), 0);
     httpServer.createContext(
@@ -273,7 +264,7 @@ public class AlternatorLiveNodesDnsDiscoveryTest {
         exchange -> {
           observer.observe(exchange);
           byte[] body = responseBody.getBytes();
-          exchange.sendResponseHeaders(statusCode, body.length);
+          exchange.sendResponseHeaders(200, body.length);
           try (OutputStream output = exchange.getResponseBody()) {
             output.write(body);
           }

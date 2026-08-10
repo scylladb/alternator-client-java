@@ -17,14 +17,9 @@ package com.scylladb.alternator;
 
 import static org.junit.Assert.*;
 
-import com.scylladb.alternator.internal.DnsFallbackSdkHttpClient;
 import java.io.ByteArrayInputStream;
-import java.io.IOException;
-import java.net.InetAddress;
 import java.net.URI;
-import java.util.Arrays;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Set;
 import org.junit.Test;
 import software.amazon.awssdk.http.ContentStreamProvider;
@@ -66,43 +61,6 @@ public class UserAgentSdkHttpClientTest {
     public String clientName() {
       return "mock";
     }
-  }
-
-  private static class MockDnsFallbackClient extends MockSdkHttpClient
-      implements DnsFallbackSdkHttpClient {
-    long capturedTimeoutMillis = -1;
-
-    @Override
-    public boolean supportsDnsFallback(String scheme) {
-      return true;
-    }
-
-    @Override
-    public List<InetAddress> resolve(String hostname) throws IOException {
-      return Arrays.asList(InetAddress.getByName("127.0.0.1"));
-    }
-
-    @Override
-    public List<InetAddress> resolve(String hostname, long timeoutMillis) throws IOException {
-      capturedTimeoutMillis = timeoutMillis;
-      return resolve(hostname);
-    }
-
-    @Override
-    public ExecutableHttpRequest prepareRequestForAddress(
-        HttpExecuteRequest request, InetAddress address) {
-      return prepareRequest(request);
-    }
-  }
-
-  @Test
-  public void testDnsFallbackForwardsCallerResolutionDeadline() throws Exception {
-    MockDnsFallbackClient mockClient = new MockDnsFallbackClient();
-    UserAgentSdkHttpClient client =
-        new UserAgentSdkHttpClient(mockClient, AlternatorUserAgent.defaultUserAgent());
-
-    assertEquals(InetAddress.getByName("127.0.0.1"), client.resolve("logical.test", 17).get(0));
-    assertEquals(17, mockClient.capturedTimeoutMillis);
   }
 
   @Test
@@ -227,22 +185,6 @@ public class UserAgentSdkHttpClientTest {
     client.close();
 
     assertTrue(mockClient.closeCalled);
-  }
-
-  @Test
-  public void testDnsFallbackCapabilityTransformsAddressedRequest() throws Exception {
-    MockDnsFallbackClient mockClient = new MockDnsFallbackClient();
-    UserAgentSdkHttpClient client =
-        new UserAgentSdkHttpClient(mockClient, AlternatorUserAgent.replaceWith("custom/1"));
-
-    assertTrue(client.supportsDnsFallback("https"));
-    assertEquals(1, client.resolve("localhost").size());
-    client.prepareRequestForAddress(
-        HttpExecuteRequest.builder().request(request("aws-sdk-java/2.x")).build(),
-        InetAddress.getByName("127.0.0.1"));
-
-    assertEquals("custom/1", mockClient.capturedRequest.firstMatchingHeader("User-Agent").get());
-    assertEquals("localhost:8043", mockClient.capturedRequest.firstMatchingHeader("Host").get());
   }
 
   private SdkHttpRequest request(String userAgent) {

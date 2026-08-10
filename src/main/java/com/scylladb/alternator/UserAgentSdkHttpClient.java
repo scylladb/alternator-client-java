@@ -15,10 +15,6 @@
  */
 package com.scylladb.alternator;
 
-import com.scylladb.alternator.internal.DnsFallbackSdkHttpClient;
-import java.io.IOException;
-import java.net.InetAddress;
-import java.util.List;
 import java.util.function.UnaryOperator;
 import software.amazon.awssdk.http.ExecutableHttpRequest;
 import software.amazon.awssdk.http.HttpExecuteRequest;
@@ -26,7 +22,7 @@ import software.amazon.awssdk.http.SdkHttpClient;
 import software.amazon.awssdk.http.SdkHttpRequest;
 
 /** A wrapper around SdkHttpClient that rewrites or removes the User-Agent header. */
-class UserAgentSdkHttpClient implements SdkHttpClient, DnsFallbackSdkHttpClient {
+class UserAgentSdkHttpClient implements SdkHttpClient {
   private final SdkHttpClient delegate;
   private final UnaryOperator<String> userAgentTransformer;
 
@@ -37,52 +33,16 @@ class UserAgentSdkHttpClient implements SdkHttpClient, DnsFallbackSdkHttpClient 
 
   @Override
   public ExecutableHttpRequest prepareRequest(HttpExecuteRequest request) {
-    return delegate.prepareRequest(transform(request));
-  }
-
-  @Override
-  public boolean supportsDnsFallback(String scheme) {
-    return delegate instanceof DnsFallbackSdkHttpClient
-        && ((DnsFallbackSdkHttpClient) delegate).supportsDnsFallback(scheme);
-  }
-
-  @Override
-  public List<InetAddress> resolve(String hostname) throws IOException {
-    return dnsFallbackDelegate().resolve(hostname);
-  }
-
-  @Override
-  public List<InetAddress> resolve(String hostname, long timeoutMillis) throws IOException {
-    return dnsFallbackDelegate().resolve(hostname, timeoutMillis);
-  }
-
-  @Override
-  public List<InetAddress> resolve(String hostname, long timeoutMillis, boolean seedCandidate)
-      throws IOException {
-    return dnsFallbackDelegate().resolve(hostname, timeoutMillis, seedCandidate);
-  }
-
-  @Override
-  public ExecutableHttpRequest prepareRequestForAddress(
-      HttpExecuteRequest request, InetAddress address) {
-    return dnsFallbackDelegate().prepareRequestForAddress(transform(request), address);
-  }
-
-  private HttpExecuteRequest transform(HttpExecuteRequest request) {
     SdkHttpRequest transformedRequest =
         AlternatorUserAgent.transform(request.httpRequest(), userAgentTransformer);
 
-    return HttpExecuteRequest.builder()
-        .request(transformedRequest)
-        .contentStreamProvider(request.contentStreamProvider().orElse(null))
-        .build();
-  }
+    HttpExecuteRequest transformedExecuteRequest =
+        HttpExecuteRequest.builder()
+            .request(transformedRequest)
+            .contentStreamProvider(request.contentStreamProvider().orElse(null))
+            .build();
 
-  private DnsFallbackSdkHttpClient dnsFallbackDelegate() {
-    if (!(delegate instanceof DnsFallbackSdkHttpClient)) {
-      throw new UnsupportedOperationException("Delegate does not support DNS address fallback");
-    }
-    return (DnsFallbackSdkHttpClient) delegate;
+    return delegate.prepareRequest(transformedExecuteRequest);
   }
 
   @Override

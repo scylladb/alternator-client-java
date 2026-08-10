@@ -20,7 +20,6 @@ import com.scylladb.alternator.TlsConfig;
 import java.time.Duration;
 import java.util.function.Consumer;
 import java.util.logging.Logger;
-import javax.net.ssl.SSLSocketFactory;
 import software.amazon.awssdk.http.SdkHttpClient;
 import software.amazon.awssdk.http.SdkHttpConfigurationOption;
 import software.amazon.awssdk.http.crt.AwsCrtHttpClient;
@@ -104,42 +103,11 @@ public final class CrtSyncClientFactory {
   /**
    * Creates a small sync HTTP client for LiveNodes polling using CRT.
    *
-   * <p>Per-address live-node fallback uses a direct one-shot socket because CRT does not expose a
-   * public per-request connect-address override. Consequently, addressed polling requests do not
-   * traverse an HTTP proxy configured for the CRT delegate. Ordinary, non-addressed delegate
-   * requests retain the delegate's proxy behavior.
-   *
    * @param tlsConfig the TLS configuration
    * @return a configured SdkHttpClient with small pool size
    */
   public static SdkHttpClient createPollingClient(TlsConfig tlsConfig) {
     validateTlsConfig(tlsConfig);
-    AwsCrtHttpClient.Builder builder = pollingClientBuilder();
-    return new IpDnsFallbackSdkHttpClient(buildWithTls(builder, tlsConfig), tlsConfig);
-  }
-
-  static SdkHttpClient createPollingClient(
-      TlsConfig tlsConfig, IpDnsFallbackSdkHttpClient.Resolver resolver) {
-    validateTlsConfig(tlsConfig);
-    AwsCrtHttpClient.Builder builder = pollingClientBuilder();
-    return new IpDnsFallbackSdkHttpClient(buildWithTls(builder, tlsConfig), tlsConfig, resolver);
-  }
-
-  static SdkHttpClient createPollingClient(
-      TlsConfig tlsConfig,
-      IpDnsFallbackSdkHttpClient.Resolver resolver,
-      SSLSocketFactory sslSocketFactory) {
-    validateTlsConfig(tlsConfig);
-    AwsCrtHttpClient.Builder builder = pollingClientBuilder();
-    return new IpDnsFallbackSdkHttpClient(
-        buildWithTls(builder, tlsConfig),
-        tlsConfig,
-        resolver,
-        sslSocketFactory,
-        IpDnsFallbackSdkHttpClient.DEFAULT_LIMITS);
-  }
-
-  private static AwsCrtHttpClient.Builder pollingClientBuilder() {
     AwsCrtHttpClient.Builder builder = AwsCrtHttpClient.builder();
     builder.tcpKeepAliveConfiguration(
         TcpKeepAliveConfiguration.builder()
@@ -147,7 +115,8 @@ public final class CrtSyncClientFactory {
             .keepAliveTimeout(Duration.ofSeconds(30))
             .build());
     builder.maxConcurrency(4);
-    return builder;
+
+    return buildWithTls(builder, tlsConfig);
   }
 
   private static SdkHttpClient buildWithTls(AwsCrtHttpClient.Builder builder, TlsConfig tlsConfig) {

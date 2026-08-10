@@ -16,8 +16,6 @@
 package com.scylladb.alternator;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -115,58 +113,6 @@ public class AlternatorDynamoDbClientWrapperShutdownTest {
     assertEquals(Arrays.asList("resolver", "live-nodes", "polling-client", "client"), events);
   }
 
-  @Test
-  public void testSyncWrapperClosesMainClientWhenPollingCloseFails() {
-    List<String> events = new ArrayList<>();
-    TrackingLiveNodes liveNodes = new TrackingLiveNodes(events);
-    TrackingPollingClient pollingClient = new TrackingPollingClient(events, true);
-    DynamoDbClient client = mock(DynamoDbClient.class);
-    doAnswer(
-            invocation -> {
-              events.add("client");
-              return null;
-            })
-        .when(client)
-        .close();
-    AlternatorDynamoDbClientWrapper wrapper =
-        new AlternatorDynamoDbClientWrapper(client, liveNodes, null, null, pollingClient);
-
-    try {
-      wrapper.close();
-      fail("Expected polling close failure");
-    } catch (RuntimeException e) {
-      assertTrue(e.getMessage(), e.getMessage().contains("polling close failed"));
-    }
-
-    assertEquals(Arrays.asList("live-nodes", "polling-client", "client"), events);
-  }
-
-  @Test
-  public void testAsyncWrapperClosesMainClientWhenPollingCloseFails() {
-    List<String> events = new ArrayList<>();
-    TrackingLiveNodes liveNodes = new TrackingLiveNodes(events);
-    TrackingPollingClient pollingClient = new TrackingPollingClient(events, true);
-    DynamoDbAsyncClient client = mock(DynamoDbAsyncClient.class);
-    doAnswer(
-            invocation -> {
-              events.add("client");
-              return null;
-            })
-        .when(client)
-        .close();
-    AlternatorDynamoDbAsyncClientWrapper wrapper =
-        new AlternatorDynamoDbAsyncClientWrapper(client, liveNodes, null, pollingClient);
-
-    try {
-      wrapper.close();
-      fail("Expected polling close failure");
-    } catch (RuntimeException e) {
-      assertTrue(e.getMessage(), e.getMessage().contains("polling close failed"));
-    }
-
-    assertEquals(Arrays.asList("live-nodes", "polling-client", "client"), events);
-  }
-
   private static final class TrackingLiveNodes extends AlternatorLiveNodes {
     private final List<String> events;
 
@@ -202,15 +148,9 @@ public class AlternatorDynamoDbClientWrapperShutdownTest {
 
   private static final class TrackingPollingClient implements SdkHttpClient {
     private final List<String> events;
-    private final boolean failOnClose;
 
     private TrackingPollingClient(List<String> events) {
-      this(events, false);
-    }
-
-    private TrackingPollingClient(List<String> events, boolean failOnClose) {
       this.events = events;
-      this.failOnClose = failOnClose;
     }
 
     @Override
@@ -221,9 +161,6 @@ public class AlternatorDynamoDbClientWrapperShutdownTest {
     @Override
     public void close() {
       events.add("polling-client");
-      if (failOnClose) {
-        throw new RuntimeException("polling close failed");
-      }
     }
 
     @Override

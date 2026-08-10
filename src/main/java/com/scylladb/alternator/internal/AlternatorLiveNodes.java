@@ -21,18 +21,12 @@ import com.scylladb.alternator.routing.DatacenterScope;
 import com.scylladb.alternator.routing.RackScope;
 import com.scylladb.alternator.routing.RoutingScope;
 import java.io.IOException;
-import java.io.InterruptedIOException;
-import java.net.InetAddress;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
 import java.net.MalformedURLException;
-import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.nio.ByteBuffer;
-import java.nio.charset.CharacterCodingException;
-import java.nio.charset.CodingErrorAction;
-import java.nio.charset.StandardCharsets;
 import java.util.*;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -40,8 +34,10 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
+import software.amazon.awssdk.http.AbortableInputStream;
 import software.amazon.awssdk.http.ExecutableHttpRequest;
 import software.amazon.awssdk.http.HttpExecuteRequest;
+import software.amazon.awssdk.http.HttpExecuteResponse;
 import software.amazon.awssdk.http.SdkHttpClient;
 import software.amazon.awssdk.http.SdkHttpMethod;
 import software.amazon.awssdk.http.SdkHttpRequest;
@@ -49,21 +45,17 @@ import software.amazon.awssdk.http.SdkHttpRequest;
 /**
  * Maintains and automatically updates a list of known live Alternator nodes. Live Alternator nodes
  * should answer alternatorScheme (http or https) requests on port alternatorPort. One of these
- * livenodes will be used, at round-robin order, for every connection. For cluster-wide routing,
- * including a filtered scope chain that explicitly falls back to cluster routing, the list starts
- * with the configured seeds. For a strict filtered chain, seeds remain discovery-only until a
- * matching node list is learned. A thread periodically replaces the routing list with an up-to-date
- * list retrieved by making "/localnodes" requests to known nodes and seeds.
+ * livenodes will be used, at round-robin order, for every connection. The list of live nodes starts
+ * with one or more known nodes, but then a thread periodically replaces this list by an up-to-date
+ * list retrieved from making a "/localnodes" requests to one of these nodes.
  *
  * @author dmitry.kropachev
  */
 public class AlternatorLiveNodes extends Thread {
-  private static final int MAX_ROUTING_SCOPE_DEPTH = 64;
   private static final long DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
 
   private final AtomicReference<List<URI>> liveNodes;
   private final List<URI> initialNodes;
-  private final Set<URI> initialNodeSet;
   private final AtomicInteger nextLiveNodeIndex;
   private final AlternatorConfig config;
   private final AtomicBoolean running = new AtomicBoolean(false);
@@ -72,14 +64,7 @@ public class AlternatorLiveNodes extends Thread {
   private final boolean ownsPollingClient;
   private final AtomicBoolean pollingClientClosed = new AtomicBoolean(false);
   private final AtomicLong lastActivityTime = new AtomicLong(0);
-  private final AtomicBoolean refreshRequested = new AtomicBoolean(false);
-  private final Object refreshMonitor = new Object();
-  private final AtomicLong refreshSequence = new AtomicLong(0);
-  private final Object publicationLock = new Object();
   private final LocalNodesResponseParser localNodesResponseParser;
-  private final LiveNodesPollingLimits pollingLimits;
-  private long lastPublishedRefresh;
-  private RoutingScope publishedScope;
 
   private static Logger logger = Logger.getLogger(AlternatorLiveNodes.class.getName());
 
@@ -106,7 +91,7 @@ public class AlternatorLiveNodes extends Thread {
           logger.log(Level.SEVERE, "AlternatorLiveNodes polling failed unexpectedly", e);
         }
         try {
-          waitForNextRefresh();
+          Thread.sleep(getRefreshInterval());
         } catch (InterruptedException e) {
           if (shutdownRequested.get()) {
             logger.log(Level.INFO, "AlternatorLiveNodes thread interrupted and stopping");
@@ -142,9 +127,6 @@ public class AlternatorLiveNodes extends Thread {
    */
   public void shutdown() {
     shutdownRequested.set(true);
-    synchronized (refreshMonitor) {
-      refreshMonitor.notifyAll();
-    }
     this.interrupt();
     closePollingClient();
   }
@@ -216,27 +198,8 @@ public class AlternatorLiveNodes extends Thread {
    * Marks that there has been recent activity (a request was made). This affects the refresh
    * interval used by the background thread.
    */
-  public void recordRequestActivity() {
-    long now = System.currentTimeMillis();
-    long previous = lastActivityTime.getAndSet(now);
-    if (previous == 0 || now - previous >= config.getIdleRefreshIntervalMs()) {
-      refreshRequested.set(true);
-      synchronized (refreshMonitor) {
-        refreshMonitor.notifyAll();
-      }
-    }
-  }
-
-  private void waitForNextRefresh() throws InterruptedException {
-    synchronized (refreshMonitor) {
-      if (refreshRequested.getAndSet(false) || shutdownRequested.get()) {
-        return;
-      }
-      refreshMonitor.wait(getRefreshInterval());
-      // Consume the request that woke this wait. Otherwise the next loop iteration would observe
-      // it again and perform a duplicate immediate refresh.
-      refreshRequested.set(false);
-    }
+  private void markActivity() {
+    lastActivityTime.set(System.currentTimeMillis());
   }
 
   /**
@@ -383,7 +346,7 @@ public class AlternatorLiveNodes extends Thread {
    * @since 2.0.0
    */
   public AlternatorLiveNodes(AlternatorConfig config) {
-    this(config, createDefaultPollingClient(config), true, LiveNodesPollingLimits.DEFAULT);
+    this(config, createDefaultPollingClient(config), true);
   }
 
   /**
@@ -399,21 +362,11 @@ public class AlternatorLiveNodes extends Thread {
    * @since 2.1.0
    */
   public AlternatorLiveNodes(AlternatorConfig config, SdkHttpClient pollingHttpClient) {
-    this(config, pollingHttpClient, false, LiveNodesPollingLimits.DEFAULT);
-  }
-
-  AlternatorLiveNodes(
-      AlternatorConfig config,
-      SdkHttpClient pollingHttpClient,
-      LiveNodesPollingLimits pollingLimits) {
-    this(config, pollingHttpClient, false, pollingLimits);
+    this(config, pollingHttpClient, false);
   }
 
   private AlternatorLiveNodes(
-      AlternatorConfig config,
-      SdkHttpClient pollingHttpClient,
-      boolean ownsPollingClient,
-      LiveNodesPollingLimits pollingLimits) {
+      AlternatorConfig config, SdkHttpClient pollingHttpClient, boolean ownsPollingClient) {
     if (config == null) {
       throw new RuntimeException("config cannot be null");
     }
@@ -424,18 +377,9 @@ public class AlternatorLiveNodes extends Thread {
     if (seedHosts == null || seedHosts.isEmpty()) {
       throw new RuntimeException("config must contain at least one seed host");
     }
-    this.pollingLimits = Objects.requireNonNull(pollingLimits, "pollingLimits");
     this.localNodesResponseParser =
-        new LocalNodesResponseParser(
-            config.getScheme(), config.getPort(), this.pollingLimits.maxSnapshotNodes);
-    List<URI> configuredInitialNodes = hostsToUris(seedHosts);
-    try {
-      ensureSnapshotWithinLimits(configuredInitialNodes);
-    } catch (DiscoverySnapshotLimitException e) {
-      throw new IllegalArgumentException("Configured seed snapshot exceeds discovery limits", e);
-    }
-    this.initialNodes = Collections.unmodifiableList(configuredInitialNodes);
-    this.initialNodeSet = Collections.unmodifiableSet(new LinkedHashSet<>(configuredInitialNodes));
+        new LocalNodesResponseParser(config.getScheme(), config.getPort());
+    this.initialNodes = hostsToUris(seedHosts);
     this.liveNodes = new AtomicReference<>();
     this.nextLiveNodeIndex = new AtomicInteger(0);
     this.config = config;
@@ -446,17 +390,7 @@ public class AlternatorLiveNodes extends Thread {
     } catch (ValidationError e) {
       throw new RuntimeException(e);
     }
-    // Seeds are valid routing targets when any valid configured fallback authorizes cluster-wide
-    // routing. In a strict filtered chain, the entrypoint may sit outside the requested rack or
-    // datacenter, so seeds remain discovery-only until a matching /localnodes response is learned.
-    RoutingScope clusterAuthorization = clusterScopeInValidChain(config.getRoutingScope());
-    if (clusterAuthorization != null) {
-      this.liveNodes.set(initialNodes);
-      this.publishedScope = clusterAuthorization;
-    } else {
-      this.liveNodes.set(Collections.emptyList());
-      this.publishedScope = null;
-    }
+    this.liveNodes.set(initialNodes);
   }
 
   /**
@@ -563,7 +497,7 @@ public class AlternatorLiveNodes extends Thread {
    * @return a {@link java.net.URI} object
    */
   public URI nextAsURI() {
-    recordRequestActivity();
+    markActivity();
     List<URI> nodes = liveNodes.get();
     if (nodes.isEmpty()) {
       throw new IllegalStateException("No live nodes available");
@@ -590,74 +524,50 @@ public class AlternatorLiveNodes extends Thread {
   }
 
   private URI withPathAndQuery(URI uri, String path, String query) throws URISyntaxException {
-    return new URI(
-        uri.getScheme(),
-        null,
-        LogicalHost.withoutBrackets(uri.getHost()),
-        uri.getPort(),
-        path,
-        query,
-        null);
+    return new URI(uri.getScheme(), null, uri.getHost(), uri.getPort(), path, query, null);
+  }
+
+  // Utility function for reading the entire contents of an input stream
+  // (which we assume will be fairly short)
+  private static String streamToString(InputStream stream) throws IOException {
+    if (stream == null) {
+      return "";
+    }
+    Scanner s = new Scanner(stream).useDelimiter("\\A");
+    String result = s.hasNext() ? s.next() : "";
+    stream.close();
+    return result;
   }
 
   void updateLiveNodes() throws IOException {
-    throwIfShutdownRequested();
-    long refresh = refreshSequence.incrementAndGet();
-    List<RoutingScope> scopes = routingScopes(this.config.getRoutingScope());
+    RoutingScope scope = this.config.getRoutingScope();
     IOException lastException = null;
-    Set<RoutingScope> authoritativelyEmptyScopes =
-        Collections.newSetFromMap(new IdentityHashMap<>());
-    long cycleDeadline = deadlineAfterMillis(pollingLimits.cycleTimeoutMillis);
-    for (int scopeIndex = 0; scopeIndex < scopes.size(); scopeIndex++) {
-      throwIfShutdownRequested();
-      RoutingScope scope = scopes.get(scopeIndex);
-      boolean scopeAuthoritativelyEmpty = false;
+    while (scope != null) {
       try {
-        long scopeDeadline =
-            fairDeadline(
-                cycleDeadline, pollingLimits.cycleTimeoutMillis, scopes.size() - scopeIndex);
-        List<URI> nodes = getNodesForScope(scope, scopeDeadline);
+        List<URI> nodes = getNodesForScope(scope);
         if (!nodes.isEmpty()) {
-          throwIfShutdownRequested();
-          List<URI> replacement = Collections.unmodifiableList(new ArrayList<>(nodes));
-          if (publishIfCurrent(refresh, replacement, scope)) {
-            logger.log(
-                Level.FINE, "Updated hosts to " + replacement + " using " + scope.getDescription());
-          } else {
-            logger.log(
-                Level.FINE, "Ignored a stale live-node refresh for " + scope.getDescription());
-          }
+          liveNodes.set(nodes);
+          logger.log(
+              Level.FINE, "Updated hosts to " + liveNodes + " using " + scope.getDescription());
           return;
         }
-        scopeAuthoritativelyEmpty = true;
       } catch (IOException e) {
-        if (shutdownRequested.get()) {
-          throw e;
-        }
         logger.log(Level.WARNING, "Failed to discover nodes for " + scope.getDescription(), e);
         lastException = e;
       }
-      // A normal empty return is authoritative for this exact strict scope. Cluster emptiness is
-      // unusable discovery and never disproves an existing route.
-      if (scopeAuthoritativelyEmpty && !(scope instanceof ClusterScope)) {
-        authoritativelyEmptyScopes.add(scope);
-      }
-      if (scopeIndex + 1 < scopes.size()) {
+      RoutingScope fallback = scope.getFallback();
+      if (fallback != null) {
         logger.log(
             Level.WARNING,
             "No nodes found for "
                 + scope.getDescription()
                 + ", falling back to "
-                + scopes.get(scopeIndex + 1).getDescription());
+                + fallback.getDescription());
       }
+      scope = fallback;
     }
-    throwIfShutdownRequested();
-    if (clearIfPublishedScopeAuthoritativelyEmpty(refresh, authoritativelyEmptyScopes)) {
-      logger.log(Level.WARNING, "The published routing scope is now authoritatively empty");
-      return;
-    }
-    // Failed refreshes keep the current list. Configured seeds remain separate discovery
-    // candidates even after a successful snapshot replaces them.
+    // No nodes found in any scope - keep the current list. Initial seed nodes are retained
+    // separately and remain discovery candidates without being injected into the routing list.
     if (lastException != null) {
       logger.log(
           Level.WARNING,
@@ -667,86 +577,23 @@ public class AlternatorLiveNodes extends Thread {
     }
   }
 
-  private boolean publishIfCurrent(
-      long refresh, List<URI> replacement, RoutingScope replacementScope) {
-    synchronized (publicationLock) {
-      if (refresh <= lastPublishedRefresh) {
-        return false;
-      }
-      liveNodes.set(replacement);
-      publishedScope = replacementScope;
-      lastPublishedRefresh = refresh;
-      return true;
-    }
-  }
-
-  private boolean clearIfPublishedScopeAuthoritativelyEmpty(
-      long refresh, Set<RoutingScope> emptyScopes) {
-    synchronized (publicationLock) {
-      if (refresh <= lastPublishedRefresh
-          || publishedScope == null
-          || publishedScope instanceof ClusterScope
-          || !emptyScopes.contains(publishedScope)) {
-        return false;
-      }
-      liveNodes.set(Collections.emptyList());
-      publishedScope = null;
-      lastPublishedRefresh = refresh;
-      return true;
-    }
-  }
-
   private List<URI> getNodesForScope(RoutingScope scope) throws IOException {
-    return getNodesForScope(scope, deadlineAfterMillis(pollingLimits.cycleTimeoutMillis));
-  }
-
-  private List<URI> getNodesForScope(RoutingScope scope, long cycleDeadline) throws IOException {
-    boolean clusterScope = scope instanceof ClusterScope;
     String query = scope.getLocalNodesQuery();
     String requestQuery = query.isEmpty() ? null : query;
-    List<URI> liveCandidates = liveDiscoveryCandidates();
-    List<URI> seedCandidates = initialDiscoveryCandidates(liveCandidates);
 
     DiscoveryAttempt liveAttempt =
-        discoverNodes(
-            scope, liveCandidates, requestQuery, "live node", cycleDeadline, seedCandidates.size());
-    if (!clusterScope && !liveAttempt.nodes.isEmpty()) {
+        discoverNodes(scope, liveDiscoveryCandidates(), requestQuery, "live node");
+    if (!liveAttempt.nodes.isEmpty()) {
       return liveAttempt.nodes;
-    }
-    if (deadlineExpired(cycleDeadline)) {
-      if (clusterScope && !liveAttempt.nodes.isEmpty()) {
-        return mergeClusterLastKnownGood(liveAttempt.nodes);
-      }
-      if (liveAttempt.authoritativeEmpty) {
-        return Collections.emptyList();
-      }
-      throw deadlineExceeded("live-node discovery cycle");
     }
 
     DiscoveryAttempt seedAttempt =
-        discoverNodes(scope, seedCandidates, requestQuery, "seed node", cycleDeadline, 0);
-    if (!clusterScope && !seedAttempt.nodes.isEmpty()) {
+        discoverNodes(
+            scope, initialDiscoveryCandidates(liveAttempt.candidates), requestQuery, "seed node");
+    if (!seedAttempt.nodes.isEmpty()) {
       return seedAttempt.nodes;
     }
 
-    if (clusterScope) {
-      Set<URI> aggregate = new LinkedHashSet<>();
-      long aggregateBytes = addToSnapshotWithinLimits(aggregate, liveAttempt.nodes, 0);
-      addToSnapshotWithinLimits(aggregate, seedAttempt.nodes, aggregateBytes);
-      if (!aggregate.isEmpty()) {
-        if (liveAttempt.lastException != null
-            || seedAttempt.lastException != null
-            || liveAttempt.authoritativeEmpty
-            || seedAttempt.authoritativeEmpty) {
-          return mergeClusterLastKnownGood(new ArrayList<>(aggregate));
-        }
-        return new ArrayList<>(aggregate);
-      }
-    }
-
-    if (liveAttempt.authoritativeEmpty || seedAttempt.authoritativeEmpty) {
-      return Collections.emptyList();
-    }
     if (seedAttempt.lastException != null) {
       throw seedAttempt.lastException;
     }
@@ -756,164 +603,37 @@ public class AlternatorLiveNodes extends Thread {
     return Collections.emptyList();
   }
 
-  private List<URI> mergeClusterLastKnownGood(List<URI> discovered)
-      throws DiscoverySnapshotLimitException {
-    Set<URI> aggregate = new LinkedHashSet<>();
-    long bytes = addToSnapshotWithinLimits(aggregate, discovered, 0);
-    for (URI node : liveNodes.get()) {
-      if (aggregate.contains(node)) {
-        continue;
-      }
-      long nodeBytes = snapshotBytes(node);
-      if (aggregate.size() >= pollingLimits.maxSnapshotNodes
-          || bytes + nodeBytes > pollingLimits.maxSnapshotBytes) {
-        continue;
-      }
-      aggregate.add(node);
-      bytes += nodeBytes;
-    }
-    return new ArrayList<>(aggregate);
-  }
-
   private DiscoveryAttempt discoverNodes(
-      RoutingScope scope,
-      List<URI> candidates,
-      String requestQuery,
-      String candidateDescription,
-      long cycleDeadline,
-      int followingCandidateCount)
-      throws IOException {
+      RoutingScope scope, List<URI> candidates, String requestQuery, String candidateDescription) {
     IOException lastException = null;
-    boolean authoritativeEmpty = false;
     Set<URI> nodes = new LinkedHashSet<>();
-    long snapshotBytes = 0;
-    int failedCandidates = 0;
-    URI firstFailedCandidate = null;
-    for (int index = 0; index < candidates.size(); index++) {
-      throwIfShutdownRequested();
-      if (deadlineExpired(cycleDeadline)) {
-        lastException = deadlineExceeded("live-node discovery cycle");
-        break;
-      }
-      URI candidate = candidates.get(index);
+    for (URI candidate : candidates) {
       try {
-        int remainingCandidates = candidates.size() - index + followingCandidateCount;
-        long candidateDeadline =
-            fairDeadline(cycleDeadline, pollingLimits.candidateTimeoutMillis, remainingCandidates);
-        CandidateResult result =
-            getNodes(
-                withPathAndRawQuery(candidate, "/localnodes", requestQuery),
-                candidateDeadline,
-                initialNodeSet.contains(candidate));
-        authoritativeEmpty |= result.sawEmptyResponse;
-        if (result.nodes.isEmpty()) {
-          authoritativeEmpty = true;
-        } else {
+        List<URI> discoveredNodes =
+            getNodes(withPathAndRawQuery(candidate, "/localnodes", requestQuery));
+        if (!discoveredNodes.isEmpty()) {
           if (!(scope instanceof ClusterScope)) {
-            ensureSnapshotWithinLimits(result.nodes);
-            logCandidateFailures(
-                scope, candidateDescription, failedCandidates, firstFailedCandidate, lastException);
-            return new DiscoveryAttempt(result.nodes, lastException, authoritativeEmpty);
+            return new DiscoveryAttempt(candidates, discoveredNodes, lastException);
           }
-          snapshotBytes = addToSnapshotWithinLimits(nodes, result.nodes, snapshotBytes);
+          nodes.addAll(discoveredNodes);
         }
-      } catch (DiscoverySnapshotLimitException e) {
-        throw e;
       } catch (IOException e) {
-        if (shutdownRequested.get()) {
-          throw e;
-        }
-        failedCandidates++;
-        if (firstFailedCandidate == null) {
-          firstFailedCandidate = candidate;
-        }
+        logger.log(
+            Level.WARNING,
+            "Failed to contact "
+                + candidateDescription
+                + " "
+                + candidate
+                + " for "
+                + scope.getDescription(),
+            e);
         lastException = e;
-        if (deadlineExpired(cycleDeadline)) {
-          break;
-        }
       } catch (URISyntaxException e) {
         throw new RuntimeException(e);
       }
     }
 
-    logCandidateFailures(
-        scope, candidateDescription, failedCandidates, firstFailedCandidate, lastException);
-    return new DiscoveryAttempt(new ArrayList<>(nodes), lastException, authoritativeEmpty);
-  }
-
-  private long addToSnapshotWithinLimits(
-      Set<URI> aggregate, List<URI> discovered, long currentBytes)
-      throws DiscoverySnapshotLimitException {
-    Set<URI> additions = new LinkedHashSet<>();
-    long addedBytes = 0;
-    for (URI node : discovered) {
-      if (aggregate.contains(node) || !additions.add(node)) {
-        continue;
-      }
-      if (aggregate.size() + additions.size() > pollingLimits.maxSnapshotNodes) {
-        throw snapshotLimitExceeded();
-      }
-      addedBytes += snapshotBytes(node);
-      if (currentBytes + addedBytes > pollingLimits.maxSnapshotBytes) {
-        throw snapshotLimitExceeded();
-      }
-    }
-    aggregate.addAll(additions);
-    return currentBytes + addedBytes;
-  }
-
-  private void ensureSnapshotWithinLimits(List<URI> nodes) throws DiscoverySnapshotLimitException {
-    long bytes = 0;
-    for (int index = 0; index < nodes.size(); index++) {
-      if (index >= pollingLimits.maxSnapshotNodes) {
-        throw snapshotLimitExceeded();
-      }
-      bytes += snapshotBytes(nodes.get(index));
-      if (bytes > pollingLimits.maxSnapshotBytes) {
-        throw snapshotLimitExceeded();
-      }
-    }
-  }
-
-  private DiscoverySnapshotLimitException snapshotLimitExceeded() {
-    return new DiscoverySnapshotLimitException(
-        "Discovered live-node snapshot exceeds "
-            + pollingLimits.maxSnapshotNodes
-            + " nodes or "
-            + pollingLimits.maxSnapshotBytes
-            + " bytes");
-  }
-
-  private static long snapshotBytes(URI node) {
-    // URI.toASCIIString() contains only ASCII, so its character length is its encoded byte size.
-    return node.toASCIIString().length() + 1;
-  }
-
-  private static void logCandidateFailures(
-      RoutingScope scope,
-      String candidateDescription,
-      int failedCandidates,
-      URI firstFailedCandidate,
-      IOException lastException) {
-    if (failedCandidates == 0) {
-      return;
-    }
-    String cause =
-        lastException == null
-            ? "unknown"
-            : lastException.getClass().getSimpleName()
-                + ": "
-                + LocalNodesResponseParser.boundedLogSample(lastException.getMessage());
-    logger.log(
-        Level.WARNING,
-        "Failed to contact {0} {1}(s) for {2}; first candidate={3}; last failure={4}",
-        new Object[] {
-          failedCandidates,
-          candidateDescription,
-          scope.getDescription(),
-          LocalNodesResponseParser.boundedLogSample(String.valueOf(firstFailedCandidate)),
-          cause
-        });
+    return new DiscoveryAttempt(candidates, new ArrayList<>(nodes), lastException);
   }
 
   private List<URI> liveDiscoveryCandidates() {
@@ -927,346 +647,96 @@ public class AlternatorLiveNodes extends Thread {
   }
 
   private static class DiscoveryAttempt {
+    final List<URI> candidates;
     final List<URI> nodes;
     final IOException lastException;
-    final boolean authoritativeEmpty;
 
-    DiscoveryAttempt(List<URI> nodes, IOException lastException, boolean authoritativeEmpty) {
+    DiscoveryAttempt(List<URI> candidates, List<URI> nodes, IOException lastException) {
+      this.candidates = candidates;
       this.nodes = nodes;
       this.lastException = lastException;
-      this.authoritativeEmpty = authoritativeEmpty;
-    }
-  }
-
-  private static final class DiscoverySnapshotLimitException extends IOException {
-    DiscoverySnapshotLimitException(String message) {
-      super(message);
     }
   }
 
   private URI withPathAndRawQuery(URI uri, String path, String rawQuery) throws URISyntaxException {
     URI withoutQuery =
-        new URI(
-            uri.getScheme(),
-            null,
-            LogicalHost.withoutBrackets(uri.getHost()),
-            uri.getPort(),
-            path,
-            null,
-            null);
+        new URI(uri.getScheme(), null, uri.getHost(), uri.getPort(), path, null, null);
     if (rawQuery == null || rawQuery.isEmpty()) {
       return withoutQuery;
     }
     try {
       return new URI(withoutQuery.toASCIIString() + "?" + rawQuery);
     } catch (URISyntaxException e) {
-      return new URI(
-          uri.getScheme(),
-          null,
-          LogicalHost.withoutBrackets(uri.getHost()),
-          uri.getPort(),
-          path,
-          rawQuery,
-          null);
+      return new URI(uri.getScheme(), null, uri.getHost(), uri.getPort(), path, rawQuery, null);
     }
   }
 
-  private CandidateResult getNodes(URI uri, long candidateDeadline) throws IOException {
-    return getNodes(uri, candidateDeadline, false);
-  }
-
-  private CandidateResult getNodes(URI uri, long candidateDeadline, boolean seedCandidate)
-      throws IOException {
+  private List<URI> getNodes(URI uri) throws IOException {
     SdkHttpRequest sdkRequest =
         SdkHttpRequest.builder()
             .uri(uri)
             .method(SdkHttpMethod.GET)
-            .putHeader("Host", LogicalHost.authority(uri.getHost(), uri.getPort()))
+            .putHeader("Host", uri.getHost() + ":" + uri.getPort())
             .putHeader("Connection", "keep-alive")
             .build();
     HttpExecuteRequest executeRequest = HttpExecuteRequest.builder().request(sdkRequest).build();
-    if (pollingHttpClient instanceof DnsFallbackSdkHttpClient) {
-      DnsFallbackSdkHttpClient dnsFallbackClient = (DnsFallbackSdkHttpClient) pollingHttpClient;
-      if (dnsFallbackClient.supportsDnsFallback(uri.getScheme())) {
-        return getNodesByResolvedAddress(
-            uri, executeRequest, dnsFallbackClient, candidateDeadline, seedCandidate);
-      }
-    }
-    long attemptDeadline = fairDeadline(candidateDeadline, pollingLimits.attemptTimeoutMillis, 1);
-    remainingMillis(attemptDeadline, "/localnodes request preparation");
-    return getNodes(
-        prepareRequest(
-            () -> pollingHttpClient.prepareRequest(executeRequest), "polling HTTP request"),
-        attemptDeadline,
-        seedCandidate);
-  }
+    ExecutableHttpRequest preparedRequest = pollingHttpClient.prepareRequest(executeRequest);
+    HttpExecuteResponse response = preparedRequest.call();
 
-  private CandidateResult getNodesByResolvedAddress(
-      URI logicalUri,
-      HttpExecuteRequest executeRequest,
-      DnsFallbackSdkHttpClient dnsFallbackClient,
-      long candidateDeadline,
-      boolean seedCandidate)
-      throws IOException {
-    String logicalHost = LogicalHost.withoutBrackets(logicalUri.getHost());
-    List<InetAddress> resolvedAddresses;
-    if (LogicalHost.isIpLiteral(logicalHost)) {
-      resolvedAddresses = Collections.singletonList(InetAddress.getByName(logicalHost));
-    } else {
-      resolvedAddresses =
-          dnsFallbackClient.resolve(
-              logicalHost, remainingMillis(candidateDeadline, "DNS resolution"), seedCandidate);
-    }
-    throwIfShutdownRequested();
-    if (resolvedAddresses == null) {
-      throw new IOException("DNS resolver returned null for " + logicalUri.getHost());
-    }
-    Set<InetAddress> addresses = new LinkedHashSet<>();
-    for (InetAddress address : resolvedAddresses) {
-      if (address != null) {
-        addresses.add(address);
-        if (addresses.size() == pollingLimits.maxDnsAddresses) {
-          break;
-        }
-      }
-    }
-    if (addresses.isEmpty()) {
-      throw new IOException("DNS returned no addresses for " + logicalUri.getHost());
-    }
-
-    IOException lastException = null;
-    boolean authoritativeEmpty = false;
-    List<InetAddress> addressList = new ArrayList<>(addresses);
-    for (int index = 0; index < addressList.size(); index++) {
-      throwIfShutdownRequested();
-      if (deadlineExpired(candidateDeadline)) {
-        lastException = deadlineExceeded("/localnodes address attempts");
-        break;
-      }
-      InetAddress address = addressList.get(index);
-      try {
-        long attemptDeadline =
-            fairDeadline(
-                candidateDeadline, pollingLimits.attemptTimeoutMillis, addressList.size() - index);
-        remainingMillis(attemptDeadline, "/localnodes request preparation");
-        CandidateResult result =
-            getNodes(
-                prepareRequest(
-                    () -> dnsFallbackClient.prepareRequestForAddress(executeRequest, address),
-                    "addressed polling HTTP request"),
-                attemptDeadline,
-                seedCandidate);
-        if (!result.nodes.isEmpty()) {
-          return new CandidateResult(result.nodes, authoritativeEmpty || result.sawEmptyResponse);
-        }
-        authoritativeEmpty = true;
-        logger.log(
-            Level.FINE,
-            "/localnodes from "
-                + logicalUri.getHost()
-                + " at "
-                + address.getHostAddress()
-                + " returned no usable nodes; trying next DNS address");
-      } catch (IOException e) {
-        if (shutdownRequested.get()) {
-          throw e;
-        }
-        lastException = e;
-        logger.log(
-            Level.FINE,
-            "Failed /localnodes request to "
-                + logicalUri.getHost()
-                + " at "
-                + address.getHostAddress()
-                + "; trying next DNS address: "
-                + e.getClass().getSimpleName()
-                + ": "
-                + LocalNodesResponseParser.boundedLogSample(e.getMessage()));
-        if (deadlineExpired(candidateDeadline)) {
-          break;
-        }
-      }
-    }
-
-    if (authoritativeEmpty) {
-      return CandidateResult.authoritativeEmpty();
-    }
-    if (lastException != null) {
-      throw lastException;
-    }
-    throw new IOException("No /localnodes address attempt completed for " + logicalUri.getHost());
-  }
-
-  private CandidateResult getNodes(
-      ExecutableHttpRequest preparedRequest, long attemptDeadline, boolean seedCandidate)
-      throws IOException {
-    long timeoutMillis;
     try {
-      timeoutMillis = remainingMillis(attemptDeadline, "/localnodes request");
-    } catch (IOException | RuntimeException e) {
-      abortPreparedRequest(preparedRequest);
+      int statusCode = response.httpResponse().statusCode();
+      if (statusCode != HttpURLConnection.HTTP_OK) {
+        // Consume and close the response body to release the connection
+        response.responseBody().ifPresent(this::consumeAndClose);
+        return Collections.emptyList();
+      }
+
+      Optional<AbortableInputStream> bodyOpt = response.responseBody();
+      if (!bodyOpt.isPresent()) {
+        return Collections.emptyList();
+      }
+
+      String responseStr;
+      try (AbortableInputStream body = bodyOpt.get()) {
+        responseStr = streamToString(body);
+      }
+
+      return parseLocalNodesResponse(responseStr);
+    } catch (IOException e) {
+      // Ensure the response body is consumed on error
+      response.responseBody().ifPresent(this::consumeAndClose);
       throw e;
     }
-    BoundedPollingAttempt.Result response =
-        BoundedPollingAttempt.execute(
-            preparedRequest, timeoutMillis, pollingLimits.maxResponseBytes, seedCandidate);
-    if (response.statusCode != 200) {
-      throw new IOException("/localnodes returned HTTP status " + response.statusCode);
-    }
-    if (!response.isSuccess()) {
-      throw new IOException("/localnodes returned HTTP 200 without a response body");
-    }
-    String responseBody = decodeUtf8(response.body);
-    return new CandidateResult(parseLocalNodesResponse(responseBody));
   }
 
-  private static ExecutableHttpRequest prepareRequest(
-      RequestPreparation preparation, String description) throws IOException {
-    try {
-      ExecutableHttpRequest request = preparation.prepare();
-      if (request == null) {
-        throw new IOException("Failed to prepare " + description + ": client returned null");
-      }
-      return request;
-    } catch (RuntimeException e) {
-      throw new IOException("Failed to prepare " + description, e);
-    }
-  }
-
-  private interface RequestPreparation {
-    ExecutableHttpRequest prepare();
-  }
-
-  private static String decodeUtf8(byte[] responseBody) throws IOException {
-    try {
-      return StandardCharsets.UTF_8
-          .newDecoder()
-          .onMalformedInput(CodingErrorAction.REPORT)
-          .onUnmappableCharacter(CodingErrorAction.REPORT)
-          .decode(ByteBuffer.wrap(responseBody))
-          .toString();
-    } catch (CharacterCodingException e) {
-      throw new IOException("/localnodes response is not valid UTF-8", e);
-    }
-  }
-
-  private static void abortPreparedRequest(ExecutableHttpRequest preparedRequest) {
-    try {
-      preparedRequest.abort();
-    } catch (RuntimeException ignored) {
-      // Best-effort cleanup for a request that never reached the polling worker.
-    }
-  }
-
-  private List<URI> parseLocalNodesResponse(String responseStr) throws IOException {
+  private List<URI> parseLocalNodesResponse(String responseStr) {
     try {
       return localNodesResponseParser.parse(responseStr);
     } catch (LocalNodesResponseParser.InvalidLocalNodesResponseException e) {
-      String response = responseStr == null ? "" : responseStr;
-      logger.log(
-          Level.WARNING,
-          "Malformed /localnodes response: characters={0}, hash={1}, sample={2}",
-          new Object[] {
-            response.length(),
-            Integer.toHexString(response.hashCode()),
-            LocalNodesResponseParser.boundedLogSample(response)
-          });
-      throw e;
+      logger.log(Level.WARNING, "Malformed /localnodes response: " + responseStr);
+      return Collections.emptyList();
     }
   }
 
-  private static final class CandidateResult {
-    final List<URI> nodes;
-    final boolean sawEmptyResponse;
-
-    CandidateResult(List<URI> nodes) {
-      this(nodes, nodes.isEmpty());
-    }
-
-    CandidateResult(List<URI> nodes, boolean sawEmptyResponse) {
-      this.nodes = nodes;
-      this.sawEmptyResponse = sawEmptyResponse;
-    }
-
-    static CandidateResult authoritativeEmpty() {
-      return new CandidateResult(Collections.emptyList(), true);
-    }
-  }
-
-  private static long deadlineAfterMillis(long timeoutMillis) {
-    return System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
-  }
-
-  private static List<RoutingScope> routingScopes(RoutingScope scope) throws IOException {
-    List<RoutingScope> scopes = new ArrayList<>();
-    Set<RoutingScope> seen = Collections.newSetFromMap(new IdentityHashMap<>());
-    for (RoutingScope current = scope; current != null; current = current.getFallback()) {
-      if (scopes.size() >= MAX_ROUTING_SCOPE_DEPTH) {
-        throw new IOException(
-            "Routing scope fallback chain exceeds " + MAX_ROUTING_SCOPE_DEPTH + " entries");
+  /**
+   * Consumes and closes an AbortableInputStream to release the underlying connection back to the
+   * pool.
+   */
+  private void consumeAndClose(AbortableInputStream stream) {
+    try {
+      // Read remaining bytes to ensure the connection can be reused
+      byte[] buf = new byte[1024];
+      while (stream.read(buf) != -1) {
+        // discard
       }
-      if (!seen.add(current)) {
-        throw new IOException(
-            "Routing scope fallback cycle detected at " + current.getDescription());
+      stream.close();
+    } catch (IOException e) {
+      try {
+        stream.abort();
+      } catch (Exception abortEx) {
+        logger.log(Level.WARNING, "Failed to abort AbortableInputStream during cleanup", abortEx);
       }
-      scopes.add(current);
     }
-    return scopes;
-  }
-
-  private static RoutingScope clusterScopeInValidChain(RoutingScope scope) {
-    Set<RoutingScope> seen = Collections.newSetFromMap(new IdentityHashMap<>());
-    RoutingScope current = scope;
-    RoutingScope clusterScope = null;
-    int depth = 0;
-    while (current != null && depth < MAX_ROUTING_SCOPE_DEPTH) {
-      if (!seen.add(current)) {
-        return null;
-      }
-      if (clusterScope == null && current instanceof ClusterScope) {
-        clusterScope = current;
-      }
-      current = current.getFallback();
-      depth++;
-    }
-    return current == null ? clusterScope : null;
-  }
-
-  private static long fairDeadline(long outerDeadline, long maximumMillis, int remainingItems)
-      throws SocketTimeoutException {
-    long now = System.nanoTime();
-    long remainingNanos = outerDeadline - now;
-    if (remainingNanos <= 0) {
-      throw deadlineExceeded("live-node discovery cycle");
-    }
-    long fairNanos = remainingNanos / Math.max(1, remainingItems);
-    fairNanos = Math.max(TimeUnit.MILLISECONDS.toNanos(1), fairNanos);
-    long budgetNanos =
-        Math.min(remainingNanos, Math.min(TimeUnit.MILLISECONDS.toNanos(maximumMillis), fairNanos));
-    return now + budgetNanos;
-  }
-
-  private static long remainingMillis(long deadline, String operation)
-      throws SocketTimeoutException {
-    long remainingNanos = deadline - System.nanoTime();
-    if (remainingNanos <= 0) {
-      throw deadlineExceeded(operation);
-    }
-    return Math.max(1, TimeUnit.NANOSECONDS.toMillis(remainingNanos));
-  }
-
-  private static SocketTimeoutException deadlineExceeded(String operation) {
-    return new SocketTimeoutException(operation + " exceeded its deadline");
-  }
-
-  private void throwIfShutdownRequested() throws InterruptedIOException {
-    if (shutdownRequested.get()) {
-      throw new InterruptedIOException("Live-node discovery was cancelled during shutdown");
-    }
-  }
-
-  private static boolean deadlineExpired(long deadline) {
-    return deadline - System.nanoTime() <= 0;
   }
 
   /**
@@ -1339,47 +809,36 @@ public class AlternatorLiveNodes extends Thread {
    * @since 1.0.1
    */
   public Boolean checkIfRackDatacenterFeatureIsSupported() throws FailedToCheck {
-    List<URI> candidates = liveDiscoveryCandidates();
-    for (URI seed : initialDiscoveryCandidates(candidates)) {
-      candidates.add(seed);
+    URI uri = nextAsURI("/localnodes", null);
+    URI fakeRackUrl;
+    try {
+      fakeRackUrl =
+          new URI(
+              uri.getScheme(),
+              null,
+              uri.getHost(),
+              uri.getPort(),
+              uri.getPath(),
+              "rack=fakeRack",
+              null);
+    } catch (URISyntaxException e) {
+      // Should not ever happen
+      throw new FailedToCheck("Invalid URI: " + uri, e);
     }
-    long cycleDeadline = deadlineAfterMillis(pollingLimits.cycleTimeoutMillis);
-    IOException lastException = null;
-    for (int index = 0; index < candidates.size(); index++) {
-      URI candidate = candidates.get(index);
-      try {
-        long candidateDeadline =
-            fairDeadline(
-                cycleDeadline, pollingLimits.candidateTimeoutMillis, candidates.size() - index);
-        URI uri = withPathAndRawQuery(candidate, "/localnodes", null);
-        URI fakeRackUrl = withPathAndRawQuery(candidate, "/localnodes", "rack=fakeRack");
-        List<URI> hostsWithFakeRack =
-            getNodes(
-                    fakeRackUrl,
-                    fairDeadline(candidateDeadline, pollingLimits.attemptTimeoutMillis, 2),
-                    initialNodeSet.contains(candidate))
-                .nodes;
-        List<URI> hostsWithoutRack =
-            getNodes(
-                    uri,
-                    fairDeadline(candidateDeadline, pollingLimits.attemptTimeoutMillis, 1),
-                    initialNodeSet.contains(candidate))
-                .nodes;
-        if (hostsWithoutRack.isEmpty()) {
-          lastException = new IOException(String.format("host %s returned empty list", uri));
-          continue;
-        }
-        // When rack filtering is not supported server returns same nodes.
-        return hostsWithFakeRack.size() != hostsWithoutRack.size();
-      } catch (IOException | URISyntaxException e) {
-        lastException =
-            e instanceof IOException
-                ? (IOException) e
-                : new IOException("Invalid discovery URI for " + candidate, e);
+    try {
+      List<URI> hostsWithFakeRack = getNodes(fakeRackUrl);
+      List<URI> hostsWithoutRack = getNodes(uri);
+      if (hostsWithoutRack.isEmpty()) {
+        // This should not normally happen.
+        // If list of nodes is empty, it is impossible to conclude if it supports rack/datacenter
+        // filtering or not.
+        throw new FailedToCheck(String.format("host %s returned empty list", uri));
       }
+      // When rack filtering is not supported server returns same nodes.
+      return hostsWithFakeRack.size() != hostsWithoutRack.size();
+    } catch (IOException e) {
+      throw new FailedToCheck("failed to read list of nodes from the node", e);
     }
-    throw new FailedToCheck(
-        "failed to read list of nodes from every discovery candidate", lastException);
   }
 
   /**
