@@ -20,17 +20,25 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assume.assumeTrue;
 
 import com.scylladb.alternator.AlternatorConfig;
+import com.scylladb.alternator.AlternatorDynamoDbClient;
+import com.scylladb.alternator.AlternatorDynamoDbClientWrapper;
 import com.scylladb.alternator.IntegrationTestConfig;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.time.Duration;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.apache.http.conn.DnsResolver;
 import org.junit.Before;
 import org.junit.Test;
+import software.amazon.awssdk.http.SdkHttpClient;
+import software.amazon.awssdk.http.apache.ApacheHttpClient;
+import software.amazon.awssdk.services.dynamodb.model.ListTablesRequest;
 
 /** Integration tests for DNS-backed live-node discovery against a real Alternator cluster. */
 public class AlternatorLiveNodesDnsDiscoveryIT {
@@ -60,12 +68,99 @@ public class AlternatorLiveNodesDnsDiscoveryIT {
     }
   }
 
+  @Test
+  public void testIpv6LiteralEntrypointDiscoversLiveClusterNodes() throws Exception {
+    try (DnsEntrypointProxy proxy = new DnsEntrypointProxy(InetAddress.getByName("::1"), 0)) {
+      URI seedUri = new URI("http://[::1]:" + proxy.getPort());
+      AlternatorConfig config = AlternatorConfig.builder().withSeedNode(seedUri).build();
+      AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config);
+
+      try {
+        liveNodes.updateLiveNodes();
+
+        assertTrue("IPv6 entrypoint should be contacted", proxy.getRequestCount() > 0);
+        assertFalse("Should discover live cluster nodes", liveNodes.getLiveNodes().isEmpty());
+      } finally {
+        liveNodes.shutdownAndWait();
+      }
+    }
+  }
+
+  @Test
+  public void testDualStackDnsEntrypointFallsBackToIpv4() throws Exception {
+    InetAddress ipv4 = InetAddress.getByName("127.0.0.1");
+    InetAddress ipv6 = InetAddress.getByName("::1");
+    try (DnsEntrypointProxy ipv4Proxy = new DnsEntrypointProxy(ipv4, 0)) {
+      assertDualStackFallback(ipv4Proxy, ipv6, ipv4);
+    }
+  }
+
+  @Test
+  public void testDualStackDnsEntrypointFallsBackToIpv6() throws Exception {
+    InetAddress ipv4 = InetAddress.getByName("127.0.0.1");
+    InetAddress ipv6 = InetAddress.getByName("::1");
+    try (DnsEntrypointProxy ipv6Proxy = new DnsEntrypointProxy(ipv6, 0)) {
+      assertDualStackFallback(ipv6Proxy, ipv4, ipv6);
+    }
+  }
+
+  @Test
+  public void testDnsEntrypointSupportsDynamoDbOperationsAfterDiscovery() throws Exception {
+    InetAddress ipv4 = InetAddress.getByName("127.0.0.1");
+    try (DnsEntrypointProxy proxy =
+            new DnsEntrypointProxy(ipv4, IntegrationTestConfig.HTTP_PORT);
+        AlternatorDynamoDbClientWrapper wrapper =
+            AlternatorDynamoDbClient.builder()
+                .endpointOverride(URI.create("http://localhost:" + proxy.getPort()))
+                .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
+                .buildWithAlternatorAPI()) {
+      wrapper.getAlternatorLiveNodes().updateLiveNodes();
+
+      wrapper.getClient().listTables(ListTablesRequest.builder().limit(1).build());
+
+      assertTrue("DNS entrypoint should be used for discovery", proxy.getRequestCount() > 0);
+      assertFalse("Should retain discovered live cluster nodes", wrapper.getLiveNodes().isEmpty());
+    }
+  }
+
+  private void assertDualStackFallback(
+      DnsEntrypointProxy reachableProxy, InetAddress... resolvedAddresses) throws Exception {
+    DnsResolver resolver = host -> resolvedAddresses;
+    SdkHttpClient httpClient =
+        ApacheHttpClient.builder()
+            .dnsResolver(resolver)
+            .connectionTimeout(Duration.ofSeconds(2))
+            .socketTimeout(Duration.ofSeconds(5))
+            .build();
+    try {
+      AlternatorConfig config =
+          AlternatorConfig.builder()
+              .withSeedHost("dual.test")
+              .withScheme("http")
+              .withPort(reachableProxy.getPort())
+              .build();
+      AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, httpClient);
+
+      liveNodes.updateLiveNodes();
+
+      assertTrue(
+          "The reachable DNS address should be contacted", reachableProxy.getRequestCount() > 0);
+      assertFalse("Should discover live cluster nodes", liveNodes.getLiveNodes().isEmpty());
+    } finally {
+      httpClient.close();
+    }
+  }
+
   private static class DnsEntrypointProxy implements AutoCloseable {
     private final HttpServer server;
     private final AtomicInteger requestCount = new AtomicInteger(0);
 
     DnsEntrypointProxy() throws IOException {
-      server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+      this(InetAddress.getLoopbackAddress(), 0);
+    }
+
+    DnsEntrypointProxy(InetAddress listenAddress, int port) throws IOException {
+      server = HttpServer.create(new InetSocketAddress(listenAddress, port), 0);
       server.createContext("/localnodes", this::handleLocalNodes);
       server.start();
     }

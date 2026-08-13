@@ -53,6 +53,11 @@ public class LocalNodesResponseParserTest {
   }
 
   @Test
+  public void returnsEmptyListWhenAllHostEntriesAreUnusable() throws Exception {
+    assertTrue(parser.parse("[\"bad host\",\"also bad host\"]").isEmpty());
+  }
+
+  @Test
   public void rejectsMalformedBodies() throws Exception {
     assertMalformed("");
     assertMalformed("not-json");
