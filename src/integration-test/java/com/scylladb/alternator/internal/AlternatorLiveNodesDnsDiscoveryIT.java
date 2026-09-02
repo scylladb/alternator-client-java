@@ -32,6 +32,7 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.http.conn.DnsResolver;
 import org.junit.Before;
@@ -60,8 +61,7 @@ public class AlternatorLiveNodesDnsDiscoveryIT {
       try {
         liveNodes.updateLiveNodes();
 
-        assertTrue("DNS entrypoint should be contacted", proxy.getRequestCount() > 0);
-        assertFalse("Should discover live cluster nodes", liveNodes.getLiveNodes().isEmpty());
+        assertSuccessfulDiscovery(proxy, liveNodes.getLiveNodes(), seedUri);
       } finally {
         liveNodes.shutdownAndWait();
       }
@@ -78,8 +78,7 @@ public class AlternatorLiveNodesDnsDiscoveryIT {
       try {
         liveNodes.updateLiveNodes();
 
-        assertTrue("IPv6 entrypoint should be contacted", proxy.getRequestCount() > 0);
-        assertFalse("Should discover live cluster nodes", liveNodes.getLiveNodes().isEmpty());
+        assertSuccessfulDiscovery(proxy, liveNodes.getLiveNodes(), seedUri);
       } finally {
         liveNodes.shutdownAndWait();
       }
@@ -115,11 +114,11 @@ public class AlternatorLiveNodesDnsDiscoveryIT {
                 .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
                 .buildWithAlternatorAPI()) {
       wrapper.getAlternatorLiveNodes().updateLiveNodes();
+      URI seedUri = URI.create("http://localhost:" + proxy.getPort());
+
+      assertSuccessfulDiscovery(proxy, wrapper.getLiveNodes(), seedUri);
 
       wrapper.getClient().listTables(ListTablesRequest.builder().limit(1).build());
-
-      assertTrue("DNS entrypoint should be used for discovery", proxy.getRequestCount() > 0);
-      assertFalse("Should retain discovered live cluster nodes", wrapper.getLiveNodes().isEmpty());
     }
   }
 
@@ -143,12 +142,20 @@ public class AlternatorLiveNodesDnsDiscoveryIT {
 
       liveNodes.updateLiveNodes();
 
-      assertTrue(
-          "The reachable DNS address should be contacted", reachableProxy.getRequestCount() > 0);
-      assertFalse("Should discover live cluster nodes", liveNodes.getLiveNodes().isEmpty());
+      assertSuccessfulDiscovery(
+          reachableProxy,
+          liveNodes.getLiveNodes(),
+          URI.create("http://dual.test:" + reachableProxy.getPort()));
     } finally {
       httpClient.close();
     }
+  }
+
+  private void assertSuccessfulDiscovery(
+      DnsEntrypointProxy proxy, List<URI> liveNodes, URI seedUri) {
+    assertTrue("DNS entrypoint should be contacted", proxy.getRequestCount() > 0);
+    assertFalse("Should discover live cluster nodes", liveNodes.isEmpty());
+    assertFalse("Configured seed should be replaced by discovered nodes", liveNodes.contains(seedUri));
   }
 
   private static class DnsEntrypointProxy implements AutoCloseable {
