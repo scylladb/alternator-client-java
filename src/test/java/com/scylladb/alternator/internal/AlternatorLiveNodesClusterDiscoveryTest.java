@@ -9,6 +9,7 @@ import com.scylladb.alternator.routing.RackScope;
 import com.scylladb.alternator.routing.RoutingScope;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -99,7 +100,7 @@ public class AlternatorLiveNodesClusterDiscoveryTest {
 
     AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, httpClient);
 
-    liveNodes.updateLiveNodes();
+    liveNodes.refreshDiscoveredNodes();
 
     assertEquals(
         new LinkedHashSet<>(
@@ -108,7 +109,7 @@ public class AlternatorLiveNodesClusterDiscoveryTest {
                 "dc1-node2.example.com",
                 "dc2-node1.example.com",
                 "dc2-node2.example.com")),
-        hostSet(liveNodes.getLiveNodes()));
+        hostSet(liveNodes.getDiscoveredNodes()));
     assertEquals(
         new HashSet<>(Arrays.asList("dc1-node1.example.com", "dc2-node1.example.com")),
         capturedHostSet(httpClient.capturedRequests));
@@ -135,11 +136,11 @@ public class AlternatorLiveNodesClusterDiscoveryTest {
 
     AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, httpClient);
 
-    liveNodes.updateLiveNodes();
+    liveNodes.refreshDiscoveredNodes();
 
     assertEquals(
         new LinkedHashSet<>(Arrays.asList("dc1-node1.example.com")),
-        hostSet(liveNodes.getLiveNodes()));
+        hostSet(liveNodes.getDiscoveredNodes()));
     assertEquals(
         new HashSet<>(Arrays.asList("dc1-node1.example.com", "dc2-node1.example.com")),
         capturedHostSet(httpClient.capturedRequests));
@@ -234,11 +235,11 @@ public class AlternatorLiveNodesClusterDiscoveryTest {
 
     AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, httpClient);
 
-    liveNodes.updateLiveNodes();
+    liveNodes.refreshDiscoveredNodes();
 
     assertEquals(
         new LinkedHashSet<>(Arrays.asList("dc1-rack1-node.example.com")),
-        hostSet(liveNodes.getLiveNodes()));
+        hostSet(liveNodes.getDiscoveredNodes()));
     assertEquals(
         Arrays.asList("dc2-node1.example.com", "dc1-node1.example.com"),
         capturedHosts(httpClient.capturedRequests));
@@ -246,6 +247,44 @@ public class AlternatorLiveNodesClusterDiscoveryTest {
       assertTrue(request.rawQueryParameters().containsKey("dc"));
       assertTrue(request.rawQueryParameters().containsKey("rack"));
     }
+  }
+
+  @Test
+  public void testScopedDiscoveryUsesSeedsWithoutPublishingThem() throws Exception {
+    Map<String, String> responses = new HashMap<>();
+    responses.put("dc2-node1.example.com", "[]");
+    responses.put("dc1-node1.example.com", "[\"dc1-rack1-node.example.com\"]");
+    DiscoveryHttpClient httpClient = new DiscoveryHttpClient(responses);
+
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withSeedHosts(Arrays.asList("dc2-node1.example.com", "dc1-node1.example.com"))
+            .withScheme("http")
+            .withPort(8000)
+            .withRoutingScope(
+                RackScope.of("dc1", "rack1", DatacenterScope.of("dc1", ClusterScope.create())))
+            .build();
+
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, httpClient);
+    liveNodes.refreshDiscoveredNodes();
+
+    assertEquals(
+        new LinkedHashSet<>(Arrays.asList("dc1-rack1-node.example.com")),
+        hostSet(liveNodes.getDiscoveredNodes()));
+
+    responses.put("dc1-rack1-node.example.com", "[]");
+    responses.put("dc1-node1.example.com", "[\"dc1-rack1-node2.example.com\"]");
+    httpClient.capturedRequests.clear();
+
+    liveNodes.refreshDiscoveredNodes();
+
+    assertEquals(
+        Arrays.asList(
+            "dc1-rack1-node.example.com", "dc2-node1.example.com", "dc1-node1.example.com"),
+        capturedHosts(httpClient.capturedRequests));
+    assertEquals(
+        new LinkedHashSet<>(Arrays.asList("dc1-rack1-node2.example.com")),
+        hostSet(liveNodes.getDiscoveredNodes()));
   }
 
   @Test
@@ -320,6 +359,106 @@ public class AlternatorLiveNodesClusterDiscoveryTest {
     for (SdkHttpRequest request : httpClient.capturedRequests) {
       assertTrue(request.rawQueryParameters().containsKey("dc"));
       assertTrue(request.rawQueryParameters().containsKey("rack"));
+    }
+  }
+
+  @Test
+  public void testNon200DiscoveryResponseBodyIsConsumedOnce() throws Exception {
+    CloseTrackingInputStream body = new CloseTrackingInputStream("Service Unavailable");
+    SdkHttpClient httpClient =
+        new SdkHttpClient() {
+          @Override
+          public ExecutableHttpRequest prepareRequest(HttpExecuteRequest request) {
+            return new ExecutableHttpRequest() {
+              @Override
+              public HttpExecuteResponse call() {
+                return HttpExecuteResponse.builder()
+                    .response(SdkHttpFullResponse.builder().statusCode(503).build())
+                    .responseBody(AbortableInputStream.create(body, body::abort))
+                    .build();
+              }
+
+              @Override
+              public void abort() {}
+            };
+          }
+
+          @Override
+          public void close() {}
+
+          @Override
+          public String clientName() {
+            return "non-200";
+          }
+        };
+
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withSeedHost("seed.example.com")
+            .withScheme("http")
+            .withPort(8000)
+            .withRoutingScope(ClusterScope.create())
+            .build();
+
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, httpClient);
+    liveNodes.refreshDiscoveredNodes();
+
+    assertEquals(1, body.closeCount());
+    assertEquals(0, body.readAfterCloseCount());
+    assertEquals(0, body.abortCount());
+  }
+
+  private static final class CloseTrackingInputStream extends InputStream {
+    private final ByteArrayInputStream delegate;
+    private int closeCount;
+    private int readAfterCloseCount;
+    private int abortCount;
+    private boolean closed;
+
+    private CloseTrackingInputStream(String body) {
+      this.delegate = new ByteArrayInputStream(body.getBytes(StandardCharsets.UTF_8));
+    }
+
+    @Override
+    public int read() throws IOException {
+      ensureOpen();
+      return delegate.read();
+    }
+
+    @Override
+    public int read(byte[] bytes, int offset, int length) throws IOException {
+      ensureOpen();
+      return delegate.read(bytes, offset, length);
+    }
+
+    @Override
+    public void close() throws IOException {
+      closeCount++;
+      closed = true;
+      delegate.close();
+    }
+
+    private void abort() {
+      abortCount++;
+    }
+
+    private int closeCount() {
+      return closeCount;
+    }
+
+    private int readAfterCloseCount() {
+      return readAfterCloseCount;
+    }
+
+    private int abortCount() {
+      return abortCount;
+    }
+
+    private void ensureOpen() throws IOException {
+      if (closed) {
+        readAfterCloseCount++;
+        throw new IOException("read after close");
+      }
     }
   }
 

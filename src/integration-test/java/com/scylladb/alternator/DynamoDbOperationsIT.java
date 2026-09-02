@@ -262,7 +262,7 @@ public class DynamoDbOperationsIT {
       // Create table
       client.createTable(createTableRequest(tableName));
 
-      // Write many items - requests will be distributed across nodes via round-robin
+      // Write many items - requests will be distributed across nodes via random query-plan routing
       int itemCount = 30;
       for (int i = 0; i < itemCount; i++) {
         Map<String, AttributeValue> item =

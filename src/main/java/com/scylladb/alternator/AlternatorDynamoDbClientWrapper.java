@@ -28,7 +28,6 @@ import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
  *
  * // Access Alternator-specific functionality
  * List<URI> nodes = wrapper.getLiveNodes();
- * URI nextNode = wrapper.nextAsURI();
  * }</pre>
  *
  * @author dmitry.kropachev
@@ -119,21 +118,22 @@ public class AlternatorDynamoDbClientWrapper implements AutoCloseable {
   }
 
   /**
-   * Returns a snapshot of the current live nodes list.
+   * Returns a snapshot of the current discovered nodes list.
    *
-   * @return an unmodifiable list of the current live node URIs
+   * @return an unmodifiable list of the current discovered node URIs
+   * @since 2.1.0
    */
-  public List<URI> getLiveNodes() {
-    return liveNodes.getLiveNodes();
+  public List<URI> getDiscoveredNodes() {
+    return liveNodes.getDiscoveredNodes();
   }
 
   /**
-   * Returns the next node URI using round-robin selection.
+   * Returns a snapshot of discovered nodes currently active for normal routing.
    *
-   * @return the next {@link URI} in the round-robin sequence
+   * @return an unmodifiable list of active discovered node URIs
    */
-  public URI nextAsURI() {
-    return liveNodes.nextAsURI();
+  public List<URI> getLiveNodes() {
+    return liveNodes.getLiveNodes();
   }
 
   /**
