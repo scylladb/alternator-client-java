@@ -145,18 +145,26 @@ final class AttemptRequestSigner {
   }
 
   private static SdkHttpRequest unsignedRequest(SdkHttpRequest routed) {
+    String host = bracketIpv6Literal(routed.host());
     return routed.toBuilder()
+        .host(host)
         .removeHeader(AUTHORIZATION)
-        .putHeader(HOST, authority(routed))
+        .putHeader(HOST, authority(routed.protocol(), host, routed.port()))
         .build();
   }
 
-  private static String authority(SdkHttpRequest request) {
-    int port = request.port();
+  private static String bracketIpv6Literal(String host) {
+    if (host.indexOf(':') >= 0 && !(host.startsWith("[") && host.endsWith("]"))) {
+      return "[" + host + "]";
+    }
+    return host;
+  }
+
+  private static String authority(String protocol, String host, int port) {
     boolean standard =
-        ("http".equalsIgnoreCase(request.protocol()) && port == 80)
-            || ("https".equalsIgnoreCase(request.protocol()) && port == 443);
-    return standard ? request.host() : request.host() + ":" + port;
+        ("http".equalsIgnoreCase(protocol) && port == 80)
+            || ("https".equalsIgnoreCase(protocol) && port == 443);
+    return standard ? host : host + ":" + port;
   }
 
   private static void requireUnsigned(SdkHttpRequest original) {

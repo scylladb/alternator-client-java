@@ -104,8 +104,35 @@ public class AttemptRequestSignerTest {
     assertFalse(result.payload.contentLength().isPresent());
   }
 
+  @Test
+  public void ipv6AuthoritiesAreBracketedForSyncAndAsyncSigning() {
+    RemovingSigner signer = new RemovingSigner();
+    BasicQueryPlanInterceptor.RoutedRequest routed = routedRequest(signer, "http", "::1", 8080);
+
+    AttemptRequestSigner.SyncResult sync =
+        AttemptRequestSigner.signSync(routed, ContentStreamProvider.fromUtf8String("body"));
+    AttemptRequestSigner.AsyncResult async =
+        AttemptRequestSigner.signAsync(routed, publisher()).join();
+
+    assertEquals("[::1]:8080", sync.request.firstMatchingHeader("Host").get());
+    assertEquals("[::1]:8080", async.request.firstMatchingHeader("Host").get());
+    assertEquals("[::1]:8080", sync.request.getUri().getRawAuthority());
+    assertEquals("[::1]:8080", async.request.getUri().getRawAuthority());
+
+    AttemptRequestSigner.SyncResult standardPort =
+        AttemptRequestSigner.signSync(
+            routedRequest(signer, "https", "[2001:db8::1]", 443),
+            ContentStreamProvider.fromUtf8String("body"));
+    assertEquals("[2001:db8::1]", standardPort.request.firstMatchingHeader("Host").get());
+  }
+
   private static BasicQueryPlanInterceptor.RoutedRequest routedRequest(
       HttpSigner<Identity> signer) {
+    return routedRequest(signer, "http", "new.local", 8080);
+  }
+
+  private static BasicQueryPlanInterceptor.RoutedRequest routedRequest(
+      HttpSigner<Identity> signer, String protocol, String host, int port) {
     ExecutionAttributes attributes = ExecutionAttributes.builder().build();
     attributes.putAttribute(
         SdkInternalExecutionAttribute.SELECTED_AUTH_SCHEME,
@@ -115,9 +142,9 @@ public class AttemptRequestSignerTest {
             AuthSchemeOption.builder().schemeId("test").build()));
     SdkHttpRequest request =
         SdkHttpRequest.builder()
-            .protocol("http")
-            .host("new.local")
-            .port(8080)
+            .protocol(protocol)
+            .host(host)
+            .port(port)
             .method(SdkHttpMethod.POST)
             .encodedPath("/")
             .putHeader("Host", "old.local:8080")

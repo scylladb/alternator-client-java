@@ -64,7 +64,8 @@ health-aware selection mutates tried-state.
   covers canonical seeded sequences for fixed, negative, zero, and maximum seeds.
 - [`RetryDistributionTest`](../../src/test/java/com/scylladb/alternator/RetryDistributionTest.java)
   covers retry traversal, cycles, physical blocking and non-blocking routing, in-flight attribution,
-  authority replacement, signature validation, and server-response health classification.
+  IPv4 and IPv6 authority replacement, signature validation, and server-response health
+  classification.
 - [`AttemptRequestSignerTest`](../../src/test/java/com/scylladb/alternator/queryplan/AttemptRequestSignerTest.java)
   covers signer payload replacement and asynchronous cancellation propagation.
 - [`NodeHealthQueryPlanTest`](../../src/test/java/com/scylladb/alternator/internal/NodeHealthQueryPlanTest.java)

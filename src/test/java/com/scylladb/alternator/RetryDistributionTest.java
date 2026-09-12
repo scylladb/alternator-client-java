@@ -132,8 +132,63 @@ public class RetryDistributionTest {
     assertRetryWasRerouted(httpClient.requests, httpClient.requestBodies);
   }
 
+  @Test
+  public void testSdkRetryPipelineSignsBracketedIpv6Authorities() throws Exception {
+    List<URI> nodes = createIpv6Nodes();
+    RetryingSdkHttpClient httpClient = new RetryingSdkHttpClient();
+
+    try (AlternatorDynamoDbClientWrapper client =
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(nodes.get(0))
+            .withSeedHosts(nodes.stream().map(URI::getHost).collect(Collectors.toList()))
+            .withNodeHealthDisabled()
+            .credentialsProvider(testCredentials())
+            .httpClient(httpClient)
+            .overrideConfiguration(
+                ClientOverrideConfiguration.builder()
+                    .retryPolicy(RetryPolicy.builder().numRetries(1).build())
+                    .build())
+            .buildWithAlternatorAPI()) {
+      client.getClient().listTables(ListTablesRequest.builder().build());
+    }
+
+    assertRetryWasRerouted(httpClient.requests, httpClient.requestBodies);
+    assertIpv6AuthoritiesAreBracketed(httpClient.requests);
+  }
+
+  @Test
+  public void testAsyncSdkRetryPipelineSignsBracketedIpv6Authorities() throws Exception {
+    List<URI> nodes = createIpv6Nodes();
+    RetryingSdkAsyncHttpClient httpClient = new RetryingSdkAsyncHttpClient();
+
+    try (AlternatorDynamoDbAsyncClientWrapper client =
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(nodes.get(0))
+            .withSeedHosts(nodes.stream().map(URI::getHost).collect(Collectors.toList()))
+            .withNodeHealthDisabled()
+            .credentialsProvider(testCredentials())
+            .httpClient(httpClient)
+            .overrideConfiguration(
+                ClientOverrideConfiguration.builder()
+                    .retryPolicy(RetryPolicy.builder().numRetries(1).build())
+                    .build())
+            .buildWithAlternatorAPI()) {
+      client.getClient().listTables(ListTablesRequest.builder().build()).join();
+    }
+
+    assertRetryWasRerouted(httpClient.requests, httpClient.requestBodies);
+    assertIpv6AuthoritiesAreBracketed(httpClient.requests);
+  }
+
   private StaticCredentialsProvider testCredentials() {
     return StaticCredentialsProvider.create(AwsBasicCredentials.create("access-key", "secret-key"));
+  }
+
+  private void assertIpv6AuthoritiesAreBracketed(List<SdkHttpRequest> requests) {
+    for (SdkHttpRequest request : requests) {
+      String host = request.firstMatchingHeader("Host").get();
+      assertTrue(host, host.startsWith("[") && host.contains("]:"));
+    }
   }
 
   private void assertRetryWasRerouted(List<SdkHttpRequest> requests, List<byte[]> requestBodies) {
@@ -144,7 +199,7 @@ public class RetryDistributionTest {
     assertTrue(requests.get(1).firstMatchingHeader("Authorization").isPresent());
     assertTrue(requests.get(0).firstMatchingHeader("Host").isPresent());
     for (SdkHttpRequest request : requests) {
-      assertEquals(authority(request), request.firstMatchingHeader("Host").get());
+      assertEquals(request.getUri().getRawAuthority(), request.firstMatchingHeader("Host").get());
     }
     assertNotEquals(
         requests.get(0).firstMatchingHeader("Authorization"),
@@ -152,14 +207,6 @@ public class RetryDistributionTest {
     for (int i = 0; i < requests.size(); i++) {
       assertValidSignature(requests.get(i), requestBodies.get(i));
     }
-  }
-
-  private static String authority(SdkHttpRequest request) {
-    int port = request.port();
-    boolean standard =
-        ("http".equals(request.protocol()) && port == 80)
-            || ("https".equals(request.protocol()) && port == 443);
-    return standard ? request.host() : request.host() + ":" + port;
   }
 
   @SuppressWarnings("deprecation")
@@ -251,6 +298,12 @@ public class RetryDistributionTest {
       nodes.add(new URI("http://127.0.0." + i + ":8000"));
     }
     return nodes;
+  }
+
+  private List<URI> createIpv6Nodes() throws Exception {
+    return Arrays.asList(
+        new URI("http", null, "::1", 8000, null, null, null),
+        new URI("http", null, "::2", 8000, null, null, null));
   }
 
   @Test
