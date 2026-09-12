@@ -70,7 +70,10 @@ public class BasicQueryPlanInterceptorTest {
       URI initiallySelected = endpoint(initiallyRouted);
 
       interceptor.beforeTransmission(new RequestContext(initiallyRouted), attributes);
-      liveNodes.reportNodeResult(initiallySelected, NodeHealthObservation.TRAFFIC_FAILURE);
+      liveNodes.reportNodeResult(
+          initiallySelected,
+          NodeHealthObservation.TRAFFIC_FAILURE,
+          liveNodes.getNodeHealthGeneration(initiallySelected));
 
       SdkHttpRequest finallyRouted = interceptor.routeAttempt(initiallyRouted);
 

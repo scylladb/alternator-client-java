@@ -18,7 +18,6 @@ package com.scylladb.alternator.queryplan;
 import software.amazon.awssdk.http.ExecutableHttpRequest;
 import software.amazon.awssdk.http.HttpExecuteRequest;
 import software.amazon.awssdk.http.SdkHttpClient;
-import software.amazon.awssdk.http.SdkHttpRequest;
 
 /** Routes each synchronous SDK transmission through its request query plan. */
 public final class AttemptRoutingSdkHttpClient implements SdkHttpClient {
@@ -38,11 +37,14 @@ public final class AttemptRoutingSdkHttpClient implements SdkHttpClient {
 
   @Override
   public ExecutableHttpRequest prepareRequest(HttpExecuteRequest request) {
-    SdkHttpRequest routedRequest = router.routeAttempt(request.httpRequest());
+    BasicQueryPlanInterceptor.RoutedRequest routed =
+        router.routeAttemptWithContext(request.httpRequest());
+    AttemptRequestSigner.SyncResult signed =
+        AttemptRequestSigner.signSync(routed, request.contentStreamProvider().orElse(null));
     HttpExecuteRequest routedExecuteRequest =
         HttpExecuteRequest.builder()
-            .request(routedRequest)
-            .contentStreamProvider(request.contentStreamProvider().orElse(null))
+            .request(signed.request)
+            .contentStreamProvider(signed.payload)
             .metricCollector(request.metricCollector().orElse(null))
             .build();
     return delegate.prepareRequest(routedExecuteRequest);

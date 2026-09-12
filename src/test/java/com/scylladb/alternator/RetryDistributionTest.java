@@ -25,6 +25,11 @@ import java.io.IOException;
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
@@ -34,6 +39,8 @@ import org.reactivestreams.Subscriber;
 import org.reactivestreams.Subscription;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.auth.signer.Aws4Signer;
+import software.amazon.awssdk.auth.signer.params.Aws4SignerParams;
 import software.amazon.awssdk.awscore.exception.AwsErrorDetails;
 import software.amazon.awssdk.core.SdkRequest;
 import software.amazon.awssdk.core.SdkResponse;
@@ -42,15 +49,18 @@ import software.amazon.awssdk.core.interceptor.Context;
 import software.amazon.awssdk.core.interceptor.ExecutionAttributes;
 import software.amazon.awssdk.core.retry.RetryPolicy;
 import software.amazon.awssdk.http.AbortableInputStream;
+import software.amazon.awssdk.http.ContentStreamProvider;
 import software.amazon.awssdk.http.ExecutableHttpRequest;
 import software.amazon.awssdk.http.HttpExecuteRequest;
 import software.amazon.awssdk.http.HttpExecuteResponse;
 import software.amazon.awssdk.http.SdkHttpClient;
+import software.amazon.awssdk.http.SdkHttpFullRequest;
 import software.amazon.awssdk.http.SdkHttpFullResponse;
 import software.amazon.awssdk.http.SdkHttpRequest;
 import software.amazon.awssdk.http.SdkHttpResponse;
 import software.amazon.awssdk.http.async.AsyncExecuteRequest;
 import software.amazon.awssdk.http.async.SdkAsyncHttpClient;
+import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dynamodb.model.DynamoDbException;
 import software.amazon.awssdk.services.dynamodb.model.ListTablesRequest;
 
@@ -95,7 +105,7 @@ public class RetryDistributionTest {
       client.getClient().listTables(ListTablesRequest.builder().build());
     }
 
-    assertRetryWasRerouted(httpClient.requests);
+    assertRetryWasRerouted(httpClient.requests, httpClient.requestBodies);
   }
 
   @Test
@@ -119,21 +129,116 @@ public class RetryDistributionTest {
       client.getClient().listTables(ListTablesRequest.builder().build()).join();
     }
 
-    assertRetryWasRerouted(httpClient.requests);
+    assertRetryWasRerouted(httpClient.requests, httpClient.requestBodies);
+  }
+
+  @Test
+  public void testSdkRetryPipelineSignsBracketedIpv6Authorities() throws Exception {
+    List<URI> nodes = createIpv6Nodes();
+    RetryingSdkHttpClient httpClient = new RetryingSdkHttpClient();
+
+    try (AlternatorDynamoDbClientWrapper client =
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(nodes.get(0))
+            .withSeedHosts(nodes.stream().map(URI::getHost).collect(Collectors.toList()))
+            .withNodeHealthDisabled()
+            .credentialsProvider(testCredentials())
+            .httpClient(httpClient)
+            .overrideConfiguration(
+                ClientOverrideConfiguration.builder()
+                    .retryPolicy(RetryPolicy.builder().numRetries(1).build())
+                    .build())
+            .buildWithAlternatorAPI()) {
+      client.getClient().listTables(ListTablesRequest.builder().build());
+    }
+
+    assertRetryWasRerouted(httpClient.requests, httpClient.requestBodies);
+    assertIpv6AuthoritiesAreBracketed(httpClient.requests);
+  }
+
+  @Test
+  public void testAsyncSdkRetryPipelineSignsBracketedIpv6Authorities() throws Exception {
+    List<URI> nodes = createIpv6Nodes();
+    RetryingSdkAsyncHttpClient httpClient = new RetryingSdkAsyncHttpClient();
+
+    try (AlternatorDynamoDbAsyncClientWrapper client =
+        AlternatorDynamoDbAsyncClient.builder()
+            .endpointOverride(nodes.get(0))
+            .withSeedHosts(nodes.stream().map(URI::getHost).collect(Collectors.toList()))
+            .withNodeHealthDisabled()
+            .credentialsProvider(testCredentials())
+            .httpClient(httpClient)
+            .overrideConfiguration(
+                ClientOverrideConfiguration.builder()
+                    .retryPolicy(RetryPolicy.builder().numRetries(1).build())
+                    .build())
+            .buildWithAlternatorAPI()) {
+      client.getClient().listTables(ListTablesRequest.builder().build()).join();
+    }
+
+    assertRetryWasRerouted(httpClient.requests, httpClient.requestBodies);
+    assertIpv6AuthoritiesAreBracketed(httpClient.requests);
   }
 
   private StaticCredentialsProvider testCredentials() {
     return StaticCredentialsProvider.create(AwsBasicCredentials.create("access-key", "secret-key"));
   }
 
-  private void assertRetryWasRerouted(List<SdkHttpRequest> requests) {
+  private void assertIpv6AuthoritiesAreBracketed(List<SdkHttpRequest> requests) {
+    for (SdkHttpRequest request : requests) {
+      String host = request.firstMatchingHeader("Host").get();
+      assertTrue(host, host.startsWith("[") && host.contains("]:"));
+    }
+  }
+
+  private void assertRetryWasRerouted(List<SdkHttpRequest> requests, List<byte[]> requestBodies) {
     assertEquals(2, requests.size());
+    assertEquals(requests.size(), requestBodies.size());
     assertNotEquals(requests.get(0).getUri(), requests.get(1).getUri());
     assertTrue(requests.get(0).firstMatchingHeader("Authorization").isPresent());
     assertTrue(requests.get(1).firstMatchingHeader("Authorization").isPresent());
     assertTrue(requests.get(0).firstMatchingHeader("Host").isPresent());
-    assertEquals(
-        requests.get(0).firstMatchingHeader("Host"), requests.get(1).firstMatchingHeader("Host"));
+    for (SdkHttpRequest request : requests) {
+      assertEquals(request.getUri().getRawAuthority(), request.firstMatchingHeader("Host").get());
+    }
+    assertNotEquals(
+        requests.get(0).firstMatchingHeader("Authorization"),
+        requests.get(1).firstMatchingHeader("Authorization"));
+    for (int i = 0; i < requests.size(); i++) {
+      assertValidSignature(requests.get(i), requestBodies.get(i));
+    }
+  }
+
+  @SuppressWarnings("deprecation")
+  private static void assertValidSignature(SdkHttpRequest request, byte[] body) {
+    String authorization = request.firstMatchingHeader("Authorization").get();
+    String scope = authorization.substring(authorization.indexOf("Credential=") + 11);
+    scope = scope.substring(scope.indexOf('/') + 1, scope.indexOf(','));
+    String[] scopeParts = scope.split("/");
+    String date = request.firstMatchingHeader("X-Amz-Date").get();
+    Instant signingInstant =
+        LocalDateTime.parse(date, DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'"))
+            .toInstant(ZoneOffset.UTC);
+    SdkHttpFullRequest fullRequest =
+        ((SdkHttpFullRequest) request)
+            .toBuilder()
+                .removeHeader("Authorization")
+                .contentStreamProvider(ContentStreamProvider.fromByteArray(body))
+                .build();
+    SdkHttpFullRequest expected =
+        Aws4Signer.create()
+            .sign(
+                fullRequest,
+                Aws4SignerParams.builder()
+                    .awsCredentials(AwsBasicCredentials.create("access-key", "secret-key"))
+                    .signingRegion(Region.of(scopeParts[1]))
+                    .signingName(scopeParts[2])
+                    .doubleUrlEncode(true)
+                    .normalizePath(true)
+                    .signingClockOverride(Clock.fixed(signingInstant, ZoneOffset.UTC))
+                    .build());
+
+    assertEquals(expected.firstMatchingHeader("Authorization").get(), authorization);
   }
 
   /**
@@ -193,6 +298,12 @@ public class RetryDistributionTest {
       nodes.add(new URI("http://127.0.0." + i + ":8000"));
     }
     return nodes;
+  }
+
+  private List<URI> createIpv6Nodes() throws Exception {
+    return Arrays.asList(
+        new URI("http", null, "::1", 8000, null, null, null),
+        new URI("http", null, "::2", 8000, null, null, null));
   }
 
   @Test
@@ -481,7 +592,7 @@ public class RetryDistributionTest {
             nodes, NodeHealthConfig.builder().withConsecutiveFailureThreshold(2).build());
     BasicQueryPlanInterceptor interceptor = new BasicQueryPlanInterceptor(liveNodes);
 
-    liveNodes.reportNodeResult(node, NodeHealthObservation.TRAFFIC_FAILURE);
+    reportCurrentTraffic(liveNodes, node, NodeHealthObservation.TRAFFIC_FAILURE);
     liveNodes.reports.clear();
 
     ExecutionAttributes attrs = ExecutionAttributes.builder().build();
@@ -574,7 +685,7 @@ public class RetryDistributionTest {
     MockAlternatorLiveNodes liveNodes =
         new MockAlternatorLiveNodes(
             nodes, NodeHealthConfig.builder().withConsecutiveFailureThreshold(1).build());
-    liveNodes.reportNodeResult(down, NodeHealthObservation.TRAFFIC_FAILURE);
+    reportCurrentTraffic(liveNodes, down, NodeHealthObservation.TRAFFIC_FAILURE);
     liveNodes.reports.clear();
     TestableBasicQueryPlanInterceptor interceptor =
         new TestableBasicQueryPlanInterceptor(liveNodes);
@@ -596,7 +707,7 @@ public class RetryDistributionTest {
     MockAlternatorLiveNodes liveNodes =
         new MockAlternatorLiveNodes(
             nodes, NodeHealthConfig.builder().withConsecutiveFailureThreshold(1).build());
-    liveNodes.reportNodeResult(down, NodeHealthObservation.TRAFFIC_FAILURE);
+    reportCurrentTraffic(liveNodes, down, NodeHealthObservation.TRAFFIC_FAILURE);
     TestableBasicQueryPlanInterceptor interceptor =
         new TestableBasicQueryPlanInterceptor(liveNodes);
 
@@ -629,8 +740,8 @@ public class RetryDistributionTest {
     MockAlternatorLiveNodes liveNodes =
         new MockAlternatorLiveNodes(
             nodes, NodeHealthConfig.builder().withConsecutiveFailureThreshold(1).build());
-    liveNodes.reportNodeResult(nodes.get(0), NodeHealthObservation.TRAFFIC_FAILURE);
-    liveNodes.reportNodeResult(nodes.get(1), NodeHealthObservation.TRAFFIC_FAILURE);
+    reportCurrentTraffic(liveNodes, nodes.get(0), NodeHealthObservation.TRAFFIC_FAILURE);
+    reportCurrentTraffic(liveNodes, nodes.get(1), NodeHealthObservation.TRAFFIC_FAILURE);
     TestableBasicQueryPlanInterceptor interceptor =
         new TestableBasicQueryPlanInterceptor(liveNodes);
 
@@ -659,7 +770,7 @@ public class RetryDistributionTest {
                 .withConsecutiveFailureThreshold(1)
                 .withDownNodeRecoverySuccessThreshold(1)
                 .build());
-    liveNodes.reportNodeResult(recovering, NodeHealthObservation.TRAFFIC_FAILURE);
+    reportCurrentTraffic(liveNodes, recovering, NodeHealthObservation.TRAFFIC_FAILURE);
     liveNodes.reportNodeResult(recovering, NodeHealthObservation.PROBE_SUCCESS);
     liveNodes.reports.clear();
     long seed = seedWhereFirstNodeIs(nodes, recovering);
@@ -690,7 +801,7 @@ public class RetryDistributionTest {
                 .withConsecutiveFailureThreshold(1)
                 .withDownNodeRecoverySuccessThreshold(1)
                 .build());
-    liveNodes.reportNodeResult(recovering, NodeHealthObservation.TRAFFIC_FAILURE);
+    reportCurrentTraffic(liveNodes, recovering, NodeHealthObservation.TRAFFIC_FAILURE);
     liveNodes.reportNodeResult(recovering, NodeHealthObservation.PROBE_SUCCESS);
     liveNodes.reports.clear();
     long seed = seedWhereFirstNodeIs(nodes, active);
@@ -721,7 +832,7 @@ public class RetryDistributionTest {
                 .withDownNodeRecoverySuccessThreshold(1)
                 .withQuarantineFailureThreshold(1)
                 .build());
-    liveNodes.reportNodeResult(recovering, NodeHealthObservation.TRAFFIC_FAILURE);
+    reportCurrentTraffic(liveNodes, recovering, NodeHealthObservation.TRAFFIC_FAILURE);
     liveNodes.reportNodeResult(recovering, NodeHealthObservation.PROBE_SUCCESS);
     liveNodes.reports.clear();
     long seed = seedWhereFirstNodeIs(nodes, active);
@@ -733,7 +844,7 @@ public class RetryDistributionTest {
     MockModifyHttpRequestContext context = new MockModifyHttpRequestContext(baseRequest());
 
     SdkHttpRequest first = interceptor.modifyHttpRequest(context, attrs);
-    liveNodes.reportNodeResult(recovering, NodeHealthObservation.TRAFFIC_FAILURE);
+    reportCurrentTraffic(liveNodes, recovering, NodeHealthObservation.TRAFFIC_FAILURE);
 
     assertEquals(active, endpoint(first));
     assertEquals(active, endpoint(interceptor.modifyHttpRequest(context, attrs)));
@@ -753,6 +864,11 @@ public class RetryDistributionTest {
 
   private URI endpoint(SdkHttpRequest request) throws Exception {
     return new URI(request.protocol(), null, request.host(), request.port(), null, null, null);
+  }
+
+  private void reportCurrentTraffic(
+      AlternatorLiveNodes liveNodes, URI node, NodeHealthObservation observation) {
+    liveNodes.reportNodeResult(node, observation, liveNodes.getNodeHealthGeneration(node));
   }
 
   private long seedWhereFirstNodeIs(List<URI> candidates, URI expected) throws Exception {
@@ -841,10 +957,19 @@ public class RetryDistributionTest {
 
   private static class RetryingSdkHttpClient implements SdkHttpClient {
     private final List<SdkHttpRequest> requests = new ArrayList<>();
+    private final List<byte[]> requestBodies = new ArrayList<>();
 
     @Override
     public ExecutableHttpRequest prepareRequest(HttpExecuteRequest request) {
       requests.add(request.httpRequest());
+      try {
+        requestBodies.add(
+            request.contentStreamProvider().isPresent()
+                ? readAll(request.contentStreamProvider().get().newStream())
+                : new byte[0]);
+      } catch (IOException e) {
+        throw new RuntimeException(e);
+      }
       int attempt = requests.size();
       return new ExecutableHttpRequest() {
         @Override
@@ -879,22 +1004,27 @@ public class RetryDistributionTest {
 
   private static class RetryingSdkAsyncHttpClient implements SdkAsyncHttpClient {
     private final List<SdkHttpRequest> requests = new ArrayList<>();
+    private final List<byte[]> requestBodies = new ArrayList<>();
 
     @Override
     public CompletableFuture<Void> execute(AsyncExecuteRequest request) {
       requests.add(request.request());
       int attempt = requests.size();
-      String responseBody = attempt == 1 ? "{\"message\":\"retry\"}" : "{}";
-      byte[] body = responseBody.getBytes(StandardCharsets.UTF_8);
-      SdkHttpFullResponse response =
-          SdkHttpFullResponse.builder()
-              .statusCode(attempt == 1 ? 500 : 200)
-              .putHeader("Content-Type", "application/x-amz-json-1.0")
-              .putHeader("Content-Length", String.valueOf(body.length))
-              .build();
-      request.responseHandler().onHeaders(response);
-      request.responseHandler().onStream(new ByteArrayPublisher(body));
-      return CompletableFuture.completedFuture(null);
+      return readAll(request.requestContentPublisher())
+          .thenAccept(
+              requestBody -> {
+                requestBodies.add(requestBody);
+                String responseBody = attempt == 1 ? "{\"message\":\"retry\"}" : "{}";
+                byte[] body = responseBody.getBytes(StandardCharsets.UTF_8);
+                SdkHttpFullResponse response =
+                    SdkHttpFullResponse.builder()
+                        .statusCode(attempt == 1 ? 500 : 200)
+                        .putHeader("Content-Type", "application/x-amz-json-1.0")
+                        .putHeader("Content-Length", String.valueOf(body.length))
+                        .build();
+                request.responseHandler().onHeaders(response);
+                request.responseHandler().onStream(new ByteArrayPublisher(body));
+              });
     }
 
     @Override
@@ -904,6 +1034,47 @@ public class RetryDistributionTest {
     public String clientName() {
       return "RetryingSdkAsyncHttpClient";
     }
+  }
+
+  private static byte[] readAll(java.io.InputStream input) throws IOException {
+    java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream();
+    byte[] buffer = new byte[1024];
+    int read;
+    while ((read = input.read(buffer)) != -1) {
+      output.write(buffer, 0, read);
+    }
+    return output.toByteArray();
+  }
+
+  private static CompletableFuture<byte[]> readAll(Publisher<ByteBuffer> publisher) {
+    CompletableFuture<byte[]> result = new CompletableFuture<>();
+    java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream();
+    publisher.subscribe(
+        new Subscriber<ByteBuffer>() {
+          @Override
+          public void onSubscribe(Subscription subscription) {
+            subscription.request(Long.MAX_VALUE);
+          }
+
+          @Override
+          public void onNext(ByteBuffer buffer) {
+            ByteBuffer copy = buffer.duplicate();
+            byte[] bytes = new byte[copy.remaining()];
+            copy.get(bytes);
+            output.write(bytes, 0, bytes.length);
+          }
+
+          @Override
+          public void onError(Throwable failure) {
+            result.completeExceptionally(failure);
+          }
+
+          @Override
+          public void onComplete() {
+            result.complete(output.toByteArray());
+          }
+        });
+    return result;
   }
 
   private static class ByteArrayPublisher implements Publisher<ByteBuffer> {

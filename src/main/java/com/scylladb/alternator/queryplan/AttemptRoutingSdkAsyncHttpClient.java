@@ -16,7 +16,7 @@
 package com.scylladb.alternator.queryplan;
 
 import java.util.concurrent.CompletableFuture;
-import software.amazon.awssdk.http.SdkHttpRequest;
+import java.util.concurrent.atomic.AtomicReference;
 import software.amazon.awssdk.http.async.AsyncExecuteRequest;
 import software.amazon.awssdk.http.async.SdkAsyncHttpClient;
 
@@ -39,17 +39,72 @@ public final class AttemptRoutingSdkAsyncHttpClient implements SdkAsyncHttpClien
 
   @Override
   public CompletableFuture<Void> execute(AsyncExecuteRequest request) {
-    SdkHttpRequest routedRequest = router.routeAttempt(request.request());
+    BasicQueryPlanInterceptor.RoutedRequest routed =
+        router.routeAttemptWithContext(request.request());
+    CompletableFuture<AttemptRequestSigner.AsyncResult> signing =
+        AttemptRequestSigner.signAsync(routed, request.requestContentPublisher());
+    CompletableFuture<Void> result = new CompletableFuture<>();
+    AtomicReference<CompletableFuture<Void>> transmission = new AtomicReference<>();
+    signing.whenComplete(
+        (signed, signingFailure) -> {
+          if (signingFailure != null) {
+            if (signing.isCancelled()) {
+              result.cancel(false);
+            } else {
+              result.completeExceptionally(signingFailure);
+            }
+            return;
+          }
+          if (result.isCancelled()) {
+            return;
+          }
+          CompletableFuture<Void> delegateResult;
+          try {
+            delegateResult = delegate.execute(withSignedAttempt(request, signed));
+          } catch (RuntimeException | Error failure) {
+            result.completeExceptionally(failure);
+            return;
+          }
+          transmission.set(delegateResult);
+          if (result.isCancelled()) {
+            delegateResult.cancel(true);
+          }
+          delegateResult.whenComplete(
+              (ignored, transmissionFailure) -> {
+                if (delegateResult.isCancelled()) {
+                  result.cancel(false);
+                } else if (transmissionFailure != null) {
+                  result.completeExceptionally(transmissionFailure);
+                } else {
+                  result.complete(null);
+                }
+              });
+        });
+    result.whenComplete(
+        (ignored, failure) -> {
+          if (result.isCancelled()) {
+            signing.cancel(true);
+            CompletableFuture<Void> delegateResult = transmission.get();
+            if (delegateResult != null) {
+              delegateResult.cancel(true);
+            }
+          }
+        });
+    return result;
+  }
+
+  private AsyncExecuteRequest withSignedAttempt(
+      AsyncExecuteRequest request, AttemptRequestSigner.AsyncResult signed) {
     AsyncExecuteRequest routedExecuteRequest =
         AsyncExecuteRequest.builder()
-            .request(routedRequest)
-            .requestContentPublisher(request.requestContentPublisher())
+            .request(signed.request)
+            .requestContentPublisher(signed.payload)
             .responseHandler(request.responseHandler())
             .fullDuplex(request.fullDuplex())
             .metricCollector(request.metricCollector().orElse(null))
             .httpExecutionAttributes(request.httpExecutionAttributes())
             .build();
-    return delegate.execute(routedExecuteRequest);
+    return routedExecuteRequest;
   }
 
   @Override
