@@ -374,16 +374,20 @@ public class AlternatorLiveNodesConcurrentProbeTest {
       hosts.add(String.format("blocker-%02d.local", i));
     }
     List<String> targetHosts = new ArrayList<>();
-    for (int i = 0; i < 63; i++) {
+    for (int i = 0; i < 60; i++) {
       String host = String.format("target-%02d.local", i);
       hosts.add(host);
       targetHosts.add(host);
     }
-    String sentinelHost = "zz-sentinel.local";
-    hosts.add(sentinelHost);
+    Set<String> sentinelHosts = new HashSet<>();
+    for (int i = 0; i < probeConcurrency; i++) {
+      String host = String.format("zz-sentinel-%02d.local", i);
+      hosts.add(host);
+      sentinelHosts.add(host);
+    }
 
     SuppressionRaceHttpClient client =
-        new SuppressionRaceHttpClient(probeConcurrency, sentinelHost);
+        new SuppressionRaceHttpClient(probeConcurrency, sentinelHosts);
     AlternatorLiveNodes liveNodes =
         liveNodes(
             hosts,
@@ -437,7 +441,8 @@ public class AlternatorLiveNodesConcurrentProbeTest {
       }
 
       client.releaseBlockers.countDown();
-      assertTrue(client.sentinelStarted.await(5, TimeUnit.SECONDS));
+      // Occupying every worker with a terminal sentinel proves every earlier target job settled.
+      assertTrue(client.sentinelsStarted.await(5, TimeUnit.SECONDS));
       for (String host : targetHosts) {
         assertEquals(
             "background-probe suppression must follow the final serialized traffic result for "
@@ -827,13 +832,14 @@ public class AlternatorLiveNodesConcurrentProbeTest {
   private static final class SuppressionRaceHttpClient implements SdkHttpClient {
     private final CountDownLatch blockersStarted;
     private final CountDownLatch releaseBlockers = new CountDownLatch(1);
-    private final CountDownLatch sentinelStarted = new CountDownLatch(1);
-    private final String sentinelHost;
+    private final CountDownLatch sentinelsStarted;
+    private final Set<String> sentinelHosts;
     private final Set<String> requestedHosts = ConcurrentHashMap.newKeySet();
 
-    private SuppressionRaceHttpClient(int blockerCount, String sentinelHost) {
+    private SuppressionRaceHttpClient(int blockerCount, Set<String> sentinelHosts) {
       this.blockersStarted = new CountDownLatch(blockerCount);
-      this.sentinelHost = sentinelHost;
+      this.sentinelsStarted = new CountDownLatch(sentinelHosts.size());
+      this.sentinelHosts = sentinelHosts;
     }
 
     @Override
@@ -854,8 +860,16 @@ public class AlternatorLiveNodesConcurrentProbeTest {
               throw new IOException("interrupted waiting to release blocker probes", e);
             }
           }
-          if (sentinelHost.equals(host)) {
-            sentinelStarted.countDown();
+          if (sentinelHosts.contains(host)) {
+            sentinelsStarted.countDown();
+            try {
+              if (!sentinelsStarted.await(5, TimeUnit.SECONDS)) {
+                throw new IOException("timed out waiting for terminal sentinel probes");
+              }
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+              throw new IOException("interrupted waiting for terminal sentinel probes", e);
+            }
           }
           return HttpExecuteResponse.builder()
               .response(SdkHttpFullResponse.builder().statusCode(503).build())
