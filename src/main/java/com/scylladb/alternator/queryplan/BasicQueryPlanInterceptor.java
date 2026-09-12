@@ -132,11 +132,15 @@ public class BasicQueryPlanInterceptor implements ExecutionInterceptor {
   }
 
   SdkHttpRequest routeAttempt(SdkHttpRequest request) {
+    return routeAttemptWithContext(request).request;
+  }
+
+  RoutedRequest routeAttemptWithContext(SdkHttpRequest request) {
     String executionId = request.firstMatchingHeader(SDK_INVOCATION_ID_HEADER).orElse(null);
     ExecutionAttributes executionAttributes =
         executionId != null ? routingExecutions.get(executionId) : null;
     if (executionAttributes == null) {
-      return request;
+      return new RoutedRequest(request, null, false);
     }
 
     RoutingState routingState = requireRoutingState(executionAttributes);
@@ -147,7 +151,14 @@ public class BasicQueryPlanInterceptor implements ExecutionInterceptor {
             : selectFinalRoute(request, executionAttributes);
     routingState.firstAttempt = false;
     routingState.inFlightNode = routedAttempt.inFlightNode;
-    return routedAttempt.request;
+    return new RoutedRequest(
+        routedAttempt.request, executionAttributes, !sameAuthority(request, routedAttempt.request));
+  }
+
+  private static boolean sameAuthority(SdkHttpRequest left, SdkHttpRequest right) {
+    return left.protocol().equalsIgnoreCase(right.protocol())
+        && left.host().equalsIgnoreCase(right.host())
+        && left.port() == right.port();
   }
 
   private RoutedAttempt revalidateFirstRoute(
@@ -343,6 +354,19 @@ public class BasicQueryPlanInterceptor implements ExecutionInterceptor {
     private RoutedAttempt(SdkHttpRequest request, InFlightNode inFlightNode) {
       this.request = request;
       this.inFlightNode = inFlightNode;
+    }
+  }
+
+  static final class RoutedRequest {
+    final SdkHttpRequest request;
+    final ExecutionAttributes executionAttributes;
+    final boolean authorityChanged;
+
+    RoutedRequest(
+        SdkHttpRequest request, ExecutionAttributes executionAttributes, boolean authorityChanged) {
+      this.request = request;
+      this.executionAttributes = executionAttributes;
+      this.authorityChanged = authorityChanged;
     }
   }
 }

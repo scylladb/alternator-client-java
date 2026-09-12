@@ -23,14 +23,18 @@ It is connected to physical transmissions by
 [`AttemptRoutingSdkHttpClient`](../../src/main/java/com/scylladb/alternator/queryplan/AttemptRoutingSdkHttpClient.java)
 and
 [`AttemptRoutingSdkAsyncHttpClient`](../../src/main/java/com/scylladb/alternator/queryplan/AttemptRoutingSdkAsyncHttpClient.java).
+[`AttemptRequestSigner`](../../src/main/java/com/scylladb/alternator/queryplan/AttemptRequestSigner.java)
+re-signs a prepared attempt when final routing changes its authority.
 
 ## Lifecycle and concurrency
 
 `beforeExecution` creates one plan and routing state. `modifyHttpRequest` selects the initial route.
 `beforeTransmission` registers execution attributes by `amz-sdk-invocation-id`, and the outer
 transport wrapper performs final route selection for each physical transmission before header
-filtering. `afterTransmission` clears in-flight state for every response; execution completion or
-failure unregisters routing state.
+filtering. When selection changes an already signed request's scheme, host, or port, the wrapper
+replaces `Host` and invokes the SDK-selected authentication signer again with the original payload.
+`afterTransmission` clears in-flight state for every response; execution completion or failure
+unregisters routing state.
 
 The routing registry is concurrent. Individual plans are request-scoped and synchronized only where
 health-aware selection mutates tried-state.
@@ -43,7 +47,7 @@ health-aware selection mutates tried-state.
 | `QUERY-REQ-002` | [`LazyQueryPlan`](../../src/main/java/com/scylladb/alternator/internal/LazyQueryPlan.java) | [`LazyQueryPlanTest#testNodesAreNotDuplicated`](../../src/test/java/com/scylladb/alternator/LazyQueryPlanTest.java) | `conformant` |
 | `QUERY-REQ-003` | [`GoRand`](../../src/main/java/com/scylladb/alternator/internal/GoRand.java) | [`FeatureSpecVectorsTest#seededPlansMatchPortableVectors`](../../src/test/java/com/scylladb/alternator/FeatureSpecVectorsTest.java) | `conformant` |
 | `QUERY-REQ-004` | [`LazyQueryPlan`](../../src/main/java/com/scylladb/alternator/internal/LazyQueryPlan.java) | [`LazyQueryPlanTest#testPreferredNodesAreReturnedBeforeSortedRemaining`](../../src/test/java/com/scylladb/alternator/LazyQueryPlanTest.java) | `gap` |
-| `QUERY-REQ-005` | [`BasicQueryPlanInterceptor`](../../src/main/java/com/scylladb/alternator/queryplan/BasicQueryPlanInterceptor.java) | [`RetryDistributionTest#testSdkRetryPipelineRoutesEachAttemptToDifferentNode`](../../src/test/java/com/scylladb/alternator/RetryDistributionTest.java) | `gap` |
+| `QUERY-REQ-005` | [`BasicQueryPlanInterceptor`](../../src/main/java/com/scylladb/alternator/queryplan/BasicQueryPlanInterceptor.java) | [`RetryDistributionTest#testSdkRetryPipelineRoutesEachAttemptToDifferentNode`](../../src/test/java/com/scylladb/alternator/RetryDistributionTest.java) | `conformant` |
 | `QUERY-REQ-006` | [`NodeHealthQueryPlan`](../../src/main/java/com/scylladb/alternator/internal/NodeHealthQueryPlan.java) | [`NodeHealthQueryPlanTest#regularPlanReturnsActiveThenQuarantineInSourceRelativeOrder`](../../src/test/java/com/scylladb/alternator/internal/NodeHealthQueryPlanTest.java) | `conformant` |
 | `QUERY-REQ-007` | [`AttemptRoutingSdkAsyncHttpClient`](../../src/main/java/com/scylladb/alternator/queryplan/AttemptRoutingSdkAsyncHttpClient.java) | [`RetryDistributionTest#testAsyncSdkRetryPipelineRoutesEachAttemptToDifferentNode`](../../src/test/java/com/scylladb/alternator/RetryDistributionTest.java) | `conformant` |
 
@@ -60,7 +64,9 @@ health-aware selection mutates tried-state.
   covers canonical seeded sequences for fixed, negative, zero, and maximum seeds.
 - [`RetryDistributionTest`](../../src/test/java/com/scylladb/alternator/RetryDistributionTest.java)
   covers retry traversal, cycles, physical blocking and non-blocking routing, in-flight attribution,
-  and server-response health classification.
+  authority replacement, signature validation, and server-response health classification.
+- [`AttemptRequestSignerTest`](../../src/test/java/com/scylladb/alternator/queryplan/AttemptRequestSignerTest.java)
+  covers signer payload replacement and asynchronous cancellation propagation.
 - [`NodeHealthQueryPlanTest`](../../src/test/java/com/scylladb/alternator/internal/NodeHealthQueryPlanTest.java)
   covers active and quarantine passes, dynamic eligibility, canonical duplication, and down-node
   exclusion.
@@ -71,8 +77,3 @@ health-aware selection mutates tried-state.
   `testLazyBehaviorReadsCurrentNodes` neither changes topology nor verifies behavior before and after
   initialization; its comment incorrectly says every iterator call reads current state.
 - `QUERY-REQ-004`: Preferred lists containing duplicates or unavailable endpoints lack direct tests.
-- `QUERY-REQ-005`: The transport wrapper can change a physical transmission's URI after signing
-  while preserving the supplied `Host` and `Authorization`. This happens on retries and can happen
-  on a first transmission when final health revalidation advances to another route. Existing tests
-  assert that retry URIs differ while their `Host` headers remain equal and do not validate that
-  authority and authentication represent the selected endpoint.
