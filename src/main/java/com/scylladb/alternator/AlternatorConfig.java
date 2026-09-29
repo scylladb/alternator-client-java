@@ -154,6 +154,19 @@ public class AlternatorConfig {
                   "Host", "X-Amz-Target", "Content-Type", "Content-Length", "Connection")));
 
   /**
+   * HTTP headers used by per-request Alternator options.
+   *
+   * <p>These headers are included in the required whitelist so that an option selected after the
+   * client is built can reach the server when header optimization is enabled. They are emitted only
+   * by requests that explicitly select the corresponding option.
+   *
+   * @since 2.1.0
+   */
+  public static final Set<String> REQUEST_OPTION_HEADERS =
+      Collections.unmodifiableSet(
+          new HashSet<>(Arrays.asList(AlternatorRequestOptions.SERVER_TIMEOUT_HEADER)));
+
+  /**
    * HTTP headers required when response compression is enabled.
    *
    * <ul>
@@ -373,7 +386,16 @@ public class AlternatorConfig {
 
     // Compute default whitelist based on configuration if not provided
     if (headersWhitelist != null) {
-      this.headersWhitelist = Collections.unmodifiableSet(new HashSet<>(headersWhitelist));
+      Set<String> effectiveHeaders = new HashSet<>(headersWhitelist);
+      for (String requestOptionHeader : REQUEST_OPTION_HEADERS) {
+        boolean present =
+            effectiveHeaders.stream()
+                .anyMatch(header -> header.equalsIgnoreCase(requestOptionHeader));
+        if (!present) {
+          effectiveHeaders.add(requestOptionHeader);
+        }
+      }
+      this.headersWhitelist = Collections.unmodifiableSet(effectiveHeaders);
     } else {
       this.headersWhitelist = getRequiredHeaders();
     }
@@ -702,14 +724,15 @@ public class AlternatorConfig {
   /**
    * Returns the set of HTTP headers required for this configuration.
    *
-   * <p>This method returns the minimum set of headers needed based on the current settings
-   * (compression algorithm and authentication state).
+   * <p>This method returns the minimum set of headers needed for per-request options and the
+   * current compression, authentication, and user-agent settings.
    *
    * @return an unmodifiable set of required header names
    * @since 2.0.0
    */
   public Set<String> getRequiredHeaders() {
     Set<String> required = new HashSet<>(BASE_REQUIRED_HEADERS);
+    required.addAll(REQUEST_OPTION_HEADERS);
     if (isResponseCompressionEnabled()) {
       required.addAll(RESPONSE_COMPRESSION_HEADERS);
     }
@@ -861,9 +884,9 @@ public class AlternatorConfig {
     /**
      * Returns the set of HTTP headers required for the current configuration.
      *
-     * <p>This method computes the minimum set of headers needed based on the current builder
-     * settings (compression algorithm and authentication state). Use this to understand what
-     * headers must be included when providing a custom whitelist.
+     * <p>This method computes the minimum set of headers needed for per-request options and the
+     * current builder settings. Use this to understand what headers must be included when providing
+     * a custom whitelist.
      *
      * <p>Example:
      *
@@ -872,8 +895,8 @@ public class AlternatorConfig {
      *     .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP);
      *
      * Set<String> required = builder.getRequiredHeaders();
-     * // required contains: Host, X-Amz-Target, Content-Type, Content-Length,
-     * //                    Content-Encoding, Authorization, X-Amz-Date
+     * // required contains the base headers plus X-Scylla-Timeout, Content-Encoding,
+     * // User-Agent, Authorization, and X-Amz-Date
      * }</pre>
      *
      * @return an unmodifiable set of required header names for the current configuration
@@ -881,6 +904,7 @@ public class AlternatorConfig {
      */
     public Set<String> getRequiredHeaders() {
       Set<String> required = new HashSet<>(BASE_REQUIRED_HEADERS);
+      required.addAll(REQUEST_OPTION_HEADERS);
       if (!responseCompressionAlgorithms.isEmpty()) {
         required.addAll(RESPONSE_COMPRESSION_HEADERS);
       }
@@ -1053,15 +1077,18 @@ public class AlternatorConfig {
     /**
      * Sets a custom whitelist of HTTP headers to preserve when optimization is enabled.
      *
-     * <p>Only headers in this list will be sent with requests when header optimization is enabled.
-     * All other headers will be removed. Header names are matched case-insensitively per RFC 7230.
+     * <p>Only headers in this list and client-managed request-option headers will be sent with
+     * requests when header optimization is enabled. All other headers will be removed. Header names
+     * are matched case-insensitively per RFC 7230.
      *
      * <p>The provided whitelist must include all headers required for the current configuration.
      * Use {@link #getRequiredHeaders()} to see which headers are required. If required headers are
-     * missing, an {@link IllegalArgumentException} will be thrown at build time.
+     * missing, an {@link IllegalArgumentException} will be thrown at build time. Headers in {@link
+     * AlternatorConfig#REQUEST_OPTION_HEADERS} are added automatically and may be omitted from the
+     * provided collection.
      *
-     * <p>Default: Computed automatically based on compression and authentication settings. See
-     * {@link AlternatorConfig#getRequiredHeaders()}.
+     * <p>Default: Computed automatically based on request options, compression, authentication, and
+     * user-agent settings. See {@link AlternatorConfig#getRequiredHeaders()}.
      *
      * <p>Example:
      *
@@ -1451,7 +1478,10 @@ public class AlternatorConfig {
         }
 
         // Validate that all required headers are present (case-insensitive)
-        Set<String> required = getRequiredHeaders();
+        Set<String> required = new HashSet<>(getRequiredHeaders());
+        // New per-request options must not invalidate custom whitelists accepted by earlier client
+        // versions. Their headers are added to the effective whitelist automatically.
+        required.removeAll(REQUEST_OPTION_HEADERS);
         Set<String> headersLowerCase = new HashSet<>();
         for (String h : headersWhitelist) {
           headersLowerCase.add(h.toLowerCase());

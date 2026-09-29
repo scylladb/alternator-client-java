@@ -9,6 +9,10 @@ generic contract.
 [`AlternatorConfig`](../../src/main/java/com/scylladb/alternator/AlternatorConfig.java) exposes
 `optimizeHeaders`, `headersWhitelist`, and computed required-header sets. Client builders infer
 authentication and user-agent enablement and combine those settings with compression requirements.
+The required set always contains the header exposed by
+[`AlternatorRequestOptions`](../../src/main/java/com/scylladb/alternator/AlternatorRequestOptions.java)
+so later per-request timeout overrides survive filtering. The configuration adds this managed
+header to older custom whitelists automatically instead of rejecting them as incomplete.
 
 ## Internal architecture
 
@@ -46,7 +50,8 @@ separately and are not wrapped by main-transport filtering.
 - [`FeatureSpecDefaultsTest`](../../src/test/java/com/scylladb/alternator/FeatureSpecDefaultsTest.java)
   executes the machine-readable opt-in default.
 - [`AlternatorConfigHeadersTest`](../../src/test/java/com/scylladb/alternator/AlternatorConfigHeadersTest.java)
-  covers required sets, custom validation, immutability, and feature combinations.
+  covers required sets, timeout-option eligibility, custom validation, immutability, and feature
+  combinations.
 - [`HeadersFilteringSdkHttpClientTest`](../../src/test/java/com/scylladb/alternator/HeadersFilteringSdkHttpClientTest.java)
   covers blocking filtering, case, multi-value headers, body providers, and lifecycle.
 - [`HeadersFilteringSdkAsyncHttpClientTest`](../../src/test/java/com/scylladb/alternator/HeadersFilteringSdkAsyncHttpClientTest.java)
