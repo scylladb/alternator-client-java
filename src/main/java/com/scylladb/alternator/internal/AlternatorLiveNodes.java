@@ -47,9 +47,10 @@ import software.amazon.awssdk.http.SdkHttpMethod;
 import software.amazon.awssdk.http.SdkHttpRequest;
 
 /**
- * Maintains and automatically updates a list of discovered Alternator nodes in the configured
- * routing scope. Node health is tracked separately from discovery; query plans start from
- * discovered nodes and apply health rules only when choosing nodes for routing.
+ * Maintains and automatically updates discovered Alternator nodes for request routing. Ordinary
+ * query plans use the configured routing scope. When key affinity is combined with a narrower
+ * scope, affinity plans use a separately refreshed cluster-wide view. Node health is tracked
+ * separately from discovery and applied only when choosing nodes for routing.
  *
  * @author dmitry.kropachev
  */
@@ -60,17 +61,27 @@ public class AlternatorLiveNodes extends Thread {
    * Nodes discovered for the configured routing scope.
    *
    * <p>This is not a health-filtered live-node list. Health state lives in {@link
-   * #nodeHealthManager}; down and quarantined nodes can remain here so key-affinity hashing uses a
-   * stable scoped node ring. Initial seed nodes are kept separately and used as discovery fallbacks
-   * without being published into this routing ring unless they are returned by discovery for the
-   * configured scope. Query plans later skip down nodes, return active candidates first, and use
-   * quarantined candidates only after the active pass is exhausted.
+   * #nodeHealthManager}; down and quarantined nodes can remain here so the configured-scope
+   * topology stays stable while health changes. Initial seed nodes are kept separately and used as
+   * discovery fallbacks without being published into this routing ring unless they are returned by
+   * discovery for the configured scope. Query plans later skip down nodes, return active candidates
+   * first, and use quarantined candidates only after the active pass is exhausted.
    */
   private final AtomicReference<List<URI>> discoveredNodes;
+
+  /**
+   * Cluster-wide nodes used only by key-affinity plans when ordinary routing has a narrower scope.
+   *
+   * <p>Regular requests must keep using {@link #discoveredNodes}, while qualifying affinity
+   * requests need one common ring across racks and datacenters so the same key converges on the
+   * same coordinator.
+   */
+  private final AtomicReference<AffinityTopologyState> affinityTopology;
 
   private final List<URI> initialNodes;
   private final AlternatorConfig config;
   private final AtomicBoolean running = new AtomicBoolean(false);
+  private final AtomicBoolean keyRouteAffinityEnabled;
   private final AtomicBoolean shutdownRequested = new AtomicBoolean(false);
   private final AtomicBoolean shutdownStarted = new AtomicBoolean(false);
   private final AtomicBoolean pollingClientClosed = new AtomicBoolean(false);
@@ -315,6 +326,9 @@ public class AlternatorLiveNodes extends Thread {
     } else {
       builder.withResponseCompressionDisabled();
     }
+    if (config.getKeyRouteAffinityConfig() != null) {
+      builder.withKeyRouteAffinity(config.getKeyRouteAffinityConfig());
+    }
     return builder.build();
   }
 
@@ -436,14 +450,20 @@ public class AlternatorLiveNodes extends Thread {
         new LocalNodesResponseParser(config.getScheme(), config.getPort());
     this.initialNodes = dedupePreservingOrder(hostsToUris(seedHosts));
     this.discoveredNodes = new AtomicReference<>();
+    this.affinityTopology =
+        new AtomicReference<>(new AffinityTopologyState(initialNodes, Collections.emptyList()));
     this.config = config;
+    this.keyRouteAffinityEnabled =
+        new AtomicBoolean(
+            config.getKeyRouteAffinityConfig() != null
+                && config.getKeyRouteAffinityConfig().isEnabled());
     this.pollingHttpClient = pollingHttpClient;
     this.ownsPollingClient = ownsPollingClient;
     this.nodeHealthManager =
         new NodeHealthManager(
             config.getNodeHealthConfig(),
             initialNodes,
-            this::getDiscoveredNodesInternal,
+            this::getHealthManagedDiscoveredNodesInternal,
             this::executeHealthProbe);
     try {
       this.validate();
@@ -627,6 +647,13 @@ public class AlternatorLiveNodes extends Thread {
         List<URI> nodes = getNodesForScope(scope);
         if (!nodes.isEmpty()) {
           setDiscoveredNodes(nodes);
+          if (usesSeparateClusterAffinityRing()) {
+            if (scope instanceof ClusterScope) {
+              setAffinityDiscoveredNodes(nodes);
+            } else {
+              refreshClusterAffinityNodes();
+            }
+          }
           logger.log(
               Level.FINE,
               "Updated discovered nodes to "
@@ -659,6 +686,7 @@ public class AlternatorLiveNodes extends Thread {
     } else {
       logger.log(Level.WARNING, "No nodes found in any routing scope, keeping existing node list");
     }
+    refreshClusterAffinityNodes();
   }
 
   void updateLiveNodes() throws IOException {
@@ -680,12 +708,112 @@ public class AlternatorLiveNodes extends Thread {
     nodeHealthManager.publishDiscoveredNodes(deduped, discoveredNodes::set);
   }
 
+  private void refreshClusterAffinityNodes() {
+    if (!usesSeparateClusterAffinityRing()) {
+      return;
+    }
+    try {
+      List<URI> nodes = getNodesForScope(ClusterScope.create(), true);
+      if (!nodes.isEmpty()) {
+        setAffinityDiscoveredNodes(nodes);
+      }
+    } catch (IOException | RuntimeException e) {
+      if (shutdownRequested.get()) {
+        logger.log(Level.FINE, "Cluster-wide affinity discovery stopped during shutdown", e);
+      } else {
+        logger.log(
+            Level.WARNING,
+            "Failed to refresh cluster-wide nodes for key-route affinity; keeping existing ring",
+            e);
+      }
+    }
+  }
+
+  private void setAffinityDiscoveredNodes(List<URI> nodes) {
+    List<URI> deduped = sortAndDedupeNodes(nodes);
+    // Register and directly verify newly learned candidates before exposing the new ring. Requests
+    // racing this refresh keep using the previous complete view instead of observing rack-local
+    // ACTIVE nodes alongside remote candidates that have not yet received a health observation.
+    nodeHealthManager.publishDiscoveredNodes(
+        deduped,
+        pending -> {
+          AffinityTopologyState current = affinityTopology.get();
+          affinityTopology.set(new AffinityTopologyState(current.published, pending));
+        });
+    List<URI> unverified = new ArrayList<>();
+    for (URI node : deduped) {
+      if (getQueryPlanNodeState(node) == NodeHealthState.QUARANTINED) {
+        unverified.add(node);
+      }
+    }
+    boolean verificationCompleted = false;
+    try {
+      if (!unverified.isEmpty()) {
+        nodeHealthManager.probeQuarantinedNodesCompletely(unverified);
+      }
+      verificationCompleted = !shutdownRequested.get() && !Thread.currentThread().isInterrupted();
+    } catch (RuntimeException e) {
+      if (shutdownRequested.get()) {
+        logger.log(Level.FINE, "Affinity-node verification stopped during shutdown", e);
+      } else {
+        logger.log(
+            Level.WARNING,
+            "Affinity-node verification did not complete; retaining previous affinity ring",
+            e);
+      }
+    } finally {
+      if (verificationCompleted) {
+        nodeHealthManager.publishDiscoveredNodes(
+            deduped,
+            published -> {
+              affinityTopology.set(new AffinityTopologyState(published, Collections.emptyList()));
+            });
+      } else {
+        nodeHealthManager.publishDiscoveredNodes(
+            Collections.emptyList(),
+            ignored -> {
+              AffinityTopologyState current = affinityTopology.get();
+              affinityTopology.set(
+                  new AffinityTopologyState(current.published, Collections.emptyList()));
+            });
+      }
+    }
+  }
+
+  private boolean usesSeparateClusterAffinityRing() {
+    return keyRouteAffinityEnabled.get() && !(config.getRoutingScope() instanceof ClusterScope);
+  }
+
+  /**
+   * Enables the cluster-wide topology view required by an affinity query-plan interceptor.
+   *
+   * <p>Client builders normally carry affinity through {@link AlternatorConfig}. This idempotent
+   * signal also supports integrations that construct an {@code AffinityQueryPlanInterceptor}
+   * directly with a separately configured live-node manager.
+   *
+   * @since 2.0.7
+   */
+  public void enableClusterWideAffinityRouting() {
+    if (keyRouteAffinityEnabled.compareAndSet(false, true) && isAlive()) {
+      interrupt();
+    }
+  }
+
   private List<URI> getNodesForScope(RoutingScope scope) throws IOException {
+    return getNodesForScope(scope, false);
+  }
+
+  private List<URI> getNodesForScope(RoutingScope scope, boolean includeAffinityNodes)
+      throws IOException {
     String query = scope.getLocalNodesQuery();
     String requestQuery = query.isEmpty() ? null : query;
 
     DiscoveryAttempt liveAttempt =
-        discoverNodes(scope, liveDiscoveryCandidates(), requestQuery, "live node");
+        discoverNodes(
+            scope,
+            includeAffinityNodes ? affinityDiscoveryCandidates() : liveDiscoveryCandidates(),
+            requestQuery,
+            "live node");
     if (!liveAttempt.nodes.isEmpty()) {
       return liveAttempt.nodes;
     }
@@ -767,9 +895,19 @@ public class AlternatorLiveNodes extends Thread {
   }
 
   private List<URI> liveDiscoveryCandidates() {
-    List<URI> active = getActiveNodesInternal();
-    List<URI> quarantined = getQuarantinedNodesInternal();
-    List<URI> down = getDownNodesInternal();
+    return shuffledHealthTierCandidates(
+        getActiveNodesInternal(), getQuarantinedNodesInternal(), getDownNodesInternal());
+  }
+
+  private List<URI> affinityDiscoveryCandidates() {
+    return shuffledHealthTierCandidates(
+        getHealthManagedDiscoveredNodesByState(NodeHealthState.ACTIVE),
+        getHealthManagedDiscoveredNodesByState(NodeHealthState.QUARANTINED),
+        getHealthManagedDiscoveredNodesByState(NodeHealthState.DOWN));
+  }
+
+  private static List<URI> shuffledHealthTierCandidates(
+      List<URI> active, List<URI> quarantined, List<URI> down) {
     Collections.shuffle(active);
     Collections.shuffle(quarantined);
     Collections.shuffle(down);
@@ -796,12 +934,7 @@ public class AlternatorLiveNodes extends Thread {
         down.add(node);
       }
     }
-    Collections.shuffle(active);
-    Collections.shuffle(quarantined);
-    Collections.shuffle(down);
-    active.addAll(quarantined);
-    active.addAll(down);
-    return active;
+    return shuffledHealthTierCandidates(active, quarantined, down);
   }
 
   private static class DiscoveryAttempt {
@@ -1178,23 +1311,26 @@ public class AlternatorLiveNodes extends Thread {
 
   void scheduleBackgroundHealthProbes() {
     nodeHealthManager.scheduleBackgroundProbes(
-        getDownNodeProbeCandidates(), getQuarantinedNodesInternal());
+        getDownNodeProbeCandidates(),
+        getHealthManagedDiscoveredNodesByState(NodeHealthState.QUARANTINED));
   }
 
   /**
-   * Directly probes every quarantined endpoint in the current discovered set.
+   * Directly probes every quarantined endpoint in the current managed topology views.
    *
    * <p>Each probe sends {@code GET /localnodes} to the endpoint itself. An HTTP 200 response
    * promotes a still-quarantined endpoint to active; failures leave its routing state and traffic
-   * counters unchanged. Before the first successful topology refresh, the discovered set consists
-   * of the configured bootstrap seeds. Probes run through the bounded health-probe executor; this
-   * method waits for its batch to finish.
+   * counters unchanged. When key affinity uses a separate cluster-wide view, its endpoints are
+   * included. Before the first successful topology refresh, the discovered set consists of the
+   * configured bootstrap seeds. Probes run through the bounded health-probe executor; this method
+   * waits for its batch to finish.
    *
    * @return an unmodifiable list of endpoints that returned HTTP 200 during this probe operation
    * @since 2.1.0
    */
   public List<URI> probeQuarantinedNodes() {
-    return nodeHealthManager.probeQuarantinedNodes(getQuarantinedNodesInternal());
+    return nodeHealthManager.probeQuarantinedNodes(
+        getHealthManagedDiscoveredNodesByState(NodeHealthState.QUARANTINED));
   }
 
   /**
@@ -1207,7 +1343,8 @@ public class AlternatorLiveNodes extends Thread {
    * @since 2.1.0
    */
   public CompletableFuture<List<URI>> probeQuarantinedNodesAsync() {
-    return nodeHealthManager.probeQuarantinedNodesAsync(getQuarantinedNodesInternal());
+    return nodeHealthManager.probeQuarantinedNodesAsync(
+        getHealthManagedDiscoveredNodesByState(NodeHealthState.QUARANTINED));
   }
 
   private static long remainingMillis(long deadlineNanos) {
@@ -1227,7 +1364,7 @@ public class AlternatorLiveNodes extends Thread {
   }
 
   private List<URI> getDownNodeProbeCandidates() {
-    List<URI> candidates = dedupePreservingOrder(getDiscoveredNodesInternal());
+    List<URI> candidates = dedupePreservingOrder(getHealthManagedDiscoveredNodesInternal());
     appendUniqueNodes(candidates, initialNodes);
     List<URI> down = new ArrayList<>();
     for (URI candidate : candidates) {
@@ -1252,7 +1389,7 @@ public class AlternatorLiveNodes extends Thread {
   /**
    * Returns nodes for a normal request query plan.
    *
-   * <p>The returned list contains all known discovered candidates. Health filtering is
+   * <p>The returned list contains candidates from the configured routing scope. Health filtering is
    * intentionally applied at the last routing moment by {@link NodeHealthQueryPlan} so plan
    * ordering remains stable while node health changes.
    *
@@ -1260,14 +1397,16 @@ public class AlternatorLiveNodes extends Thread {
    * @since 2.0.6
    */
   public List<URI> getQueryPlanNodes() {
-    return getDiscoveredNodesForAffinityQueryPlan();
+    return sortAndDedupeNodes(getDiscoveredNodesInternal());
   }
 
   /**
    * Returns nodes for a partition-key hash query plan.
    *
-   * <p>The candidate order is the seeded affinity order over all known discovered nodes. Health
-   * filtering is intentionally applied at the last routing moment by {@link NodeHealthQueryPlan}.
+   * <p>The candidate order is the seeded affinity order over the cluster-wide affinity view when
+   * affinity is combined with a narrower routing scope, or the ordinary discovered view otherwise.
+   * Health filtering is intentionally applied at the last routing moment by {@link
+   * NodeHealthQueryPlan}.
    *
    * @param hash partition-key hash
    * @return query-plan node URIs
@@ -1277,11 +1416,28 @@ public class AlternatorLiveNodes extends Thread {
     return drainSeeded(getDiscoveredNodesForAffinityQueryPlan(), hash);
   }
 
+  /**
+   * Captures the canonical affinity ring for one request-scoped routing decision.
+   *
+   * @return immutable affinity-ring snapshot
+   * @since 2.0.7
+   */
+  public List<URI> getAffinityQueryPlanNodesSnapshot() {
+    return Collections.unmodifiableList(getDiscoveredNodesForAffinityQueryPlan());
+  }
+
   List<URI> getQueryPlanNodesWithPreferredNodes(List<URI> preferredNodes) {
     if (preferredNodes == null) {
       throw new IllegalArgumentException("preferredNodes cannot be null");
     }
     return orderPreferredNodesFirst(getDiscoveredNodesForAffinityQueryPlan(), preferredNodes);
+  }
+
+  List<URI> getQueryPlanNodesWithPreferredNodes(List<URI> affinityNodes, List<URI> preferredNodes) {
+    if (affinityNodes == null || preferredNodes == null) {
+      throw new IllegalArgumentException("affinityNodes and preferredNodes cannot be null");
+    }
+    return orderPreferredNodesFirst(sortAndDedupeNodes(affinityNodes), preferredNodes);
   }
 
   /**
@@ -1300,12 +1456,26 @@ public class AlternatorLiveNodes extends Thread {
   }
 
   /**
-   * Returns discovered scoped nodes in the canonical order used to seed key-affinity plans.
+   * Returns the affinity topology view in canonical order.
    *
-   * @return sorted discovered nodes for affinity hashing
+   * @return sorted nodes for affinity hashing
    */
   List<URI> getDiscoveredNodesForAffinityQueryPlan() {
-    return sortAndDedupeNodes(getDiscoveredNodesInternal());
+    return sortAndDedupeNodes(getAffinityDiscoveredNodesInternal());
+  }
+
+  /**
+   * Returns the internal topology view used by key-affinity plans.
+   *
+   * <p>Subclasses supplying their own topology can override this alongside {@link
+   * #getDiscoveredNodesInternal()} when ordinary and affinity routing require different views.
+   *
+   * @return the current affinity topology view (not a copy)
+   */
+  protected List<URI> getAffinityDiscoveredNodesInternal() {
+    return usesSeparateClusterAffinityRing()
+        ? affinityTopology.get().published
+        : getDiscoveredNodesInternal();
   }
 
   NodeHealthState getQueryPlanNodeState(URI node) {
@@ -1372,6 +1542,16 @@ public class AlternatorLiveNodes extends Thread {
     return getLiveNodesInternal();
   }
 
+  private List<URI> getHealthManagedDiscoveredNodesInternal() {
+    List<URI> nodes = dedupePreservingOrder(getDiscoveredNodesInternal());
+    if (usesSeparateClusterAffinityRing()) {
+      AffinityTopologyState topology = affinityTopology.get();
+      appendUniqueNodes(nodes, topology.published);
+      appendUniqueNodes(nodes, topology.pending);
+    }
+    return nodes;
+  }
+
   /**
    * Returns the internal discovered nodes list directly.
    *
@@ -1406,8 +1586,16 @@ public class AlternatorLiveNodes extends Thread {
   }
 
   private List<URI> getDiscoveredNodesByState(NodeHealthState state) {
+    return getNodesByState(getDiscoveredNodesInternal(), state);
+  }
+
+  private List<URI> getHealthManagedDiscoveredNodesByState(NodeHealthState state) {
+    return getNodesByState(getHealthManagedDiscoveredNodesInternal(), state);
+  }
+
+  private List<URI> getNodesByState(List<URI> candidates, NodeHealthState state) {
     List<URI> nodes = new ArrayList<>();
-    for (URI node : getDiscoveredNodesInternal()) {
+    for (URI node : candidates) {
       NodeHealthStatus status = nodeHealthManager.getNodeStatus(node);
       if (status != null && status.getState() == state) {
         nodes.add(node);
@@ -1472,6 +1660,16 @@ public class AlternatorLiveNodes extends Thread {
       keys.add(NodeHealthStore.canonicalNodeKey(node));
     }
     return keys;
+  }
+
+  private static final class AffinityTopologyState {
+    private final List<URI> published;
+    private final List<URI> pending;
+
+    private AffinityTopologyState(List<URI> published, List<URI> pending) {
+      this.published = Collections.unmodifiableList(new ArrayList<>(published));
+      this.pending = Collections.unmodifiableList(new ArrayList<>(pending));
+    }
   }
 
   /**

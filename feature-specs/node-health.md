@@ -22,7 +22,7 @@ endpoints therefore enter quarantine until directly verified.
 | --- | --- |
 | Endpoint | Network destination identified by scheme, host, and effective port. |
 | Canonical endpoint | Identity produced by the exact canonical serialization in [Query plans](query-plan.md#plan-construction), including scheme and host case folding and default-port normalization. |
-| Discovered set | Endpoints returned for the effective routing scope. |
+| Discovered set | Endpoints returned for one topology view: the effective ordinary routing scope or the cluster-wide affinity scope. |
 | Health state | Routing classification `ACTIVE`, `QUARANTINED`, or `DOWN`. |
 | Health status | State snapshot with relevant counters, update time, and attempt generation. |
 | Observation | Classified traffic or probe result allowed to update health. |
@@ -219,8 +219,9 @@ responses clear in-flight state without reporting health. See [Query plans](quer
 ### Key-route affinity
 
 Health eligibility must not alter affinity hashing, voting, or base order. Affinity is calculated
-over the discovered set including quarantine and down endpoints. Active and quarantine passes
-preserve their subsequences. See [Key-route affinity](key-route-affinity.md).
+over the cluster-wide affinity discovered set, including quarantine and down endpoints, even when
+ordinary routing uses a narrower scope. Active and quarantine passes preserve their subsequences.
+See [Key-route affinity](key-route-affinity.md).
 
 ### Error handling and compression
 

@@ -23,7 +23,7 @@ key values, and node health may select a different endpoint.
 | Partition-key metadata | Mapping from table name to HASH-key attribute name. |
 | Affinity value | Request attribute value belonging to the table partition key. |
 | Affinity hash | Signed 64-bit hash produced from a typed partition-key byte representation. |
-| Affinity ring | Canonically sorted discovered endpoint set used to derive preferences. |
+| Affinity ring | Canonically sorted cluster-wide endpoint set used to derive preferences. |
 | Preferred endpoint | First endpoint produced by the seeded query-plan algorithm for one affinity hash. |
 | Seeded affinity plan | Deterministic candidate permutation seeded by one affinity hash. |
 | Batch target | One usable put or delete within `BatchWriteItem`. |
@@ -121,6 +121,11 @@ skipped.
 Each target resolves metadata, extracts and hashes its partition key, calculates its preferred
 endpoint from the stable ring, and contributes one vote. Missing metadata may trigger discovery.
 
+The client must capture one immutable affinity-ring snapshot for the logical batch. Every target
+must vote against that same snapshot, and the resulting retry sequence must append remaining
+endpoints from that snapshot. A topology update during vote aggregation must affect only later
+queries.
+
 Voted endpoints are ordered by descending vote count, then lexicographically by complete endpoint
 string. Remaining discovered endpoints follow in canonical order. Ordering must not depend on map
 iteration, equivalent write-list ordering, or non-key item attributes. If no target produces a vote,
@@ -148,6 +153,15 @@ after every currently eligible endpoint has been tried. See [Node health](node-h
 Adding or removing a discovered endpoint changes the affinity ring and may remap keys. Merely
 changing endpoint health must not change the ring or deterministic base order.
 
+When ordinary routing is limited to a rack or datacenter, qualifying affinity requests must use an
+independently discovered cluster-wide ring. Key affinity takes precedence over the ordinary routing
+scope so clients in different racks derive the same preference for the same key. Non-qualifying
+requests must continue to use the configured routing scope and its fallback chain.
+
+Configured seeds may temporarily form the affinity ring before the first successful cluster-wide
+refresh. A failed or empty cluster-wide refresh must retain the previous affinity ring rather than
+replace it with the narrower rack or datacenter result.
+
 ### Header optimization and compression
 
 Affinity changes only destination and plan order. It must preserve headers, body, compression,
@@ -169,6 +183,10 @@ cannot discover metadata uses random fallback rather than blocking or failing th
 - A down endpoint may win a vote but is skipped without recomputing votes.
 - Quarantined candidates are returned only after the active pass is exhausted.
 - A topology update after plan initialization affects later queries, not current retries.
+- A topology update during batch vote aggregation does not mix rings within the batch or replace
+  the ring used by its retry sequence.
+- Clients in different racks use the same cluster-wide ring for qualifying affinity requests while
+  their non-qualifying requests remain rack-scoped.
 - Compression and signing retain identical logical content through an affinity plan.
 - Closing the client stops background metadata discovery.
 
@@ -224,3 +242,8 @@ quarantine eligibility only after deterministic planning.
 
 Discovery resources must stop with the owner, and blocking and non-blocking forms must produce
 equivalent results whenever they have equivalent metadata.
+
+### AFF-REQ-008: Routing-scope precedence
+
+Qualifying affinity requests must derive their plans from a cluster-wide ring regardless of a
+narrower ordinary routing scope, while non-qualifying requests must retain that configured scope.
