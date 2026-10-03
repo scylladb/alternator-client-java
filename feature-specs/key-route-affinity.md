@@ -23,7 +23,7 @@ key values, and node health may select a different endpoint.
 | Partition-key metadata | Mapping from table name to HASH-key attribute name. |
 | Affinity value | Request attribute value belonging to the table partition key. |
 | Affinity hash | Signed 64-bit hash produced from a typed partition-key byte representation. |
-| Affinity ring | Canonically sorted discovered endpoint set used to derive preferences. |
+| Affinity ring | Canonically sorted endpoint set from the selected affinity scope used to derive preferences. |
 | Preferred endpoint | First endpoint produced by the seeded query-plan algorithm for one affinity hash. |
 | Seeded affinity plan | Deterministic candidate permutation seeded by one affinity hash. |
 | Batch target | One usable put or delete within `BatchWriteItem`. |
@@ -121,6 +121,11 @@ skipped.
 Each target resolves metadata, extracts and hashes its partition key, calculates its preferred
 endpoint from the stable ring, and contributes one vote. Missing metadata may trigger discovery.
 
+The client must capture one immutable affinity-ring snapshot for the logical batch. Every target
+must vote against that same snapshot, and the resulting retry sequence must append remaining
+endpoints from that snapshot. A topology update during vote aggregation must affect only later
+queries.
+
 Voted endpoints are ordered by descending vote count, then lexicographically by complete endpoint
 string. Remaining discovered endpoints follow in canonical order. Ordering must not depend on map
 iteration, equivalent write-list ordering, or non-key item attributes. If no target produces a vote,
@@ -148,6 +153,27 @@ after every currently eligible endpoint has been tried. See [Node health](node-h
 Adding or removing a discovered endpoint changes the affinity ring and may remap keys. Merely
 changing endpoint health must not change the ring or deterministic base order.
 
+When affinity is initialized, resolve its full scope chain once. Replace only built-in rack
+restrictions with their named datacenters, preserving the complete explicit fallback chain and its
+order. Add no implicit fallback. For example, `rack(A,r1) → rack(B,r2) → cluster` becomes
+`DC(A) → DC(B) → cluster`. Collapse equivalent discovery operations by query and seed aggregation
+behavior, keeping their first occurrence. Preserve custom scope objects and their runtime queries,
+and leave the ordinary scope chain unchanged.
+
+Discover named datacenters through `/localnodes?dc=<configured-dc>` and use the first usable scope
+without combining unrelated seed-local datacenter responses. Explicit cluster discovery retains its
+seed aggregation and partial-failure behavior. Share matching discovery outcomes between ordinary
+and affinity views within each refresh attempt, including empty and failed outcomes. Later refreshes
+retry discovery. No extra discovery is needed when affinity is disabled or the ordinary outcome
+already satisfies the selected affinity operation. Non-qualifying requests keep their configured
+ordinary scope and fallback chain.
+
+Configured seeds or the existing rack view may temporarily serve requests before successful
+discovery or during failures. A failed or empty refresh retains the previous affinity ring.
+Startup and discovery failures do not introduce a new wait-then-error requirement. Affinity scope
+discovery preserves existing health admission and recovery rules and adds no separate readiness or
+synchronous verification requirement.
+
 ### Header optimization and compression
 
 Affinity changes only destination and plan order. It must preserve headers, body, compression,
@@ -169,6 +195,10 @@ cannot discover metadata uses random fallback rather than blocking or failing th
 - A down endpoint may win a vote but is skipped without recomputing votes.
 - Quarantined candidates are returned only after the active pass is exhausted.
 - A topology update after plan initialization affects later queries, not current retries.
+- A topology update during batch vote aggregation does not mix rings within the batch or replace
+  the ring used by its retry sequence.
+- Clients in different racks use the same selected datacenter ring for qualifying affinity requests while
+  their non-qualifying requests remain rack-scoped.
 - Compression and signing retain identical logical content through an affinity plan.
 - Closing the client stops background metadata discovery.
 
@@ -224,3 +254,10 @@ quarantine eligibility only after deterministic planning.
 
 Discovery resources must stop with the owner, and blocking and non-blocking forms must produce
 equivalent results whenever they have equivalent metadata.
+
+### AFF-REQ-008: Routing-scope precedence
+
+Qualifying affinity requests must use a chain resolved once at affinity initialization, with each
+built-in rack restriction replaced by its named datacenter. Preserve explicit fallback order, custom
+scope behavior and query-plus-aggregation operation equivalence. Add no implicit fallback.
+Non-qualifying requests retain the configured ordinary scope.
