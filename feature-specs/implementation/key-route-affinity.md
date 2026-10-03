@@ -11,6 +11,9 @@ defines `NONE`, `RMW`, and `ANY_WRITE`.
 [`KeyRouteAffinityConfig`](../../src/main/java/com/scylladb/alternator/keyrouting/KeyRouteAffinityConfig.java)
 stores the mode and optional table-to-partition-key mappings. Both client builders accept either a
 mode or full configuration.
+[`AlternatorLiveNodes#enableClusterWideAffinityRouting`](../../src/main/java/com/scylladb/alternator/internal/AlternatorLiveNodes.java)
+is the idempotent integration signal used by an enabled affinity interceptor. It enables the
+cluster-wide topology view and wakes a running discovery manager so the new view is refreshed.
 
 ## Internal architecture
 
@@ -24,6 +27,11 @@ encodes typed values, and
 [`MurmurHash3`](../../src/main/java/com/scylladb/alternator/keyrouting/MurmurHash3.java) produces the
 seed. [`AffinityQueryPlanInterceptor`](../../src/main/java/com/scylladb/alternator/queryplan/AffinityQueryPlanInterceptor.java)
 selects seeded single-item plans or aggregates batch votes.
+[`AlternatorLiveNodes`](../../src/main/java/com/scylladb/alternator/internal/AlternatorLiveNodes.java)
+keeps the configured routing-scope ring for ordinary plans and a separately refreshed cluster-wide
+ring for affinity plans when the configured scope is narrower than the cluster. Newly learned
+cluster candidates are registered with node health and verified through the bounded health-probe
+coordinator before the replacement affinity ring is published atomically.
 
 ## Lifecycle and concurrency
 
@@ -43,6 +51,7 @@ and closing transports.
 | `AFF-REQ-005` | [`AffinityQueryPlanInterceptor`](../../src/main/java/com/scylladb/alternator/queryplan/AffinityQueryPlanInterceptor.java) | [`BatchWriteItemKeyRouteAffinityCrossLanguageTest#testVotePreferenceIgnoresNonKeyAttributes`](../../src/test/java/com/scylladb/alternator/keyrouting/BatchWriteItemKeyRouteAffinityCrossLanguageTest.java) | `gap` |
 | `AFF-REQ-006` | [`NodeHealthQueryPlan`](../../src/main/java/com/scylladb/alternator/internal/NodeHealthQueryPlan.java) | [`AffinityQueryPlanInterceptorTest#testBatchWriteItemSkipsDownPreferredNodeUsingStableKnownOrder`](../../src/test/java/com/scylladb/alternator/AffinityQueryPlanInterceptorTest.java) | `conformant` |
 | `AFF-REQ-007` | [`AlternatorDynamoDbClientWrapper`](../../src/main/java/com/scylladb/alternator/AlternatorDynamoDbClientWrapper.java) | [`AlternatorDynamoDbClientWrapperShutdownTest#testAsyncWrapperShutsDownAffinityResolverBeforeClosingClients`](../../src/test/java/com/scylladb/alternator/AlternatorDynamoDbClientWrapperShutdownTest.java) | `gap` |
+| `AFF-REQ-008` | [`AlternatorLiveNodes`](../../src/main/java/com/scylladb/alternator/internal/AlternatorLiveNodes.java) | [`AlternatorLiveNodesAffinityScopeTest#testRmwAffinityOverridesRackScopeWhileReadsRemainLocal`](../../src/test/java/com/scylladb/alternator/internal/AlternatorLiveNodesAffinityScopeTest.java) | `conformant` |
 
 ## Test coverage
 
@@ -60,6 +69,10 @@ and closing transports.
   covers plan selection, batch voting, ties, fallback, and health interactions.
 - [`LazyQueryPlanCrossLanguageTest`](../../src/test/java/com/scylladb/alternator/LazyQueryPlanCrossLanguageTest.java)
   covers seeded endpoint orders.
+- [`AlternatorLiveNodesAffinityScopeTest`](../../src/test/java/com/scylladb/alternator/internal/AlternatorLiveNodesAffinityScopeTest.java)
+  covers cluster-wide affinity precedence over rack scope for single-item and batch writes while
+  preserving rack-local routing for reads, probing remote candidates, and retaining the previous
+  ring while a replacement is being verified.
 
 ## Known conformance gaps
 

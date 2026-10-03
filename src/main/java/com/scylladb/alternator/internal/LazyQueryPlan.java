@@ -163,14 +163,14 @@ public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
    *
    * @param liveNodes the live nodes manager
    * @return sorted discovered nodes for affinity hashing
-   * @deprecated Use {@link AlternatorLiveNodes#getQueryPlanNodes()} instead.
+   * @deprecated Affinity plans obtain this topology view internally.
    */
   @Deprecated
   public static List<URI> sortedAffinityNodes(AlternatorLiveNodes liveNodes) {
     if (liveNodes == null) {
       throw new IllegalArgumentException("liveNodes cannot be null");
     }
-    return liveNodes.getQueryPlanNodes();
+    return liveNodes.getDiscoveredNodesForAffinityQueryPlan();
   }
 
   /**

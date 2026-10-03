@@ -72,6 +72,9 @@ public class AffinityQueryPlanInterceptor extends BasicQueryPlanInterceptor {
       DynamoDbClient clientForDiscovery) {
     super(liveNodes);
     this.config = config;
+    if (config.isEnabled()) {
+      liveNodes.enableClusterWideAffinityRouting();
+    }
     this.pkResolver = new PartitionKeyResolver(config.getPkInfoPerTable());
     this.clientForDiscovery = clientForDiscovery;
   }

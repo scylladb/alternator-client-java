@@ -114,10 +114,14 @@ final class NodeHealthManager {
       throw new IllegalArgumentException("nodes and publisher cannot be null");
     }
     synchronized (topologyHealthLock) {
-      for (URI node : nodes) {
-        healthStore.addQuarantinedNode(node);
-      }
+      registerDiscoveredNodesLocked(nodes);
       publisher.accept(nodes);
+    }
+  }
+
+  private void registerDiscoveredNodesLocked(List<URI> nodes) {
+    for (URI node : nodes) {
+      healthStore.addQuarantinedNode(node);
     }
   }
 
@@ -245,6 +249,55 @@ final class NodeHealthManager {
         throw (IllegalStateException) e.getCause();
       }
       throw e;
+    }
+  }
+
+  void probeQuarantinedNodesCompletely(List<URI> candidateNodes) {
+    if (isProbeWorkerThread()) {
+      throw new IllegalStateException("blocking probe API cannot run on a health-probe worker");
+    }
+    List<URI> candidates = copyCandidates(candidateNodes);
+    int batchSize = Math.max(1, config.getHealthProbeConcurrency());
+    for (int start = 0; start < candidates.size(); start += batchSize) {
+      int end = Math.min(candidates.size(), start + batchSize);
+      probeQuarantinedBatchCompletely(new ArrayList<>(candidates.subList(start, end)));
+    }
+  }
+
+  private void probeQuarantinedBatchCompletely(List<URI> pending) {
+    while (!pending.isEmpty()) {
+      List<CompletableFuture<ProbeOutcome>> futures = new ArrayList<>();
+      for (URI node : pending) {
+        futures.add(submitProbe(node, ProbePriority.EXPLICIT, true));
+      }
+      List<URI> retry = new ArrayList<>();
+      for (int i = 0; i < futures.size(); i++) {
+        try {
+          futures.get(i).join();
+        } catch (CompletionException e) {
+          if (!(e.getCause() instanceof RejectedExecutionException) || shutdownRequested.get()) {
+            throw e;
+          }
+          retry.add(pending.get(i));
+        }
+      }
+      if (!retry.isEmpty()) {
+        awaitProbeCapacity();
+      }
+      pending = retry;
+    }
+  }
+
+  private void awaitProbeCapacity() {
+    if (shutdownRequested.get()) {
+      throw new IllegalStateException("live-node manager is shut down");
+    }
+    try {
+      probeCapacity.acquire();
+      probeCapacity.release();
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new IllegalStateException("interrupted while waiting for health-probe capacity", e);
     }
   }
 

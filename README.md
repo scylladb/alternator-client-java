@@ -963,14 +963,16 @@ it. DynamoDB traffic results received after a node becomes down are treated as s
 change its state, counters, or probe-recovery progress.
 
 Key route affinity hashes and votes over all known discovered nodes so candidate order is stable
-while health changes. Every request makes two passes over its source order: it first returns active
-nodes, then falls back to quarantined nodes if the active candidates are exhausted. Down nodes are
-always skipped. Regular query plans use a random source order; affinity query plans calculate one
-deterministic order over all discovered nodes, including down nodes, and preserve that order within
-both passes. If the SDK requests another attempt after every eligible endpoint has been tried, the
-plan starts another cycle: regular plans reshuffle, affinity plans reuse their deterministic order.
-If all candidates are down, the request fails locally. The SDK request endpoint is never used as a
-separate fallback.
+while health changes. With rack- or datacenter-scoped routing, qualifying affinity requests use a
+separately discovered cluster-wide ring, while reads and other non-qualifying requests keep using
+the configured local scope. Every request makes two passes over its source order: it first returns
+active nodes, then falls back to quarantined nodes if the active candidates are exhausted. Down
+nodes are always skipped. Regular query plans use a random source order; affinity query plans
+calculate one deterministic order over all nodes in the cluster-wide affinity ring, including down
+nodes, and preserve that order within both passes. If the SDK requests another attempt after every
+eligible endpoint has been tried, the plan starts another cycle: regular plans reshuffle, affinity
+plans reuse their deterministic order. If all candidates are down, the request fails locally. The
+SDK request endpoint is never used as a separate fallback.
 
 While a node is quarantined, successful traffic advances promotion and clears the failure streak. A
 traffic failure resets promotion progress while leaving the node in quarantine; 3 consecutive
@@ -1096,6 +1098,10 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
    vote count, then by node URL
 5. Non-qualifying operations and requests without usable partition keys continue to use
    random query-plan load balancing
+
+When key route affinity is combined with rack- or datacenter-scoped routing, qualifying writes use
+an unfiltered cluster-wide node ring so clients in different scopes converge on the same preferred
+coordinator. Reads and other non-qualifying operations continue to use the configured local scope.
 
 #### When to use key route affinity
 
