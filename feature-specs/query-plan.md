@@ -168,10 +168,11 @@ does not own retry traversal, endpoint replacement, or outcome attribution. See
 
 ### Topology discovery
 
-Plans read from the current discovered routing ring, not directly from seed configuration. Initial
-seeds may temporarily form that ring before the first successful refresh. Lazy snapshot capture
-uses the freshest set available at first route selection while preventing later topology changes
-from rebuilding the plan.
+Plans read from the current discovered topology view, not directly from seed configuration. Random
+plans use the configured routing-scope ring; qualifying affinity plans use the selected affinity
+ring. Initial seeds may temporarily form either ring before the first successful refresh. Lazy
+snapshot capture uses the freshest appropriate set available at first route selection while
+preventing later topology changes from rebuilding the plan.
 
 ### Header optimization
 

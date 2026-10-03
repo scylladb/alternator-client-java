@@ -149,10 +149,8 @@ final class NodeHealthManager {
 
   List<URI> runDownNodeProbes(List<URI> candidateNodes) {
     List<URI> candidates = copyCandidates(candidateNodes);
-    List<CompletableFuture<ProbeOutcome>> futures = new ArrayList<>();
-    for (URI node : candidates) {
-      futures.add(submitProbe(node, ProbePriority.DOWN, true));
-    }
+    List<CompletableFuture<ProbeOutcome>> futures =
+        submitExplicitProbeBatch(candidates, ProbePriority.DOWN);
     awaitProbeFutures(futures);
     List<URI> recovered = new ArrayList<>();
     for (URI node : candidates) {
@@ -253,10 +251,8 @@ final class NodeHealthManager {
       return failedFuture(new IllegalStateException("live-node manager is shut down"));
     }
     List<URI> candidates = copyCandidates(candidateNodes);
-    List<CompletableFuture<ProbeOutcome>> futures = new ArrayList<>();
-    for (URI node : candidates) {
-      futures.add(submitProbe(node, ProbePriority.EXPLICIT, true));
-    }
+    List<CompletableFuture<ProbeOutcome>> futures =
+        submitExplicitProbeBatch(candidates, ProbePriority.EXPLICIT);
     CompletableFuture<Void> completed =
         CompletableFuture.allOf(futures.toArray(new CompletableFuture<?>[0]));
     return completed.thenApply(
@@ -269,6 +265,24 @@ final class NodeHealthManager {
           }
           return Collections.unmodifiableList(successful);
         });
+  }
+
+  private List<CompletableFuture<ProbeOutcome>> submitExplicitProbeBatch(
+      List<URI> candidates, ProbePriority priority) {
+    List<CompletableFuture<ProbeOutcome>> futures = new ArrayList<>();
+    int concurrency = config.getHealthProbeConcurrency();
+    for (int i = 0; i < candidates.size(); i++) {
+      URI node = candidates.get(i);
+      // A large topology must not fill the bounded queue with its own explicit batch. Keep
+      // one pending probe per worker; other callers still use the same global admission limit.
+      futures.add(
+          i < concurrency
+              ? submitProbe(node, priority, true)
+              : futures
+                  .get(i - concurrency)
+                  .thenCompose(ignored -> submitProbe(node, priority, true)));
+    }
+    return futures;
   }
 
   private CompletableFuture<ProbeOutcome> submitProbe(
