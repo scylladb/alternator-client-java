@@ -23,6 +23,7 @@ import com.scylladb.alternator.keyrouting.AttributeValueHasher;
 import com.scylladb.alternator.keyrouting.KeyRouteAffinity;
 import com.scylladb.alternator.keyrouting.KeyRouteAffinityConfig;
 import com.scylladb.alternator.queryplan.AffinityQueryPlanInterceptor;
+import com.scylladb.alternator.queryplan.AttemptRoutingSdkHttpClient;
 import com.scylladb.alternator.queryplan.BasicQueryPlanInterceptor;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -36,12 +37,14 @@ import org.junit.Before;
 import org.junit.Test;
 import software.amazon.awssdk.auth.credentials.AnonymousCredentialsProvider;
 import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
+import software.amazon.awssdk.core.retry.RetryPolicy;
 import software.amazon.awssdk.http.AbortableInputStream;
 import software.amazon.awssdk.http.ExecutableHttpRequest;
 import software.amazon.awssdk.http.HttpExecuteRequest;
 import software.amazon.awssdk.http.HttpExecuteResponse;
 import software.amazon.awssdk.http.SdkHttpClient;
 import software.amazon.awssdk.http.SdkHttpFullResponse;
+import software.amazon.awssdk.http.SdkHttpRequest;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeAction;
@@ -120,6 +123,27 @@ public class AffinityQueryPlanInterceptorTest {
         .endpointOverride(testNodeUris.get(0))
         .httpClient(mockHttpClient)
         .overrideConfiguration(overrideBuilder.build())
+        .build();
+  }
+
+  private DynamoDbClient createRetryingClient(
+      KeyRouteAffinityConfig keyAffinity,
+      AlternatorLiveNodes liveNodes,
+      RetryingMockSdkHttpClient httpClient,
+      int retries) {
+    AffinityQueryPlanInterceptor interceptor =
+        new AffinityQueryPlanInterceptor(keyAffinity, liveNodes);
+    ClientOverrideConfiguration overrides =
+        ClientOverrideConfiguration.builder()
+            .addExecutionInterceptor(interceptor)
+            .retryPolicy(RetryPolicy.builder().numRetries(retries).build())
+            .build();
+    return DynamoDbClient.builder()
+        .region(Region.of("test-region"))
+        .credentialsProvider(AnonymousCredentialsProvider.create())
+        .endpointOverride(testNodeUris.get(0))
+        .httpClient(new AttemptRoutingSdkHttpClient(httpClient, interceptor))
+        .overrideConfiguration(overrides)
         .build();
   }
 
@@ -1708,7 +1732,10 @@ public class AffinityQueryPlanInterceptorTest {
             new URI("http://127.0.1.3:8000"));
     PublishingMockAlternatorLiveNodes liveNodes =
         new PublishingMockAlternatorLiveNodes(originalRing, replacementRing);
-    DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.ANY_WRITE), liveNodes);
+    RetryingMockSdkHttpClient retryingHttpClient = new RetryingMockSdkHttpClient(2);
+    DynamoDbClient client =
+        createRetryingClient(
+            buildConfig(KeyRouteAffinity.ANY_WRITE), liveNodes, retryingHttpClient, 2);
     try {
       Map<String, List<WriteRequest>> requestItems = new LinkedHashMap<>();
       requestItems.put(
@@ -1722,16 +1749,19 @@ public class AffinityQueryPlanInterceptorTest {
                   .build()));
       long hash = AttributeValueHasher.hash(AttributeValue.builder().s(PK_VALUE).build());
       URI expectedRoute = firstNodeForSeed(originalRing, hash);
+      List<URI> expectedAttempts = new ArrayList<>();
+      expectedAttempts.add(expectedRoute);
+      for (URI node : originalRing) {
+        if (!node.equals(expectedRoute)) {
+          expectedAttempts.add(node);
+        }
+      }
 
-      mockHttpClient.clearCapturedRequests();
       client.batchWriteItem(BatchWriteItemRequest.builder().requestItems(requestItems).build());
 
       assertEquals(1, liveNodes.getSnapshotCount());
       assertEquals(replacementRing, liveNodes.getQueryPlanNodes());
-      assertSameRoute(
-          "Batch votes and retry order must retain the captured ring",
-          expectedRoute,
-          mockHttpClient.getLastRequestUri());
+      assertEquals(expectedAttempts, retryingHttpClient.getAttemptEndpoints());
     } finally {
       client.close();
     }
@@ -2283,6 +2313,58 @@ public class AffinityQueryPlanInterceptorTest {
       CapturedRequest(URI uri) {
         this.uri = uri;
       }
+    }
+  }
+
+  private static final class RetryingMockSdkHttpClient implements SdkHttpClient {
+    private final List<SdkHttpRequest> requests = new CopyOnWriteArrayList<>();
+    private final int failures;
+
+    RetryingMockSdkHttpClient(int failures) {
+      this.failures = failures;
+    }
+
+    List<URI> getAttemptEndpoints() {
+      List<URI> endpoints = new ArrayList<>();
+      for (SdkHttpRequest request : requests) {
+        endpoints.add(
+            URI.create(request.protocol() + "://" + request.host() + ":" + request.port()));
+      }
+      return endpoints;
+    }
+
+    @Override
+    public ExecutableHttpRequest prepareRequest(HttpExecuteRequest request) {
+      requests.add(request.httpRequest());
+      int attempt = requests.size();
+      return new ExecutableHttpRequest() {
+        @Override
+        public HttpExecuteResponse call() {
+          String body = attempt <= failures ? "{\"message\":\"retry\"}" : "{}";
+          byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+          SdkHttpFullResponse response =
+              SdkHttpFullResponse.builder()
+                  .statusCode(attempt <= failures ? 500 : 200)
+                  .putHeader("Content-Type", "application/x-amz-json-1.0")
+                  .putHeader("Content-Length", String.valueOf(bytes.length))
+                  .build();
+          return HttpExecuteResponse.builder()
+              .response(response)
+              .responseBody(AbortableInputStream.create(new ByteArrayInputStream(bytes)))
+              .build();
+        }
+
+        @Override
+        public void abort() {}
+      };
+    }
+
+    @Override
+    public void close() {}
+
+    @Override
+    public String clientName() {
+      return "RetryingMockSdkHttpClient";
     }
   }
 }

@@ -76,9 +76,7 @@ public class AlternatorLiveNodes extends Thread {
    * requests need one common ring across racks and datacenters so the same key converges on the
    * same coordinator.
    */
-  private final AtomicReference<List<URI>> affinityDiscoveredNodes;
-
-  private final AtomicReference<List<URI>> pendingAffinityDiscoveredNodes;
+  private final AtomicReference<AffinityTopologyState> affinityTopology;
 
   private final List<URI> initialNodes;
   private final AlternatorConfig config;
@@ -452,8 +450,8 @@ public class AlternatorLiveNodes extends Thread {
         new LocalNodesResponseParser(config.getScheme(), config.getPort());
     this.initialNodes = dedupePreservingOrder(hostsToUris(seedHosts));
     this.discoveredNodes = new AtomicReference<>();
-    this.affinityDiscoveredNodes = new AtomicReference<>();
-    this.pendingAffinityDiscoveredNodes = new AtomicReference<>(Collections.emptyList());
+    this.affinityTopology =
+        new AtomicReference<>(new AffinityTopologyState(initialNodes, Collections.emptyList()));
     this.config = config;
     this.keyRouteAffinityEnabled =
         new AtomicBoolean(
@@ -473,7 +471,6 @@ public class AlternatorLiveNodes extends Thread {
       throw new RuntimeException(e);
     }
     this.discoveredNodes.set(initialNodes);
-    this.affinityDiscoveredNodes.set(initialNodes);
   }
 
   /**
@@ -737,7 +734,12 @@ public class AlternatorLiveNodes extends Thread {
     // Register and directly verify newly learned candidates before exposing the new ring. Requests
     // racing this refresh keep using the previous complete view instead of observing rack-local
     // ACTIVE nodes alongside remote candidates that have not yet received a health observation.
-    nodeHealthManager.publishDiscoveredNodes(deduped, pendingAffinityDiscoveredNodes::set);
+    nodeHealthManager.publishDiscoveredNodes(
+        deduped,
+        pending -> {
+          AffinityTopologyState current = affinityTopology.get();
+          affinityTopology.set(new AffinityTopologyState(current.published, pending));
+        });
     List<URI> unverified = new ArrayList<>();
     for (URI node : deduped) {
       if (getQueryPlanNodeState(node) == NodeHealthState.QUARANTINED) {
@@ -764,12 +766,16 @@ public class AlternatorLiveNodes extends Thread {
         nodeHealthManager.publishDiscoveredNodes(
             deduped,
             published -> {
-              affinityDiscoveredNodes.set(published);
-              pendingAffinityDiscoveredNodes.set(Collections.emptyList());
+              affinityTopology.set(new AffinityTopologyState(published, Collections.emptyList()));
             });
       } else {
         nodeHealthManager.publishDiscoveredNodes(
-            Collections.emptyList(), pendingAffinityDiscoveredNodes::set);
+            Collections.emptyList(),
+            ignored -> {
+              AffinityTopologyState current = affinityTopology.get();
+              affinityTopology.set(
+                  new AffinityTopologyState(current.published, Collections.emptyList()));
+            });
       }
     }
   }
@@ -1468,7 +1474,7 @@ public class AlternatorLiveNodes extends Thread {
    */
   protected List<URI> getAffinityDiscoveredNodesInternal() {
     return usesSeparateClusterAffinityRing()
-        ? affinityDiscoveredNodes.get()
+        ? affinityTopology.get().published
         : getDiscoveredNodesInternal();
   }
 
@@ -1539,8 +1545,9 @@ public class AlternatorLiveNodes extends Thread {
   private List<URI> getHealthManagedDiscoveredNodesInternal() {
     List<URI> nodes = dedupePreservingOrder(getDiscoveredNodesInternal());
     if (usesSeparateClusterAffinityRing()) {
-      appendUniqueNodes(nodes, getAffinityDiscoveredNodesInternal());
-      appendUniqueNodes(nodes, pendingAffinityDiscoveredNodes.get());
+      AffinityTopologyState topology = affinityTopology.get();
+      appendUniqueNodes(nodes, topology.published);
+      appendUniqueNodes(nodes, topology.pending);
     }
     return nodes;
   }
@@ -1653,6 +1660,16 @@ public class AlternatorLiveNodes extends Thread {
       keys.add(NodeHealthStore.canonicalNodeKey(node));
     }
     return keys;
+  }
+
+  private static final class AffinityTopologyState {
+    private final List<URI> published;
+    private final List<URI> pending;
+
+    private AffinityTopologyState(List<URI> published, List<URI> pending) {
+      this.published = Collections.unmodifiableList(new ArrayList<>(published));
+      this.pending = Collections.unmodifiableList(new ArrayList<>(pending));
+    }
   }
 
   /**
