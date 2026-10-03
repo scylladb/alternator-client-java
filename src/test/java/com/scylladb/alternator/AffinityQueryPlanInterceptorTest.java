@@ -30,6 +30,7 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -1698,6 +1699,45 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
+  public void testBatchWriteItemKeepsOneAffinityRingSnapshotAcrossPublication() throws Exception {
+    List<URI> originalRing = new ArrayList<>(testNodeUris.subList(0, 3));
+    List<URI> replacementRing =
+        Arrays.asList(
+            new URI("http://127.0.1.1:8000"),
+            new URI("http://127.0.1.2:8000"),
+            new URI("http://127.0.1.3:8000"));
+    PublishingMockAlternatorLiveNodes liveNodes =
+        new PublishingMockAlternatorLiveNodes(originalRing, replacementRing);
+    DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.ANY_WRITE), liveNodes);
+    try {
+      Map<String, List<WriteRequest>> requestItems = new LinkedHashMap<>();
+      requestItems.put(
+          TABLE_NAME,
+          Arrays.asList(
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(makeItem(PK_VALUE)).build())
+                  .build(),
+              WriteRequest.builder()
+                  .deleteRequest(DeleteRequest.builder().key(makeKey()).build())
+                  .build()));
+      long hash = AttributeValueHasher.hash(AttributeValue.builder().s(PK_VALUE).build());
+      URI expectedRoute = firstNodeForSeed(originalRing, hash);
+
+      mockHttpClient.clearCapturedRequests();
+      client.batchWriteItem(BatchWriteItemRequest.builder().requestItems(requestItems).build());
+
+      assertEquals(1, liveNodes.getSnapshotCount());
+      assertEquals(replacementRing, liveNodes.getQueryPlanNodes());
+      assertSameRoute(
+          "Batch votes and retry order must retain the captured ring",
+          expectedRoute,
+          mockHttpClient.getLastRequestUri());
+    } finally {
+      client.close();
+    }
+  }
+
+  @Test
   public void testBatchWriteItemNonKeyAttributesDoNotAffectRouting() {
     String majorityPk = PK_VALUE;
     String otherPk = findPkValueWithDifferentRoute("other-route-", majorityPk);
@@ -2126,6 +2166,53 @@ public class AffinityQueryPlanInterceptorTest {
 
     @Override
     public void start() {}
+  }
+
+  private static final class PublishingMockAlternatorLiveNodes extends AlternatorLiveNodes {
+    private volatile List<URI> nodes;
+    private final List<URI> replacementNodes;
+    private final AtomicInteger snapshotCount = new AtomicInteger();
+
+    PublishingMockAlternatorLiveNodes(List<URI> nodes, List<URI> replacementNodes) {
+      super(
+          AlternatorConfig.builder()
+              .withSeedHosts(nodeHosts(combinedNodes(nodes, replacementNodes)))
+              .withScheme(nodes.get(0).getScheme())
+              .withPort(nodes.get(0).getPort())
+              .build());
+      this.nodes = new ArrayList<>(nodes);
+      this.replacementNodes = new ArrayList<>(replacementNodes);
+      for (URI node : combinedNodes(nodes, replacementNodes)) {
+        reportNodeResult(node, NodeHealthObservation.PROBE_SUCCESS);
+      }
+    }
+
+    @Override
+    protected List<URI> getDiscoveredNodesInternal() {
+      List<URI> current = nodes;
+      return current != null ? current : Collections.emptyList();
+    }
+
+    @Override
+    public List<URI> getAffinityQueryPlanNodesSnapshot() {
+      List<URI> snapshot = super.getAffinityQueryPlanNodesSnapshot();
+      snapshotCount.incrementAndGet();
+      nodes = new ArrayList<>(replacementNodes);
+      return snapshot;
+    }
+
+    int getSnapshotCount() {
+      return snapshotCount.get();
+    }
+
+    @Override
+    public void start() {}
+
+    private static List<URI> combinedNodes(List<URI> first, List<URI> second) {
+      List<URI> combined = new ArrayList<>(first);
+      combined.addAll(second);
+      return combined;
+    }
   }
 
   private static List<String> nodeHosts(List<URI> nodes) {

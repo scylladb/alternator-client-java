@@ -121,6 +121,11 @@ skipped.
 Each target resolves metadata, extracts and hashes its partition key, calculates its preferred
 endpoint from the stable ring, and contributes one vote. Missing metadata may trigger discovery.
 
+The client must capture one immutable affinity-ring snapshot for the logical batch. Every target
+must vote against that same snapshot, and the resulting retry sequence must append remaining
+endpoints from that snapshot. A topology update during vote aggregation must affect only later
+queries.
+
 Voted endpoints are ordered by descending vote count, then lexicographically by complete endpoint
 string. Remaining discovered endpoints follow in canonical order. Ordering must not depend on map
 iteration, equivalent write-list ordering, or non-key item attributes. If no target produces a vote,
@@ -178,6 +183,8 @@ cannot discover metadata uses random fallback rather than blocking or failing th
 - A down endpoint may win a vote but is skipped without recomputing votes.
 - Quarantined candidates are returned only after the active pass is exhausted.
 - A topology update after plan initialization affects later queries, not current retries.
+- A topology update during batch vote aggregation does not mix rings within the batch or replace
+  the ring used by its retry sequence.
 - Clients in different racks use the same cluster-wide ring for qualifying affinity requests while
   their non-qualifying requests remain rack-scoped.
 - Compression and signing retain identical logical content through an affinity plan.

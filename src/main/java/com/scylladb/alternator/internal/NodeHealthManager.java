@@ -256,15 +256,7 @@ final class NodeHealthManager {
     if (isProbeWorkerThread()) {
       throw new IllegalStateException("blocking probe API cannot run on a health-probe worker");
     }
-    List<URI> candidates = copyCandidates(candidateNodes);
-    int batchSize = Math.max(1, config.getHealthProbeConcurrency());
-    for (int start = 0; start < candidates.size(); start += batchSize) {
-      int end = Math.min(candidates.size(), start + batchSize);
-      probeQuarantinedBatchCompletely(new ArrayList<>(candidates.subList(start, end)));
-    }
-  }
-
-  private void probeQuarantinedBatchCompletely(List<URI> pending) {
+    List<URI> pending = copyCandidates(candidateNodes);
     while (!pending.isEmpty()) {
       List<CompletableFuture<ProbeOutcome>> futures = new ArrayList<>();
       for (URI node : pending) {

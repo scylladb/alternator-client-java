@@ -159,6 +159,7 @@ public class AffinityQueryPlanInterceptor extends BasicQueryPlanInterceptor {
   }
 
   private LazyQueryPlan getBatchWriteQueryPlan(BatchWriteItemRequest request) {
+    List<URI> affinityNodes = liveNodes.getAffinityQueryPlanNodesSnapshot();
     Map<URI, Integer> votes = new HashMap<>();
     for (BatchWriteRoutingTarget target :
         KeyAffinityRequestClassifier.extractBatchWriteRoutingTargets(request)) {
@@ -178,7 +179,7 @@ public class AffinityQueryPlanInterceptor extends BasicQueryPlanInterceptor {
 
       try {
         long hash = AttributeValueHasher.hash(pkValue);
-        URI preferredNode = liveNodes.getPreferredQueryPlanNodeForHash(hash);
+        URI preferredNode = LazyQueryPlan.preferredNodeForHash(affinityNodes, hash);
         if (preferredNode != null) {
           votes.merge(preferredNode, 1, Integer::sum);
         }
@@ -191,7 +192,7 @@ public class AffinityQueryPlanInterceptor extends BasicQueryPlanInterceptor {
     if (preferredNodes.isEmpty()) {
       return null;
     }
-    return new LazyQueryPlan(liveNodes, preferredNodes);
+    return LazyQueryPlan.fromAffinitySnapshot(liveNodes, affinityNodes, preferredNodes);
   }
 
   private static List<URI> votePreferenceOrder(Map<URI, Integer> votes) {

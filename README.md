@@ -1095,7 +1095,7 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
 2. For qualifying single-item operations, it extracts the partition key value from the request
 3. A deterministic hash (MurmurHash3) of the partition key selects a consistent node
 4. For `BatchWriteItem`, each usable write votes for its preferred node; voted nodes are tried by
-   vote count, then by node URL
+   vote count, then by node URL. All votes and retries use one request-scoped affinity-ring snapshot
 5. Non-qualifying operations and requests without usable partition keys continue to use
    random query-plan load balancing
 

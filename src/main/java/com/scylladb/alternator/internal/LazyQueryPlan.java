@@ -70,9 +70,17 @@ import java.util.concurrent.ThreadLocalRandom;
  * @since 2.0.0
  */
 public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
+  private enum PlanKind {
+    RANDOM,
+    SEEDED,
+    PREFERRED,
+    FIXED
+  }
+
   private final AlternatorLiveNodes liveNodes;
   private final long seed;
   private final List<URI> preferredNodes;
+  private final List<URI> fixedCandidates;
   private final boolean seeded;
 
   /** Iterator over a lazily captured candidate snapshot. */
@@ -87,13 +95,7 @@ public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
    * @param liveNodes the {@link AlternatorLiveNodes} instance to pull nodes from
    */
   public LazyQueryPlan(AlternatorLiveNodes liveNodes) {
-    if (liveNodes == null) {
-      throw new IllegalArgumentException("liveNodes cannot be null");
-    }
-    this.liveNodes = liveNodes;
-    this.seed = 0;
-    this.preferredNodes = null;
-    this.seeded = false;
+    this(liveNodes, PlanKind.RANDOM, 0, null);
   }
 
   /**
@@ -105,13 +107,7 @@ public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
    * @param seed a long value used to initialize the Go-compatible PRNG
    */
   public LazyQueryPlan(AlternatorLiveNodes liveNodes, long seed) {
-    if (liveNodes == null) {
-      throw new IllegalArgumentException("liveNodes cannot be null");
-    }
-    this.liveNodes = liveNodes;
-    this.seed = seed;
-    this.preferredNodes = null;
-    this.seeded = true;
+    this(liveNodes, PlanKind.SEEDED, seed, null);
   }
 
   /**
@@ -122,16 +118,44 @@ public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
    * @param preferredNodes nodes to try first, in preference order
    */
   public LazyQueryPlan(AlternatorLiveNodes liveNodes, List<URI> preferredNodes) {
+    this(liveNodes, PlanKind.PREFERRED, 0, preferredNodes);
+  }
+
+  private LazyQueryPlan(
+      AlternatorLiveNodes liveNodes, PlanKind kind, long seed, List<URI> suppliedNodes) {
     if (liveNodes == null) {
       throw new IllegalArgumentException("liveNodes cannot be null");
     }
-    if (preferredNodes == null) {
-      throw new IllegalArgumentException("preferredNodes cannot be null");
+    if ((kind == PlanKind.PREFERRED || kind == PlanKind.FIXED) && suppliedNodes == null) {
+      throw new IllegalArgumentException("plan nodes cannot be null");
     }
     this.liveNodes = liveNodes;
-    this.seed = 0;
-    this.preferredNodes = new ArrayList<>(preferredNodes);
-    this.seeded = false;
+    this.seed = seed;
+    this.preferredNodes = kind == PlanKind.PREFERRED ? new ArrayList<>(suppliedNodes) : null;
+    this.fixedCandidates = kind == PlanKind.FIXED ? new ArrayList<>(suppliedNodes) : null;
+    this.seeded = kind == PlanKind.SEEDED;
+  }
+
+  /**
+   * Creates a plan whose complete candidate order comes from one immutable affinity-ring snapshot.
+   *
+   * @param liveNodes live-node manager used for final health eligibility
+   * @param affinityNodes request-scoped affinity-ring snapshot
+   * @param preferredNodes voted nodes to place first
+   * @return request-scoped fixed candidate plan
+   * @since 2.0.7
+   */
+  public static LazyQueryPlan fromAffinitySnapshot(
+      AlternatorLiveNodes liveNodes, List<URI> affinityNodes, List<URI> preferredNodes) {
+    if (liveNodes == null || affinityNodes == null || preferredNodes == null) {
+      throw new IllegalArgumentException(
+          "liveNodes, affinityNodes, and preferredNodes cannot be null");
+    }
+    return new LazyQueryPlan(
+        liveNodes,
+        PlanKind.FIXED,
+        0,
+        liveNodes.getQueryPlanNodesWithPreferredNodes(affinityNodes, preferredNodes));
   }
 
   /**
@@ -140,7 +164,9 @@ public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
    */
   private void ensureInitialized() {
     if (!initialized) {
-      if (preferredNodes != null) {
+      if (fixedCandidates != null) {
+        candidates = fixedCandidates.iterator();
+      } else if (preferredNodes != null) {
         candidates = liveNodes.getQueryPlanNodesWithPreferredNodes(preferredNodes).iterator();
       } else if (seeded) {
         candidates = liveNodes.getQueryPlanNodesForHash(seed).iterator();
@@ -188,6 +214,19 @@ public class LazyQueryPlan implements Iterator<URI>, Iterable<URI> {
       throw new IllegalArgumentException("liveNodes cannot be null");
     }
     return liveNodes.getPreferredQueryPlanNodeForHash(seed);
+  }
+
+  /**
+   * Returns the preferred node for a seed from one request-scoped affinity-ring snapshot.
+   *
+   * @since 2.0.7
+   */
+  public static URI preferredNodeForHash(List<URI> affinityNodes, long seed) {
+    if (affinityNodes == null) {
+      throw new IllegalArgumentException("affinityNodes cannot be null");
+    }
+    List<URI> candidates = AlternatorLiveNodes.drainSeeded(affinityNodes, seed);
+    return candidates.isEmpty() ? null : candidates.get(0);
   }
 
   @Override

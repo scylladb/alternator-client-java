@@ -744,26 +744,33 @@ public class AlternatorLiveNodes extends Thread {
         unverified.add(node);
       }
     }
+    boolean verificationCompleted = false;
     try {
       if (!unverified.isEmpty()) {
         nodeHealthManager.probeQuarantinedNodesCompletely(unverified);
       }
+      verificationCompleted = !shutdownRequested.get() && !Thread.currentThread().isInterrupted();
     } catch (RuntimeException e) {
       if (shutdownRequested.get()) {
         logger.log(Level.FINE, "Affinity-node verification stopped during shutdown", e);
       } else {
         logger.log(
             Level.WARNING,
-            "Affinity-node verification did not complete; publishing candidates with current health",
+            "Affinity-node verification did not complete; retaining previous affinity ring",
             e);
       }
     } finally {
-      nodeHealthManager.publishDiscoveredNodes(
-          deduped,
-          published -> {
-            affinityDiscoveredNodes.set(published);
-            pendingAffinityDiscoveredNodes.set(Collections.emptyList());
-          });
+      if (verificationCompleted) {
+        nodeHealthManager.publishDiscoveredNodes(
+            deduped,
+            published -> {
+              affinityDiscoveredNodes.set(published);
+              pendingAffinityDiscoveredNodes.set(Collections.emptyList());
+            });
+      } else {
+        nodeHealthManager.publishDiscoveredNodes(
+            Collections.emptyList(), pendingAffinityDiscoveredNodes::set);
+      }
     }
   }
 
@@ -1403,11 +1410,28 @@ public class AlternatorLiveNodes extends Thread {
     return drainSeeded(getDiscoveredNodesForAffinityQueryPlan(), hash);
   }
 
+  /**
+   * Captures the canonical affinity ring for one request-scoped routing decision.
+   *
+   * @return immutable affinity-ring snapshot
+   * @since 2.0.7
+   */
+  public List<URI> getAffinityQueryPlanNodesSnapshot() {
+    return Collections.unmodifiableList(getDiscoveredNodesForAffinityQueryPlan());
+  }
+
   List<URI> getQueryPlanNodesWithPreferredNodes(List<URI> preferredNodes) {
     if (preferredNodes == null) {
       throw new IllegalArgumentException("preferredNodes cannot be null");
     }
     return orderPreferredNodesFirst(getDiscoveredNodesForAffinityQueryPlan(), preferredNodes);
+  }
+
+  List<URI> getQueryPlanNodesWithPreferredNodes(List<URI> affinityNodes, List<URI> preferredNodes) {
+    if (affinityNodes == null || preferredNodes == null) {
+      throw new IllegalArgumentException("affinityNodes and preferredNodes cannot be null");
+    }
+    return orderPreferredNodesFirst(sortAndDedupeNodes(affinityNodes), preferredNodes);
   }
 
   /**

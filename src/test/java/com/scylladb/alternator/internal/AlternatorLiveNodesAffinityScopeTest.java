@@ -18,6 +18,7 @@ package com.scylladb.alternator.internal;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import com.scylladb.alternator.AlternatorConfig;
 import com.scylladb.alternator.CoversRequirements;
@@ -38,6 +39,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -265,6 +267,56 @@ public class AlternatorLiveNodesAffinityScopeTest {
   }
 
   @Test
+  public void testShutdownDuringAffinityVerificationRetainsPreviousRing() throws Exception {
+    assertAbortedAffinityVerificationRetainsPreviousRing(true);
+  }
+
+  @Test
+  public void testInterruptedAffinityVerificationRetainsPreviousRing() throws Exception {
+    assertAbortedAffinityVerificationRetainsPreviousRing(false);
+  }
+
+  private void assertAbortedAffinityVerificationRetainsPreviousRing(boolean shutdown)
+      throws Exception {
+    BlockingVerificationDiscoveryHttpClient discoveryClient =
+        new BlockingVerificationDiscoveryHttpClient();
+    KeyRouteAffinityConfig affinityConfig = affinityConfig(KeyRouteAffinity.RMW);
+    AlternatorLiveNodes liveNodes =
+        createLiveNodes("rack1", affinityConfig, discoveryClient, false);
+    AtomicReference<Throwable> refreshFailure = new AtomicReference<>();
+    Thread refresh =
+        new Thread(
+            () -> {
+              try {
+                liveNodes.refreshDiscoveredNodes();
+              } catch (Throwable failure) {
+                refreshFailure.set(failure);
+              }
+            });
+    try {
+      refresh.start();
+      assertTrue(discoveryClient.awaitVerification());
+
+      if (shutdown) {
+        liveNodes.shutdown();
+      } else {
+        refresh.interrupt();
+      }
+      discoveryClient.releaseVerification();
+      refresh.join(5_000);
+
+      assertTrue("aborted refresh should stop", !refresh.isAlive());
+      assertNull(refreshFailure.get());
+      assertEquals(
+          Collections.singletonList(SEED), liveNodes.getDiscoveredNodesForAffinityQueryPlan());
+    } finally {
+      discoveryClient.releaseVerification();
+      refresh.join(5_000);
+      liveNodes.shutdownAndWait(1_000);
+    }
+  }
+
+  @Test
   public void testAffinityVerificationExceedingProbeCapacityActivatesEntireRing() throws Exception {
     List<URI> clusterNodes = new ArrayList<>();
     for (int i = 1; i <= 20; i++) {
@@ -281,18 +333,53 @@ public class AlternatorLiveNodesAffinityScopeTest {
             .withNodeHealthConfig(NodeHealthConfig.builder().withHealthProbeConcurrency(1).build())
             .build();
     AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, discoveryClient);
+    AtomicReference<Throwable> refreshFailure = new AtomicReference<>();
+    Thread refresh =
+        new Thread(
+            () -> {
+              try {
+                liveNodes.refreshDiscoveredNodes();
+              } catch (Throwable failure) {
+                refreshFailure.set(failure);
+              }
+            });
     try {
-      liveNodes.refreshDiscoveredNodes();
+      refresh.start();
+      assertTrue(discoveryClient.awaitVerification());
+      awaitBlocked(refresh);
+      discoveryClient.releaseVerification();
+      refresh.join(5_000);
 
+      assertTrue("refresh should complete after capacity becomes available", !refresh.isAlive());
+      assertNull(refreshFailure.get());
       assertEquals(
           new HashSet<>(clusterNodes),
           new HashSet<>(liveNodes.getDiscoveredNodesForAffinityQueryPlan()));
       for (URI node : clusterNodes) {
         assertEquals(NodeHealthState.ACTIVE, liveNodes.getNodeHealthStatus(node).getState());
       }
+      Set<String> expectedVerifiedHosts = new HashSet<>();
+      for (int i = 1; i < clusterNodes.size(); i++) {
+        expectedVerifiedHosts.add(clusterNodes.get(i).getHost());
+      }
+      assertEquals(expectedVerifiedHosts, new HashSet<>(discoveryClient.getVerifiedHosts()));
     } finally {
+      discoveryClient.releaseVerification();
+      refresh.join(5_000);
       liveNodes.shutdownAndWait(1_000);
     }
+  }
+
+  private static void awaitBlocked(Thread thread) {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+    while (thread.isAlive() && System.nanoTime() < deadline) {
+      Thread.State state = thread.getState();
+      if (state == Thread.State.WAITING || state == Thread.State.TIMED_WAITING) {
+        return;
+      }
+      Thread.yield();
+    }
+    fail("refresh did not block after saturating probe admission");
   }
 
   private static AlternatorLiveNodes createLiveNodes(
@@ -526,6 +613,10 @@ public class AlternatorLiveNodesAffinityScopeTest {
   private static final class LargeClusterDiscoveryHttpClient implements SdkHttpClient {
     private final String clusterResponse;
     private final String rackResponse;
+    private final String firstClusterHost;
+    private final CountDownLatch verificationStarted = new CountDownLatch(1);
+    private final CountDownLatch verificationReleased = new CountDownLatch(1);
+    private final List<String> verifiedHosts = new CopyOnWriteArrayList<>();
 
     LargeClusterDiscoveryHttpClient(List<URI> clusterNodes) {
       List<String> quotedHosts = new ArrayList<>();
@@ -534,19 +625,49 @@ public class AlternatorLiveNodesAffinityScopeTest {
       }
       this.clusterResponse = "[" + String.join(",", quotedHosts) + "]";
       this.rackResponse = "[" + quotedHosts.get(0) + "]";
+      this.firstClusterHost = clusterNodes.get(0).getHost();
+    }
+
+    boolean awaitVerification() throws InterruptedException {
+      return verificationStarted.await(5, TimeUnit.SECONDS);
+    }
+
+    void releaseVerification() {
+      verificationReleased.countDown();
+    }
+
+    List<String> getVerifiedHosts() {
+      return verifiedHosts;
     }
 
     @Override
     public ExecutableHttpRequest prepareRequest(HttpExecuteRequest request) {
-      boolean rackScoped = request.httpRequest().rawQueryParameters().containsKey("rack");
+      SdkHttpRequest httpRequest = request.httpRequest();
+      boolean rackScoped = httpRequest.rawQueryParameters().containsKey("rack");
       return new ExecutableHttpRequest() {
         @Override
-        public HttpExecuteResponse call() {
+        public HttpExecuteResponse call() throws IOException {
+          if (!rackScoped
+              && !SEED.getHost().equals(httpRequest.host())
+              && !firstClusterHost.equals(httpRequest.host())) {
+            verifiedHosts.add(httpRequest.host());
+            verificationStarted.countDown();
+            try {
+              if (!verificationReleased.await(5, TimeUnit.SECONDS)) {
+                throw new IOException("timed out waiting to release saturated probes");
+              }
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+              throw new IOException("saturated probe interrupted", e);
+            }
+          }
           return response(rackScoped ? rackResponse : clusterResponse);
         }
 
         @Override
-        public void abort() {}
+        public void abort() {
+          verificationReleased.countDown();
+        }
       };
     }
 
