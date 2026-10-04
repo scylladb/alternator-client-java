@@ -23,6 +23,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.After;
 import org.junit.Before;
@@ -40,19 +41,28 @@ public class ConnectionLeakTest {
   private HttpServer server;
   private int port;
   private volatile int responseCode = 200;
-  private volatile String responseBody = "[\"127.0.0.1\"]";
+  private volatile String localResponseBody = localScanResponse("127.0.0.1");
+  private volatile String peersResponseBody = emptyScanResponse();
 
   @Before
   public void setUp() throws IOException {
     responseCode = 200;
-    responseBody = "[\"127.0.0.1\"]";
+    localResponseBody = localScanResponse("127.0.0.1");
+    peersResponseBody = emptyScanResponse();
     server = HttpServer.create(new InetSocketAddress(0), 0);
     port = server.getAddress().getPort();
 
     server.createContext(
-        "/localnodes",
+        "/",
         exchange -> {
-          byte[] body = responseBody.getBytes();
+          String requestBody =
+              new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+          String responseBody =
+              requestBody.contains(SystemTableTopologyDiscovery.LOCAL_TABLE)
+                  ? localResponseBody
+                  : peersResponseBody;
+          byte[] body = responseBody.getBytes(StandardCharsets.UTF_8);
+          exchange.getResponseHeaders().set("Content-Type", "application/x-amz-json-1.0");
           exchange.sendResponseHeaders(responseCode, body.length);
           try (OutputStream os = exchange.getResponseBody()) {
             os.write(body);
@@ -76,7 +86,7 @@ public class ConnectionLeakTest {
   }
 
   /**
-   * Verifies that connections are not leaked when /localnodes returns non-200 responses.
+   * Verifies that connections are not leaked when topology scans return non-200 responses.
    *
    * <p>Before the fix, each non-200 response would leak a connection because the response entity
    * was not consumed. With a small pool, leaked connections cause subsequent requests to block
@@ -87,61 +97,78 @@ public class ConnectionLeakTest {
     responseCode = 500;
     AlternatorLiveNodes liveNodes = createLiveNodes();
 
-    // If connections are leaked, this will eventually hang due to pool exhaustion
-    for (int i = 0; i < 20; i++) {
-      liveNodes.refreshDiscoveredNodes();
+    try {
+      for (int i = 0; i < 20; i++) {
+        refreshAllowingFailure(liveNodes);
+      }
+    } finally {
+      liveNodes.shutdownAndWait();
     }
-    // If we get here without timeout, connections are properly released
   }
 
   /** Verifies that connections are properly returned after successful responses. */
   @Test(timeout = 10000)
   public void testNoConnectionLeakOnSuccessfulResponses() throws Exception {
     responseCode = 200;
-    responseBody = "[\"127.0.0.1\",\"127.0.0.2\"]";
+    localResponseBody = localScanResponse("127.0.0.1");
+    peersResponseBody = localScanResponse("127.0.0.2");
     AlternatorLiveNodes liveNodes = createLiveNodes();
 
-    for (int i = 0; i < 30; i++) {
-      liveNodes.refreshDiscoveredNodes();
-    }
+    try {
+      for (int i = 0; i < 30; i++) {
+        liveNodes.refreshDiscoveredNodes();
+      }
 
-    assertEquals(2, liveNodes.getDiscoveredNodes().size());
+      assertEquals(2, liveNodes.getDiscoveredNodes().size());
+    } finally {
+      liveNodes.shutdownAndWait();
+    }
   }
 
-  /** Verifies malformed successful /localnodes responses do not terminate discovery. */
+  /** Verifies malformed successful scan responses release their connections. */
   @Test(timeout = 10000)
   public void testMalformedSuccessfulResponsesDoNotThrowOrLeakConnections() throws Exception {
     responseCode = 200;
-    String[] malformedBodies = {"", "not-json", "[", "[\"127.0.0.1\",bad]", "[bad]"};
+    String[] malformedBodies = {"", "not-json", "{", "{\"Items\":[", "{\"Items\":bad}"};
     AlternatorLiveNodes liveNodes = createLiveNodes();
 
-    for (int i = 0; i < 30; i++) {
-      responseBody = malformedBodies[i % malformedBodies.length];
-      liveNodes.refreshDiscoveredNodes();
-    }
+    try {
+      for (int i = 0; i < 30; i++) {
+        localResponseBody = malformedBodies[i % malformedBodies.length];
+        refreshAllowingFailure(liveNodes);
+      }
 
-    assertEquals(1, liveNodes.getDiscoveredNodes().size());
-    assertEquals("127.0.0.1", liveNodes.getDiscoveredNodes().get(0).getHost());
+      assertEquals(1, liveNodes.getDiscoveredNodes().size());
+      assertEquals("127.0.0.1", liveNodes.getDiscoveredNodes().get(0).getHost());
+    } finally {
+      liveNodes.shutdownAndWait();
+    }
   }
 
   /** Verifies no leaks when alternating between error and success responses. */
   @Test(timeout = 10000)
   public void testNoConnectionLeakOnAlternatingResponses() throws Exception {
     AtomicInteger callCount = new AtomicInteger(0);
-    server.removeContext("/localnodes");
+    AtomicInteger responseForAttempt = new AtomicInteger(200);
+    server.removeContext("/");
     server.createContext(
-        "/localnodes",
+        "/",
         exchange -> {
-          int count = callCount.incrementAndGet();
-          byte[] body;
-          int code;
-          if (count % 2 == 0) {
-            code = 200;
-            body = "[\"127.0.0.1\"]".getBytes();
-          } else {
-            code = 503;
-            body = "Service Unavailable".getBytes();
+          String requestBody =
+              new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+          if (requestBody.contains(SystemTableTopologyDiscovery.LOCAL_TABLE)) {
+            int count = callCount.incrementAndGet();
+            responseForAttempt.set(count % 2 == 0 ? 200 : 503);
           }
+          int code = responseForAttempt.get();
+          byte[] body =
+              (code == 200
+                      ? requestBody.contains(SystemTableTopologyDiscovery.LOCAL_TABLE)
+                          ? localScanResponse("127.0.0.1")
+                          : emptyScanResponse()
+                      : "Service Unavailable")
+                  .getBytes(StandardCharsets.UTF_8);
+          exchange.getResponseHeaders().set("Content-Type", "application/x-amz-json-1.0");
           exchange.sendResponseHeaders(code, body.length);
           try (OutputStream os = exchange.getResponseBody()) {
             os.write(body);
@@ -150,10 +177,17 @@ public class ConnectionLeakTest {
 
     AlternatorLiveNodes liveNodes = createLiveNodes();
 
-    for (int i = 0; i < 40; i++) {
-      liveNodes.refreshDiscoveredNodes();
+    try {
+      for (int i = 0; i < 40; i++) {
+        try {
+          liveNodes.refreshDiscoveredNodes();
+        } catch (IOException expected) {
+          // Every other topology attempt intentionally fails.
+        }
+      }
+    } finally {
+      liveNodes.shutdownAndWait();
     }
-    // If we get here without timeout, connections are properly released
   }
 
   /**
@@ -166,15 +200,37 @@ public class ConnectionLeakTest {
   @Test(timeout = 10000)
   public void testConnectionsAreReused() throws Exception {
     responseCode = 200;
-    responseBody = "[\"127.0.0.1\"]";
+    localResponseBody = localScanResponse("127.0.0.1");
+    peersResponseBody = emptyScanResponse();
     AlternatorLiveNodes liveNodes = createLiveNodes();
 
-    // Make several requests so the connection pool has a chance to stabilize
-    for (int i = 0; i < 20; i++) {
-      liveNodes.refreshDiscoveredNodes();
-    }
+    try {
+      for (int i = 0; i < 20; i++) {
+        liveNodes.refreshDiscoveredNodes();
+      }
 
-    // All requests should succeed, proving connections are properly managed
-    assertEquals(1, liveNodes.getDiscoveredNodes().size());
+      assertEquals(1, liveNodes.getDiscoveredNodes().size());
+    } finally {
+      liveNodes.shutdownAndWait();
+    }
+  }
+
+  private static void refreshAllowingFailure(AlternatorLiveNodes liveNodes) throws Exception {
+    try {
+      liveNodes.refreshDiscoveredNodes();
+    } catch (IOException expected) {
+      // Some discovery implementations surface protocol or HTTP failures.
+    }
+  }
+
+  private static String localScanResponse(String address) {
+    return "{\"Items\":[{\"rpc_address\":{\"S\":\""
+        + address
+        + "\"},\"data_center\":{\"S\":\"dc1\"},\"rack\":{\"S\":\"rack1\"}}],"
+        + "\"Count\":1,\"ScannedCount\":1}";
+  }
+
+  private static String emptyScanResponse() {
+    return "{\"Items\":[],\"Count\":0,\"ScannedCount\":0}";
   }
 }

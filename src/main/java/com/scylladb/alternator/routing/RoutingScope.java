@@ -89,10 +89,12 @@ public interface RoutingScope {
   RoutingScope getFallback();
 
   /**
-   * Returns the query string to append to the {@code /localnodes} endpoint URL.
+   * Returns the legacy query representation of this scope.
    *
-   * <p>This query string filters the nodes returned by the Alternator node discovery endpoint. The
-   * query string should not include the leading "?" character.
+   * <p>Built-in scopes expose their datacenter and rack directly. Discovery uses this
+   * representation only for compatibility with custom scope implementations, parsing {@code dc} and
+   * {@code rack} and filtering system-table topology rows locally. Malformed representations and
+   * unsupported parameters match no nodes. The string should not include the leading "?" character.
    *
    * <p>Examples:
    *

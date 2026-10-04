@@ -33,12 +33,18 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.Test;
+import software.amazon.awssdk.auth.credentials.AnonymousCredentialsProvider;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.AwsCredentials;
+import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
 import software.amazon.awssdk.http.AbortableInputStream;
 import software.amazon.awssdk.http.ExecutableHttpRequest;
 import software.amazon.awssdk.http.HttpExecuteRequest;
 import software.amazon.awssdk.http.HttpExecuteResponse;
 import software.amazon.awssdk.http.SdkHttpClient;
 import software.amazon.awssdk.http.SdkHttpFullResponse;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.utils.SdkAutoCloseable;
 
 public class AlternatorLiveNodesShutdownTest {
 
@@ -127,15 +133,35 @@ public class AlternatorLiveNodesShutdownTest {
     assertEquals("owned polling client should close exactly once", 1, client.closeCount.get());
   }
 
+  @Test
+  public void testTopologyShutdownDoesNotCloseCallerCredentialsProvider() {
+    CloseCountingCredentialsProvider credentialsProvider = new CloseCountingCredentialsProvider();
+    AlternatorConfig config =
+        AlternatorConfig.builder().withSeedNode(URI.create("http://127.0.0.1:8000")).build();
+    AlternatorLiveNodes liveNodes =
+        new AlternatorLiveNodes(
+            config, new UnusedHttpClient(), credentialsProvider, Region.US_EAST_1);
+
+    assertTrue(liveNodes.shutdownAndWait(0));
+
+    assertEquals(0, credentialsProvider.closeCount.get());
+  }
+
   private static AlternatorLiveNodes newOwnedLiveNodes(SdkHttpClient client) throws Exception {
     Constructor<AlternatorLiveNodes> constructor =
         AlternatorLiveNodes.class.getDeclaredConstructor(
-            AlternatorConfig.class, SdkHttpClient.class, boolean.class);
+            AlternatorConfig.class,
+            SdkHttpClient.class,
+            boolean.class,
+            software.amazon.awssdk.auth.credentials.AwsCredentialsProvider.class,
+            Region.class);
     constructor.setAccessible(true);
     return constructor.newInstance(
         AlternatorConfig.builder().withSeedNode(URI.create("http://127.0.0.1:8000")).build(),
         client,
-        true);
+        true,
+        AnonymousCredentialsProvider.create(),
+        Region.of("fake-aws-region"));
   }
 
   private static final class FailingRefreshLiveNodes extends AlternatorLiveNodes {
@@ -233,6 +259,21 @@ public class AlternatorLiveNodesShutdownTest {
     }
   }
 
+  private static final class CloseCountingCredentialsProvider
+      implements AwsCredentialsProvider, SdkAutoCloseable {
+    private final AtomicInteger closeCount = new AtomicInteger();
+
+    @Override
+    public AwsCredentials resolveCredentials() {
+      return AwsBasicCredentials.create("key", "secret");
+    }
+
+    @Override
+    public void close() {
+      closeCount.incrementAndGet();
+    }
+  }
+
   private static final class BlockingShutdownHttpClient implements SdkHttpClient {
     private final CountDownLatch callStarted = new CountDownLatch(1);
     private final CountDownLatch releaseCall = new CountDownLatch(1);
@@ -280,10 +321,16 @@ public class AlternatorLiveNodesShutdownTest {
           if (callNumber == 1) {
             throw new IllegalStateException("unexpected polling failure");
           }
-          successfulCall.countDown();
-          byte[] body = "[\"127.0.0.2\"]".getBytes(StandardCharsets.UTF_8);
+          if (callNumber == 3) {
+            successfulCall.countDown();
+          }
+          byte[] body = scanResponse("127.0.0.2").getBytes(StandardCharsets.UTF_8);
           return HttpExecuteResponse.builder()
-              .response(SdkHttpFullResponse.builder().statusCode(200).build())
+              .response(
+                  SdkHttpFullResponse.builder()
+                      .statusCode(200)
+                      .putHeader("Content-Type", "application/x-amz-json-1.0")
+                      .build())
               .responseBody(AbortableInputStream.create(new ByteArrayInputStream(body)))
               .build();
         }
@@ -300,5 +347,12 @@ public class AlternatorLiveNodesShutdownTest {
     public String clientName() {
       return "runtime-then-success";
     }
+  }
+
+  private static String scanResponse(String address) {
+    return "{\"Items\":[{\"rpc_address\":{\"S\":\""
+        + address
+        + "\"},\"data_center\":{\"S\":\"dc1\"},\"rack\":{\"S\":\"rack1\"}}],"
+        + "\"Count\":1,\"ScannedCount\":1}";
   }
 }

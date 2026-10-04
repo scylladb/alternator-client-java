@@ -24,11 +24,10 @@ import com.scylladb.alternator.routing.DatacenterScope;
 import com.scylladb.alternator.routing.RackScope;
 import com.scylladb.alternator.routing.RoutingScope;
 import java.io.IOException;
-import java.io.InputStream;
-import java.net.HttpURLConnection;
 import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -38,13 +37,13 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
-import software.amazon.awssdk.http.AbortableInputStream;
-import software.amazon.awssdk.http.ExecutableHttpRequest;
-import software.amazon.awssdk.http.HttpExecuteRequest;
-import software.amazon.awssdk.http.HttpExecuteResponse;
+import software.amazon.awssdk.auth.credentials.AnonymousCredentialsProvider;
+import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
+import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
+import software.amazon.awssdk.core.retry.RetryPolicy;
 import software.amazon.awssdk.http.SdkHttpClient;
-import software.amazon.awssdk.http.SdkHttpMethod;
-import software.amazon.awssdk.http.SdkHttpRequest;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 
 /**
  * Maintains and automatically updates a list of discovered Alternator nodes in the configured
@@ -74,14 +73,14 @@ public class AlternatorLiveNodes extends Thread {
   private final AtomicBoolean shutdownRequested = new AtomicBoolean(false);
   private final AtomicBoolean shutdownStarted = new AtomicBoolean(false);
   private final AtomicBoolean pollingClientClosed = new AtomicBoolean(false);
+  private final AtomicBoolean topologyClientClosed = new AtomicBoolean(false);
   private final SdkHttpClient pollingHttpClient;
   private final boolean ownsPollingClient;
+  private final DynamoDbClient topologyClient;
+  private final SystemTableTopologyDiscovery topologyDiscovery;
   private final AtomicLong lastActivityTime = new AtomicLong(0);
-  private final LocalNodesResponseParser localNodesResponseParser;
   private final AtomicInteger nextLiveNodeIndex = new AtomicInteger();
   private final NodeHealthManager nodeHealthManager;
-  private final Set<ExecutableHttpRequest> activeControlPlaneRequests =
-      ConcurrentHashMap.newKeySet();
 
   private static Logger logger = Logger.getLogger(AlternatorLiveNodes.class.getName());
 
@@ -146,13 +145,16 @@ public class AlternatorLiveNodes extends Thread {
       }
     } finally {
       running.set(false);
-      closePollingClient();
+      closeControlPlaneClients();
       logger.log(Level.INFO, "AlternatorLiveNodes thread stopped");
     }
   }
 
-  /** Closes the polling HTTP client if this instance owns it. */
-  private void closePollingClient() {
+  /** Closes the topology service client and an owned polling HTTP client. */
+  private void closeControlPlaneClients() {
+    if (topologyClientClosed.compareAndSet(false, true)) {
+      topologyClient.close();
+    }
     if (ownsPollingClient
         && pollingHttpClient != null
         && pollingClientClosed.compareAndSet(false, true)) {
@@ -172,10 +174,7 @@ public class AlternatorLiveNodes extends Thread {
     shutdownRequested.set(true);
     if (shutdownStarted.compareAndSet(false, true)) {
       nodeHealthManager.shutdown();
-      for (ExecutableHttpRequest request : activeControlPlaneRequests) {
-        abortQuietly(request);
-      }
-      closePollingClient();
+      closeControlPlaneClients();
     }
     this.interrupt();
   }
@@ -394,14 +393,35 @@ public class AlternatorLiveNodes extends Thread {
    * Constructor for AlternatorLiveNodes with AlternatorConfig.
    *
    * <p>Creates an internal polling HTTP client using the detected sync implementation on the
-   * classpath.
+   * classpath. System-table requests use anonymous credentials. For an authenticated cluster, use
+   * {@link #AlternatorLiveNodes(AlternatorConfig, AwsCredentialsProvider, Region)}.
    *
    * @param config the Alternator configuration
    * @throws RuntimeException if config is null or contains no seed hosts
    * @since 2.0.0
    */
   public AlternatorLiveNodes(AlternatorConfig config) {
-    this(config, createDefaultPollingClient(config), true);
+    this(
+        config,
+        createDefaultPollingClient(config),
+        true,
+        AnonymousCredentialsProvider.create(),
+        Region.of("fake-aws-region"));
+  }
+
+  /**
+   * Constructor for authenticated system-table topology discovery with an internally managed HTTP
+   * client.
+   *
+   * @param config the Alternator configuration
+   * @param credentialsProvider credentials used to read Alternator system tables
+   * @param region signing region used by the topology DynamoDB client
+   * @throws RuntimeException if an argument is null or the config contains no seed hosts
+   * @since 2.1.0
+   */
+  public AlternatorLiveNodes(
+      AlternatorConfig config, AwsCredentialsProvider credentialsProvider, Region region) {
+    this(config, createDefaultPollingClient(config), true, credentialsProvider, region);
   }
 
   /**
@@ -409,36 +429,84 @@ public class AlternatorLiveNodes extends Thread {
    * HTTP client.
    *
    * <p>The provided polling client will NOT be closed by this instance; the caller is responsible
-   * for its lifecycle.
+   * for its lifecycle. System-table requests use anonymous credentials. For an authenticated
+   * cluster, use {@link #AlternatorLiveNodes(AlternatorConfig, SdkHttpClient,
+   * AwsCredentialsProvider, Region)}.
    *
    * @param config the Alternator configuration
-   * @param pollingHttpClient the SdkHttpClient to use for polling /localnodes
+   * @param pollingHttpClient the SdkHttpClient to use for topology reads and health probes
    * @throws RuntimeException if config is null or contains no seed hosts
    * @since 2.1.0
    */
   public AlternatorLiveNodes(AlternatorConfig config, SdkHttpClient pollingHttpClient) {
-    this(config, pollingHttpClient, false);
+    this(
+        config,
+        pollingHttpClient,
+        false,
+        AnonymousCredentialsProvider.create(),
+        Region.of("fake-aws-region"));
+  }
+
+  /**
+   * Constructor for authenticated system-table topology discovery.
+   *
+   * <p>The provided polling client will NOT be closed by this instance; the caller is responsible
+   * for its lifecycle.
+   *
+   * @param config the Alternator configuration
+   * @param pollingHttpClient HTTP transport for topology reads and health probes
+   * @param credentialsProvider credentials used to read Alternator system tables
+   * @param region signing region used by the topology DynamoDB client
+   * @since 2.1.0
+   */
+  public AlternatorLiveNodes(
+      AlternatorConfig config,
+      SdkHttpClient pollingHttpClient,
+      AwsCredentialsProvider credentialsProvider,
+      Region region) {
+    this(config, pollingHttpClient, false, credentialsProvider, region);
   }
 
   private AlternatorLiveNodes(
-      AlternatorConfig config, SdkHttpClient pollingHttpClient, boolean ownsPollingClient) {
+      AlternatorConfig config,
+      SdkHttpClient pollingHttpClient,
+      boolean ownsPollingClient,
+      AwsCredentialsProvider credentialsProvider,
+      Region region) {
     if (config == null) {
       throw new RuntimeException("config cannot be null");
     }
     if (pollingHttpClient == null) {
       throw new RuntimeException("pollingHttpClient cannot be null");
     }
+    if (credentialsProvider == null) {
+      throw new RuntimeException("credentialsProvider cannot be null");
+    }
+    if (region == null) {
+      throw new RuntimeException("region cannot be null");
+    }
     List<String> seedHosts = config.getSeedHosts();
     if (seedHosts == null || seedHosts.isEmpty()) {
       throw new RuntimeException("config must contain at least one seed host");
     }
-    this.localNodesResponseParser =
-        new LocalNodesResponseParser(config.getScheme(), config.getPort());
+    this.config = config;
     this.initialNodes = dedupePreservingOrder(hostsToUris(seedHosts));
     this.discoveredNodes = new AtomicReference<>();
-    this.config = config;
     this.pollingHttpClient = pollingHttpClient;
     this.ownsPollingClient = ownsPollingClient;
+    this.topologyClient =
+        createTopologyClient(
+            initialNodes.get(0),
+            pollingHttpClient,
+            credentialsProvider,
+            region,
+            config.getNodeHealthConfig().getHealthProbeTimeoutMs());
+    this.topologyDiscovery =
+        new SystemTableTopologyDiscovery(
+            topologyClient,
+            config.getScheme(),
+            config.getPort(),
+            config.getNodeHealthConfig().getHealthProbeTimeoutMs());
     this.nodeHealthManager =
         new NodeHealthManager(
             config.getNodeHealthConfig(),
@@ -465,6 +533,31 @@ public class AlternatorLiveNodes extends Thread {
         config != null ? config.getNodeHealthConfig().getHealthProbeConcurrency() + 1 : 5;
     return SyncClientDetector.createPollingClient(
         type, config != null ? config.getTlsConfig() : null, maxConnections);
+  }
+
+  private static DynamoDbClient createTopologyClient(
+      URI seedUri,
+      SdkHttpClient pollingHttpClient,
+      AwsCredentialsProvider credentialsProvider,
+      Region region,
+      long timeoutMs) {
+    // The application client owns a caller-supplied credentials provider. Hide any closeable
+    // implementation behind a non-closeable delegate so shutting down topology discovery cannot
+    // invalidate credentials still used by the application client.
+    AwsCredentialsProvider nonClosingCredentialsProvider = credentialsProvider::resolveCredentials;
+    ClientOverrideConfiguration overrideConfiguration =
+        ClientOverrideConfiguration.builder()
+            .retryPolicy(RetryPolicy.none())
+            .apiCallTimeout(Duration.ofMillis(timeoutMs))
+            .apiCallAttemptTimeout(Duration.ofMillis(timeoutMs))
+            .build();
+    return DynamoDbClient.builder()
+        .endpointOverride(seedUri)
+        .credentialsProvider(nonClosingCredentialsProvider)
+        .region(region)
+        .httpClient(pollingHttpClient)
+        .overrideConfiguration(overrideConfiguration)
+        .build();
   }
 
   /** {@inheritDoc} */
@@ -538,7 +631,9 @@ public class AlternatorLiveNodes extends Thread {
   }
 
   private URI hostToURI(String host) throws URISyntaxException, MalformedURLException {
-    return localNodesResponseParser.hostToURI(host);
+    URI uri = new URI(config.getScheme(), null, host, config.getPort(), null, null, null);
+    uri.toURL();
+    return uri;
   }
 
   private List<URI> hostsToUris(List<String> hosts) {
@@ -599,20 +694,8 @@ public class AlternatorLiveNodes extends Thread {
     return new URI(uri.getScheme(), null, uri.getHost(), uri.getPort(), path, query, null);
   }
 
-  // Utility function for reading the entire contents of an input stream
-  // (which we assume will be fairly short)
-  private static String streamToString(InputStream stream) throws IOException {
-    if (stream == null) {
-      return "";
-    }
-    Scanner s = new Scanner(stream).useDelimiter("\\A");
-    String result = s.hasNext() ? s.next() : "";
-    stream.close();
-    return result;
-  }
-
   /**
-   * Refreshes discovered nodes from {@code /localnodes} for the configured routing scope.
+   * Refreshes discovered nodes from the Alternator system topology tables.
    *
    * <p>This updates the discovered-node candidate set only. Per-node health state is maintained
    * separately and synchronized by {@link #setDiscoveredNodes(List)}.
@@ -621,43 +704,52 @@ public class AlternatorLiveNodes extends Thread {
    */
   void refreshDiscoveredNodes() throws IOException {
     RoutingScope scope = this.config.getRoutingScope();
-    IOException lastException = null;
-    while (scope != null) {
-      try {
-        List<URI> nodes = getNodesForScope(scope);
-        if (!nodes.isEmpty()) {
-          setDiscoveredNodes(nodes);
-          logger.log(
-              Level.FINE,
-              "Updated discovered nodes to "
-                  + discoveredNodes.get()
-                  + " using "
-                  + scope.getDescription());
-          return;
-        }
-      } catch (IOException e) {
-        logger.log(Level.WARNING, "Failed to discover nodes for " + scope.getDescription(), e);
-        lastException = e;
-      }
-      RoutingScope fallback = scope.getFallback();
-      if (fallback != null) {
-        logger.log(
-            Level.WARNING,
-            "No nodes found for "
-                + scope.getDescription()
-                + ", falling back to "
-                + fallback.getDescription());
-      }
-      scope = fallback;
-    }
-    // No nodes found in any scope - keep the current routing list. Initial seed nodes remain
-    // available as discovery fallback candidates, but are not injected into the routing ring.
-    if (lastException != null) {
+    TopologySearch topologySearch = discoverTopology(scope);
+    List<URI> nodes = topologySearch.preferredNodes;
+    RoutingScope effectiveScope = scope;
+
+    while (nodes.isEmpty() && effectiveScope.getFallback() != null) {
+      RoutingScope fallback = effectiveScope.getFallback();
       logger.log(
           Level.WARNING,
-          "All nodes unreachable in every routing scope, keeping existing discovered node list");
+          "No available nodes found for "
+              + effectiveScope.getDescription()
+              + ", falling back to "
+              + fallback.getDescription());
+      effectiveScope = fallback;
+      nodes = firstAvailableScopeNodes(topologySearch.snapshots, effectiveScope);
+    }
+
+    if (nodes.isEmpty()) {
+      // A terminal strict scope still publishes topology membership even when every matching
+      // endpoint is currently down. Health remains a routing concern, while retaining the
+      // down-only ring preserves topology and affinity state until recovery.
+      nodes = firstScopeNodes(topologySearch.snapshots, effectiveScope);
+    }
+
+    if (!nodes.isEmpty()) {
+      setDiscoveredNodes(nodes);
+      logger.log(
+          Level.FINE,
+          "Updated discovered nodes to "
+              + discoveredNodes.get()
+              + " using "
+              + effectiveScope.getDescription());
+      return;
+    }
+
+    if (topologySearch.snapshots.isEmpty()) {
+      if (topologySearch.lastException != null) {
+        logger.log(
+            Level.WARNING, "All topology candidates failed, keeping existing discovered node list");
+      } else {
+        logger.log(Level.WARNING, "No topology rows found, keeping existing discovered node list");
+      }
     } else {
-      logger.log(Level.WARNING, "No nodes found in any routing scope, keeping existing node list");
+      setDiscoveredNodes(Collections.emptyList());
+      logger.log(
+          Level.WARNING,
+          "No nodes belong to any configured routing scope, publishing an empty ring");
     }
   }
 
@@ -680,77 +772,118 @@ public class AlternatorLiveNodes extends Thread {
     nodeHealthManager.publishDiscoveredNodes(deduped, discoveredNodes::set);
   }
 
-  private List<URI> getNodesForScope(RoutingScope scope) throws IOException {
-    String query = scope.getLocalNodesQuery();
-    String requestQuery = query.isEmpty() ? null : query;
-
-    DiscoveryAttempt liveAttempt =
-        discoverNodes(scope, liveDiscoveryCandidates(), requestQuery, "live node");
-    if (!liveAttempt.nodes.isEmpty()) {
-      return liveAttempt.nodes;
+  private TopologySearch discoverTopology(RoutingScope preferredScope) {
+    DiscoveryCandidates liveCandidates = partitionDiscoveryCandidates(getDiscoveredNodesInternal());
+    DiscoveryCandidates seedCandidates =
+        partitionDiscoveryCandidates(initialNodes, nodeKeys(liveCandidates.all()));
+    TopologySearch search = new TopologySearch();
+    discoverTopology(liveCandidates.available, "live node", preferredScope, search);
+    if (!search.preferredNodes.isEmpty()) {
+      return search;
     }
-
-    DiscoveryAttempt seedAttempt =
-        discoverNodes(
-            scope, initialDiscoveryCandidates(liveAttempt.candidates), requestQuery, "seed node");
-    if (!seedAttempt.nodes.isEmpty()) {
-      return seedAttempt.nodes;
+    discoverTopology(seedCandidates.available, "seed node", preferredScope, search);
+    if (!search.preferredNodes.isEmpty()) {
+      return search;
     }
-
-    if (seedAttempt.lastException != null) {
-      throw seedAttempt.lastException;
+    discoverTopology(liveCandidates.down, "down live node", preferredScope, search);
+    if (!search.preferredNodes.isEmpty()) {
+      return search;
     }
-    if (liveAttempt.lastException != null) {
-      throw liveAttempt.lastException;
+    discoverTopology(seedCandidates.down, "down seed node", preferredScope, search);
+    return search;
+  }
+
+  private DiscoveryCandidates partitionDiscoveryCandidates(List<URI> candidates) {
+    return partitionDiscoveryCandidates(candidates, Collections.emptySet());
+  }
+
+  private DiscoveryCandidates partitionDiscoveryCandidates(
+      List<URI> candidates, Set<URI> excluded) {
+    List<URI> active = new ArrayList<>();
+    List<URI> quarantined = new ArrayList<>();
+    List<URI> down = new ArrayList<>();
+    Set<URI> seen = new HashSet<>(excluded);
+    for (URI candidate : candidates) {
+      URI key = NodeHealthStore.canonicalNodeKey(candidate);
+      if (key == null || !seen.add(key)) {
+        continue;
+      }
+      NodeHealthState state = getQueryPlanNodeState(candidate);
+      if (state == NodeHealthState.ACTIVE) {
+        active.add(candidate);
+      } else if (state == NodeHealthState.QUARANTINED) {
+        quarantined.add(candidate);
+      } else {
+        down.add(candidate);
+      }
+    }
+    Collections.shuffle(active);
+    Collections.shuffle(quarantined);
+    Collections.shuffle(down);
+    active.addAll(quarantined);
+    return new DiscoveryCandidates(active, down);
+  }
+
+  private void discoverTopology(
+      List<URI> candidates,
+      String candidateDescription,
+      RoutingScope preferredScope,
+      TopologySearch search) {
+    for (URI candidate : candidates) {
+      boolean reportHealth = getQueryPlanNodeState(candidate) != NodeHealthState.DOWN;
+      try {
+        List<TopologyNode> snapshot = topologyDiscovery.readTopology(candidate);
+        reportDiscoveryResult(candidate, NodeHealthObservation.PROBE_SUCCESS, reportHealth);
+        search.snapshots.add(snapshot);
+        List<URI> nodes = availableScopeNodes(snapshot, preferredScope);
+        if (!nodes.isEmpty()) {
+          search.preferredNodes = nodes;
+          return;
+        }
+      } catch (RuntimeException e) {
+        search.lastException =
+            recordDiscoveryFailure(candidate, candidateDescription, e, reportHealth);
+      }
+    }
+  }
+
+  private List<URI> firstAvailableScopeNodes(
+      List<List<TopologyNode>> snapshots, RoutingScope scope) {
+    for (List<TopologyNode> snapshot : snapshots) {
+      List<URI> nodes = availableScopeNodes(snapshot, scope);
+      if (!nodes.isEmpty()) {
+        return nodes;
+      }
     }
     return Collections.emptyList();
   }
 
-  private DiscoveryAttempt discoverNodes(
-      RoutingScope scope, List<URI> candidates, String requestQuery, String candidateDescription) {
-    IOException lastException = null;
-    Set<URI> nodes = new LinkedHashSet<>();
-    for (URI candidate : candidates) {
-      boolean reportHealth = getQueryPlanNodeState(candidate) != NodeHealthState.DOWN;
-      try {
-        List<URI> discoveredNodes =
-            getNodes(withPathAndRawQuery(candidate, "/localnodes", requestQuery));
-        reportDiscoveryResult(candidate, NodeHealthObservation.PROBE_SUCCESS, reportHealth);
-        if (!discoveredNodes.isEmpty()) {
-          if (!(scope instanceof ClusterScope)) {
-            return new DiscoveryAttempt(candidates, discoveredNodes, lastException);
-          }
-          nodes.addAll(discoveredNodes);
-        }
-      } catch (IOException e) {
-        lastException =
-            recordDiscoveryFailure(scope, candidate, candidateDescription, e, reportHealth);
-      } catch (RuntimeException e) {
-        lastException =
-            recordDiscoveryFailure(scope, candidate, candidateDescription, e, reportHealth);
-      } catch (URISyntaxException e) {
-        throw new RuntimeException(e);
+  private List<URI> firstScopeNodes(List<List<TopologyNode>> snapshots, RoutingScope scope) {
+    for (List<TopologyNode> snapshot : snapshots) {
+      List<URI> nodes = topologyDiscovery.nodesForScope(snapshot, scope);
+      if (!nodes.isEmpty()) {
+        return nodes;
       }
     }
+    return Collections.emptyList();
+  }
 
-    return new DiscoveryAttempt(candidates, new ArrayList<>(nodes), lastException);
+  private List<URI> availableScopeNodes(List<TopologyNode> snapshot, RoutingScope scope) {
+    List<URI> nodes = topologyDiscovery.nodesForScope(snapshot, scope);
+    for (URI node : nodes) {
+      if (getQueryPlanNodeState(node) != NodeHealthState.DOWN) {
+        return nodes;
+      }
+    }
+    return Collections.emptyList();
   }
 
   private IOException recordDiscoveryFailure(
-      RoutingScope scope,
-      URI candidate,
-      String candidateDescription,
-      Exception failure,
-      boolean reportHealth) {
+      URI candidate, String candidateDescription, Exception failure, boolean reportHealth) {
     reportDiscoveryResult(candidate, NodeHealthObservation.PROBE_FAILURE, reportHealth);
     logger.log(
         Level.WARNING,
-        "Failed to contact "
-            + candidateDescription
-            + " "
-            + candidate
-            + " for "
-            + scope.getDescription(),
+        "Failed to contact " + candidateDescription + " " + candidate + " for topology discovery",
         failure);
     if (failure instanceof IOException) {
       return (IOException) failure;
@@ -766,209 +899,32 @@ public class AlternatorLiveNodes extends Thread {
     }
   }
 
-  private List<URI> liveDiscoveryCandidates() {
-    List<URI> active = getActiveNodesInternal();
-    List<URI> quarantined = getQuarantinedNodesInternal();
-    List<URI> down = getDownNodesInternal();
-    Collections.shuffle(active);
-    Collections.shuffle(quarantined);
-    Collections.shuffle(down);
-    active.addAll(quarantined);
-    active.addAll(down);
-    return active;
+  private static class TopologySearch {
+    final List<List<TopologyNode>> snapshots = new ArrayList<>();
+    List<URI> preferredNodes = Collections.emptyList();
+    IOException lastException;
   }
 
-  private List<URI> initialDiscoveryCandidates(List<URI> alreadyTried) {
-    Set<URI> tried = nodeKeys(alreadyTried);
-    List<URI> active = new ArrayList<>();
-    List<URI> quarantined = new ArrayList<>();
-    List<URI> down = new ArrayList<>();
-    for (URI node : initialNodes) {
-      if (tried.contains(NodeHealthStore.canonicalNodeKey(node))) {
-        continue;
-      }
-      NodeHealthState state = getQueryPlanNodeState(node);
-      if (state == NodeHealthState.ACTIVE) {
-        active.add(node);
-      } else if (state == NodeHealthState.QUARANTINED) {
-        quarantined.add(node);
-      } else {
-        down.add(node);
-      }
+  private static class DiscoveryCandidates {
+    final List<URI> available;
+    final List<URI> down;
+
+    DiscoveryCandidates(List<URI> available, List<URI> down) {
+      this.available = available;
+      this.down = down;
     }
-    Collections.shuffle(active);
-    Collections.shuffle(quarantined);
-    Collections.shuffle(down);
-    active.addAll(quarantined);
-    active.addAll(down);
-    return active;
-  }
 
-  private static class DiscoveryAttempt {
-    final List<URI> candidates;
-    final List<URI> nodes;
-    final IOException lastException;
-
-    DiscoveryAttempt(List<URI> candidates, List<URI> nodes, IOException lastException) {
-      this.candidates = candidates;
-      this.nodes = nodes;
-      this.lastException = lastException;
-    }
-  }
-
-  private URI withPathAndRawQuery(URI uri, String path, String rawQuery) throws URISyntaxException {
-    URI withoutQuery =
-        new URI(uri.getScheme(), null, uri.getHost(), uri.getPort(), path, null, null);
-    if (rawQuery == null || rawQuery.isEmpty()) {
-      return withoutQuery;
-    }
-    try {
-      return new URI(withoutQuery.toASCIIString() + "?" + rawQuery);
-    } catch (URISyntaxException e) {
-      return new URI(uri.getScheme(), null, uri.getHost(), uri.getPort(), path, rawQuery, null);
-    }
-  }
-
-  private List<URI> getNodes(URI uri) throws IOException {
-    try (ControlPlaneResponse controlPlaneResponse = executeGet(uri)) {
-      HttpExecuteResponse response = controlPlaneResponse.response;
-      try {
-        int statusCode = response.httpResponse().statusCode();
-        if (statusCode != HttpURLConnection.HTTP_OK) {
-          response.responseBody().ifPresent(this::consumeAndClose);
-          throw new HttpStatusException(uri, statusCode);
-        }
-
-        Optional<AbortableInputStream> bodyOpt = response.responseBody();
-        if (!bodyOpt.isPresent()) {
-          throw new IOException("missing /localnodes response body");
-        }
-
-        String responseStr;
-        try (AbortableInputStream body = bodyOpt.get()) {
-          responseStr = streamToString(body);
-        }
-        return parseLocalNodesResponse(responseStr);
-      } catch (HttpStatusException e) {
-        throw e;
-      } catch (IOException e) {
-        response.responseBody().ifPresent(this::consumeAndClose);
-        throw e;
-      }
+    List<URI> all() {
+      List<URI> all = new ArrayList<>(available);
+      all.addAll(down);
+      return all;
     }
   }
 
   private int executeHealthProbe(URI node, NodeHealthManager.ProbeRequest probeRequest)
-      throws IOException, URISyntaxException {
-    URI uri = withPathAndQuery(node, "/localnodes", null);
-    try (ControlPlaneResponse controlPlaneResponse = executeGet(uri, probeRequest)) {
-      HttpExecuteResponse response = controlPlaneResponse.response;
-      int statusCode = response.httpResponse().statusCode();
-      response.responseBody().ifPresent(this::consumeAndClose);
-      return statusCode;
-    }
-  }
-
-  private ControlPlaneResponse executeGet(URI uri) throws IOException {
-    return executeGet(uri, null);
-  }
-
-  private ControlPlaneResponse executeGet(URI uri, NodeHealthManager.ProbeRequest probeRequest)
       throws IOException {
-    SdkHttpRequest sdkRequest =
-        SdkHttpRequest.builder()
-            .uri(uri)
-            .method(SdkHttpMethod.GET)
-            .putHeader("Host", uri.getHost() + ":" + uri.getPort())
-            .putHeader("Connection", "keep-alive")
-            .build();
-    HttpExecuteRequest executeRequest = HttpExecuteRequest.builder().request(sdkRequest).build();
-    ExecutableHttpRequest preparedRequest = pollingHttpClient.prepareRequest(executeRequest);
-    activeControlPlaneRequests.add(preparedRequest);
-    if (probeRequest != null) {
-      probeRequest.setRequest(preparedRequest);
-    }
-    if (shutdownRequested.get()) {
-      abortQuietly(preparedRequest);
-    }
-    boolean handedOff = false;
-    try {
-      HttpExecuteResponse response = preparedRequest.call();
-      ControlPlaneResponse controlPlaneResponse =
-          new ControlPlaneResponse(response, preparedRequest, probeRequest);
-      handedOff = true;
-      return controlPlaneResponse;
-    } finally {
-      if (!handedOff) {
-        releaseControlPlaneRequest(preparedRequest, probeRequest);
-      }
-    }
-  }
-
-  private void releaseControlPlaneRequest(
-      ExecutableHttpRequest preparedRequest, NodeHealthManager.ProbeRequest probeRequest) {
-    activeControlPlaneRequests.remove(preparedRequest);
-    if (probeRequest != null) {
-      probeRequest.clearRequest(preparedRequest);
-    }
-  }
-
-  private final class ControlPlaneResponse implements AutoCloseable {
-    private final HttpExecuteResponse response;
-    private final ExecutableHttpRequest preparedRequest;
-    private final NodeHealthManager.ProbeRequest probeRequest;
-    private boolean closed;
-
-    private ControlPlaneResponse(
-        HttpExecuteResponse response,
-        ExecutableHttpRequest preparedRequest,
-        NodeHealthManager.ProbeRequest probeRequest) {
-      this.response = response;
-      this.preparedRequest = preparedRequest;
-      this.probeRequest = probeRequest;
-    }
-
-    @Override
-    public void close() {
-      if (!closed) {
-        closed = true;
-        releaseControlPlaneRequest(preparedRequest, probeRequest);
-      }
-    }
-  }
-
-  private List<URI> parseLocalNodesResponse(String responseStr) throws IOException {
-    return localNodesResponseParser.parse(responseStr);
-  }
-
-  private static class HttpStatusException extends IOException {
-    private final int statusCode;
-
-    private HttpStatusException(URI uri, int statusCode) {
-      super("non-200 response from " + uri + ": " + statusCode);
-      this.statusCode = statusCode;
-    }
-  }
-
-  /**
-   * Consumes and closes an AbortableInputStream to release the underlying connection back to the
-   * pool.
-   */
-  private void consumeAndClose(AbortableInputStream stream) {
-    try {
-      // Read remaining bytes to ensure the connection can be reused
-      byte[] buf = new byte[1024];
-      while (stream.read(buf) != -1) {
-        // discard
-      }
-      stream.close();
-    } catch (IOException e) {
-      try {
-        stream.abort();
-      } catch (Exception abortEx) {
-        logger.log(Level.WARNING, "Failed to abort AbortableInputStream during cleanup", abortEx);
-      }
-    }
+    topologyDiscovery.probe(node);
+    return 200;
   }
 
   /** Exception thrown when a check operation cannot be completed. */
@@ -1005,14 +961,17 @@ public class AlternatorLiveNodes extends Thread {
    */
   public void checkIfRackAndDatacenterSetCorrectly() throws FailedToCheck, ValidationError {
     RoutingScope scope = this.config.getRoutingScope();
-    String query = scope.getLocalNodesQuery();
-    if (query.isEmpty()) {
+    if (scope instanceof ClusterScope) {
       // ClusterScope - no filtering needed
       return;
     }
     try {
-      List<URI> nodes = getNodesForScope(scope);
-      if (nodes.isEmpty()) {
+      TopologySearch topologySearch = discoverTopology(scope);
+      List<URI> matchingNodes = firstScopeNodes(topologySearch.snapshots, scope);
+      if (matchingNodes.isEmpty() && topologySearch.lastException != null) {
+        throw topologySearch.lastException;
+      }
+      if (matchingNodes.isEmpty()) {
         throw new ValidationError(
             "node returned empty list for "
                 + scope.getDescription()
@@ -1024,8 +983,8 @@ public class AlternatorLiveNodes extends Thread {
   }
 
   /**
-   * Returns true if remote node supports /localnodes?rack=`rack`&amp;dc=`datacenter`. If it can't
-   * conclude by any reason it throws {@link FailedToCheck}.
+   * Returns true if remote node exposes the system topology tables used for client-side scope
+   * filtering. If it cannot conclude, it throws {@link FailedToCheck}.
    *
    * @return a {@link java.lang.Boolean} object
    * @throws FailedToCheck if the check cannot be completed.
@@ -1033,60 +992,11 @@ public class AlternatorLiveNodes extends Thread {
    */
   public Boolean checkIfRackDatacenterFeatureIsSupported() throws FailedToCheck {
     markActivity();
-    NodeHealthQueryPlan queryPlan = newProbeQueryPlan(new LazyQueryPlan(this));
-    FailedToCheck lastFailure = null;
-    URI selected;
-    while ((selected = queryPlan.nextRouteCandidate()) != null) {
-
-      URI uri;
-      try {
-        uri = withPathAndQuery(selected, "/localnodes", null);
-      } catch (URISyntaxException e) {
-        lastFailure = new FailedToCheck("Invalid URI selected by query plan: " + selected, e);
-        continue;
-      }
-
-      try {
-        return checkIfRackDatacenterFeatureIsSupported(selected, uri);
-      } catch (FailedToCheck e) {
-        lastFailure = e;
-      }
+    TopologySearch search = discoverTopology(ClusterScope.create());
+    if (!search.snapshots.isEmpty()) {
+      return true;
     }
-    throw lastFailure != null ? lastFailure : new FailedToCheck("No live nodes available");
-  }
-
-  private Boolean checkIfRackDatacenterFeatureIsSupported(URI node, URI uri) throws FailedToCheck {
-    URI fakeRackUrl;
-    try {
-      fakeRackUrl =
-          new URI(
-              uri.getScheme(),
-              null,
-              uri.getHost(),
-              uri.getPort(),
-              uri.getPath(),
-              "rack=fakeRack",
-              null);
-    } catch (URISyntaxException e) {
-      // Should not ever happen
-      throw new FailedToCheck("Invalid URI: " + uri, e);
-    }
-    try {
-      List<URI> hostsWithFakeRack = getNodes(fakeRackUrl);
-      List<URI> hostsWithoutRack = getNodes(uri);
-      if (hostsWithoutRack.isEmpty()) {
-        // This should not normally happen.
-        // If list of nodes is empty, it is impossible to conclude if it supports rack/datacenter
-        // filtering or not.
-        throw new FailedToCheck(String.format("host %s returned empty list", uri));
-      }
-      reportNodeResult(node, NodeHealthObservation.PROBE_SUCCESS);
-      // When rack filtering is not supported server returns same nodes.
-      return hostsWithFakeRack.size() != hostsWithoutRack.size();
-    } catch (IOException | RuntimeException e) {
-      reportNodeResult(node, NodeHealthObservation.PROBE_FAILURE);
-      throw new FailedToCheck("failed to read list of nodes from the node", e);
-    }
+    throw new FailedToCheck("failed to read topology from the node", search.lastException);
   }
 
   /**
@@ -1184,13 +1094,13 @@ public class AlternatorLiveNodes extends Thread {
   /**
    * Directly probes every quarantined endpoint in the current discovered set.
    *
-   * <p>Each probe sends {@code GET /localnodes} to the endpoint itself. An HTTP 200 response
-   * promotes a still-quarantined endpoint to active; failures leave its routing state and traffic
-   * counters unchanged. Before the first successful topology refresh, the discovered set consists
-   * of the configured bootstrap seeds. Probes run through the bounded health-probe executor; this
-   * method waits for its batch to finish.
+   * <p>Each probe sends a targeted DynamoDB scan of {@code system.local} to the endpoint itself. A
+   * successful response promotes a still-quarantined endpoint to active; failures leave its routing
+   * state and traffic counters unchanged. Before the first successful topology refresh, the
+   * discovered set consists of the configured bootstrap seeds. Probes run through the bounded
+   * health-probe executor; this method waits for its batch to finish.
    *
-   * @return an unmodifiable list of endpoints that returned HTTP 200 during this probe operation
+   * @return an unmodifiable list of endpoints that completed the system-table probe
    * @since 2.1.0
    */
   public List<URI> probeQuarantinedNodes() {
@@ -1203,7 +1113,7 @@ public class AlternatorLiveNodes extends Thread {
    * <p>Concurrent calls share in-flight endpoint probes. Cancelling the returned aggregate future
    * does not cancel shared endpoint work.
    *
-   * @return future containing endpoints that returned HTTP 200 in snapshot order
+   * @return future containing endpoints that completed the system-table probe in snapshot order
    * @since 2.1.0
    */
   public CompletableFuture<List<URI>> probeQuarantinedNodesAsync() {
@@ -1216,14 +1126,6 @@ public class AlternatorLiveNodes extends Thread {
       return 0;
     }
     return Math.max(1, TimeUnit.NANOSECONDS.toMillis(remainingNanos));
-  }
-
-  private static void abortQuietly(ExecutableHttpRequest request) {
-    try {
-      request.abort();
-    } catch (RuntimeException ignored) {
-      // Best-effort shutdown and timeout cancellation.
-    }
   }
 
   private List<URI> getDownNodeProbeCandidates() {

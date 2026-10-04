@@ -19,6 +19,7 @@ import static org.junit.Assert.*;
 
 import com.scylladb.alternator.AlternatorConfig;
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -30,30 +31,39 @@ import software.amazon.awssdk.http.HttpExecuteRequest;
 import software.amazon.awssdk.http.HttpExecuteResponse;
 import software.amazon.awssdk.http.SdkHttpClient;
 import software.amazon.awssdk.http.SdkHttpFullResponse;
+import software.amazon.awssdk.http.SdkHttpMethod;
 import software.amazon.awssdk.http.SdkHttpRequest;
 
 /**
- * Unit tests verifying that AlternatorLiveNodes sends the {@code Connection: keep-alive} header on
- * its polling requests to {@code /localnodes}.
+ * Unit tests verifying that AlternatorLiveNodes sends its topology scans through the reusable
+ * polling transport.
  */
 public class AlternatorLiveNodesKeepAliveTest {
 
-  /**
-   * Mock SdkHttpClient that captures outgoing requests and returns a valid /localnodes JSON
-   * response so that refreshDiscoveredNodes() succeeds.
-   */
+  /** Mock SdkHttpClient that captures topology scan requests and returns valid scan responses. */
   private static class CapturingHttpClient implements SdkHttpClient {
     final List<SdkHttpRequest> capturedRequests = new CopyOnWriteArrayList<>();
+    final List<String> capturedBodies = new CopyOnWriteArrayList<>();
 
     @Override
     public ExecutableHttpRequest prepareRequest(HttpExecuteRequest request) {
       capturedRequests.add(request.httpRequest());
+      String requestBody = requestBody(request);
+      capturedBodies.add(requestBody);
       return new ExecutableHttpRequest() {
         @Override
         public HttpExecuteResponse call() {
-          byte[] body = "[\"127.0.0.1\"]".getBytes(StandardCharsets.UTF_8);
+          String responseBody =
+              requestBody.contains(SystemTableTopologyDiscovery.LOCAL_TABLE)
+                  ? localScanResponse("127.0.0.1")
+                  : emptyScanResponse();
+          byte[] body = responseBody.getBytes(StandardCharsets.UTF_8);
           return HttpExecuteResponse.builder()
-              .response(SdkHttpFullResponse.builder().statusCode(200).build())
+              .response(
+                  SdkHttpFullResponse.builder()
+                      .statusCode(200)
+                      .putHeader("Content-Type", "application/x-amz-json-1.0")
+                      .build())
               .responseBody(AbortableInputStream.create(new ByteArrayInputStream(body)))
               .build();
         }
@@ -70,105 +80,99 @@ public class AlternatorLiveNodesKeepAliveTest {
     public String clientName() {
       return "CapturingHttpClient";
     }
+
+    private static String requestBody(HttpExecuteRequest request) {
+      try {
+        return new String(
+            request.contentStreamProvider().get().newStream().readAllBytes(),
+            StandardCharsets.UTF_8);
+      } catch (IOException e) {
+        throw new RuntimeException(e);
+      }
+    }
   }
 
   @Test
-  public void testPollingRequestIncludesConnectionKeepAliveHeader() throws Exception {
+  public void testPollingUsesDynamoDbTopologyScans() throws Exception {
     CapturingHttpClient capturingClient = new CapturingHttpClient();
     AlternatorConfig config =
         AlternatorConfig.builder().withSeedNode(URI.create("http://127.0.0.1:8043")).build();
     AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, capturingClient);
 
-    // Trigger a polling cycle
     liveNodes.refreshDiscoveredNodes();
 
-    assertFalse(
-        "Should have captured at least one request", capturingClient.capturedRequests.isEmpty());
-
-    for (SdkHttpRequest req : capturingClient.capturedRequests) {
-      List<String> connectionValues = req.headers().get("Connection");
-      assertNotNull(
-          "Connection header should be present on polling request to " + req.encodedPath(),
-          connectionValues);
-      assertTrue(
-          "Connection header should contain 'keep-alive', got: " + connectionValues,
-          connectionValues.stream().anyMatch(v -> v.equalsIgnoreCase("keep-alive")));
-    }
+    assertTopologyScans(capturingClient, "http", 1);
   }
 
   @Test
-  public void testMultiplePollingRequestsAllIncludeKeepAlive() throws Exception {
+  public void testMultiplePollingCyclesUseSameDynamoDbRequestShape() throws Exception {
     CapturingHttpClient capturingClient = new CapturingHttpClient();
     AlternatorConfig config =
         AlternatorConfig.builder().withSeedNode(URI.create("http://127.0.0.1:8043")).build();
     AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, capturingClient);
 
-    // Multiple polling cycles
     for (int i = 0; i < 5; i++) {
       liveNodes.refreshDiscoveredNodes();
     }
 
-    assertTrue(
-        "Should have captured multiple requests", capturingClient.capturedRequests.size() >= 5);
-
-    for (SdkHttpRequest req : capturingClient.capturedRequests) {
-      List<String> connectionValues = req.headers().get("Connection");
-      assertNotNull(
-          "Connection header should be present on every polling request", connectionValues);
-      assertTrue(
-          "Connection header should contain 'keep-alive' on every polling request",
-          connectionValues.stream().anyMatch(v -> v.equalsIgnoreCase("keep-alive")));
-    }
+    assertTopologyScans(capturingClient, "http", 5);
   }
 
   @Test
-  public void testPollingRequestIncludesConnectionKeepAliveHeaderForHttps() throws Exception {
+  public void testTopologyScansUseHttps() throws Exception {
     CapturingHttpClient capturingClient = new CapturingHttpClient();
     AlternatorConfig config =
         AlternatorConfig.builder().withSeedNode(URI.create("https://127.0.0.1:8043")).build();
     AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, capturingClient);
 
-    // Trigger a polling cycle
     liveNodes.refreshDiscoveredNodes();
 
-    assertFalse(
-        "Should have captured at least one request", capturingClient.capturedRequests.isEmpty());
-
-    for (SdkHttpRequest req : capturingClient.capturedRequests) {
-      assertEquals("Request should use HTTPS scheme", "https", req.protocol());
-      List<String> connectionValues = req.headers().get("Connection");
-      assertNotNull(
-          "Connection header should be present on HTTPS polling request to " + req.encodedPath(),
-          connectionValues);
-      assertTrue(
-          "Connection header should contain 'keep-alive' for HTTPS, got: " + connectionValues,
-          connectionValues.stream().anyMatch(v -> v.equalsIgnoreCase("keep-alive")));
-    }
+    assertTopologyScans(capturingClient, "https", 1);
   }
 
   @Test
-  public void testMultipleHttpsPollingRequestsAllIncludeKeepAlive() throws Exception {
+  public void testMultipleHttpsPollingCyclesUseSameDynamoDbRequestShape() throws Exception {
     CapturingHttpClient capturingClient = new CapturingHttpClient();
     AlternatorConfig config =
         AlternatorConfig.builder().withSeedNode(URI.create("https://127.0.0.1:8043")).build();
     AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, capturingClient);
 
-    // Multiple polling cycles
     for (int i = 0; i < 5; i++) {
       liveNodes.refreshDiscoveredNodes();
     }
 
-    assertTrue(
-        "Should have captured multiple requests", capturingClient.capturedRequests.size() >= 5);
+    assertTopologyScans(capturingClient, "https", 5);
+  }
 
-    for (SdkHttpRequest req : capturingClient.capturedRequests) {
-      assertEquals("Request should use HTTPS scheme", "https", req.protocol());
-      List<String> connectionValues = req.headers().get("Connection");
-      assertNotNull(
-          "Connection header should be present on every HTTPS polling request", connectionValues);
+  private static void assertTopologyScans(
+      CapturingHttpClient capturingClient, String expectedProtocol, int expectedCycles) {
+    assertEquals(expectedCycles * 2, capturingClient.capturedRequests.size());
+    assertEquals(capturingClient.capturedRequests.size(), capturingClient.capturedBodies.size());
+
+    for (int i = 0; i < capturingClient.capturedRequests.size(); i++) {
+      SdkHttpRequest request = capturingClient.capturedRequests.get(i);
+      assertEquals(expectedProtocol, request.protocol());
+      assertEquals(SdkHttpMethod.POST, request.method());
+      assertEquals("/", request.encodedPath());
       assertTrue(
-          "Connection header should contain 'keep-alive' on every HTTPS polling request",
-          connectionValues.stream().anyMatch(v -> v.equalsIgnoreCase("keep-alive")));
+          "request should target DynamoDB Scan",
+          request.headers().get("X-Amz-Target").contains("DynamoDB_20120810.Scan"));
+      String expectedTable =
+          i % 2 == 0
+              ? SystemTableTopologyDiscovery.LOCAL_TABLE
+              : SystemTableTopologyDiscovery.PEERS_TABLE;
+      assertTrue(capturingClient.capturedBodies.get(i).contains(expectedTable));
     }
+  }
+
+  private static String localScanResponse(String address) {
+    return "{\"Items\":[{\"rpc_address\":{\"S\":\""
+        + address
+        + "\"},\"data_center\":{\"S\":\"dc1\"},\"rack\":{\"S\":\"rack1\"}}],"
+        + "\"Count\":1,\"ScannedCount\":1}";
+  }
+
+  private static String emptyScanResponse() {
+    return "{\"Items\":[],\"Count\":0,\"ScannedCount\":0}";
   }
 }

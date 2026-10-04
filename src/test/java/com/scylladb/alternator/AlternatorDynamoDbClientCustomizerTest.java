@@ -18,9 +18,11 @@ package com.scylladb.alternator;
 import static org.junit.Assert.*;
 
 import com.scylladb.alternator.internal.SyncClientDetector;
+import java.io.ByteArrayInputStream;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.function.UnaryOperator;
 import org.junit.Test;
@@ -457,8 +459,9 @@ public class AlternatorDynamoDbClientCustomizerTest {
     SdkHttpClient configured =
         configurePollingSyncClient(builder, delegate, AlternatorConfig.builder().build());
 
-    configured.prepareRequest(HttpExecuteRequest.builder().request(localNodesRequest()).build());
+    configured.prepareRequest(topologyScanRequest());
 
+    assertTopologyScanRequest(delegate.capturedRequest);
     assertEquals(
         AlternatorUserAgent.userAgentToken(),
         delegate.capturedRequest.firstMatchingHeader("User-Agent").get());
@@ -474,8 +477,9 @@ public class AlternatorDynamoDbClientCustomizerTest {
     SdkHttpClient configured =
         configurePollingSyncClient(builder, delegate, AlternatorConfig.builder().build());
 
-    configured.prepareRequest(HttpExecuteRequest.builder().request(localNodesRequest()).build());
+    configured.prepareRequest(topologyScanRequest());
 
+    assertTopologyScanRequest(delegate.capturedRequest);
     assertEquals(
         AlternatorUserAgent.userAgentToken() + " app/1",
         delegate.capturedRequest.firstMatchingHeader("User-Agent").get());
@@ -541,13 +545,32 @@ public class AlternatorDynamoDbClientCustomizerTest {
     return (SdkHttpClient) method.invoke(builder, pollingClient, config);
   }
 
-  private SdkHttpRequest localNodesRequest() {
-    return SdkHttpRequest.builder()
-        .method(SdkHttpMethod.GET)
-        .uri(SEED_URI.resolve("/localnodes"))
-        .putHeader("Host", SEED_URI.getHost() + ":" + SEED_URI.getPort())
-        .putHeader("Connection", "keep-alive")
+  private HttpExecuteRequest topologyScanRequest() {
+    byte[] body =
+        "{\"TableName\":\".scylla.alternator.system.local\"}".getBytes(StandardCharsets.UTF_8);
+    SdkHttpRequest request =
+        SdkHttpRequest.builder()
+            .method(SdkHttpMethod.POST)
+            .uri(SEED_URI.resolve("/"))
+            .putHeader("Host", SEED_URI.getHost() + ":" + SEED_URI.getPort())
+            .putHeader("Connection", "keep-alive")
+            .putHeader("Content-Type", "application/x-amz-json-1.0")
+            .putHeader("X-Amz-Target", "DynamoDB_20120810.Scan")
+            .putHeader(
+                "Authorization",
+                "AWS4-HMAC-SHA256 Credential=test/20260101/us-east-1/dynamodb/aws4_request")
+            .build();
+    return HttpExecuteRequest.builder()
+        .request(request)
+        .contentStreamProvider(() -> new ByteArrayInputStream(body))
         .build();
+  }
+
+  private void assertTopologyScanRequest(SdkHttpRequest request) {
+    assertEquals(SdkHttpMethod.POST, request.method());
+    assertEquals("/", request.encodedPath());
+    assertEquals("DynamoDB_20120810.Scan", request.firstMatchingHeader("X-Amz-Target").get());
+    assertTrue(request.firstMatchingHeader("Authorization").isPresent());
   }
 
   private static class CapturingSdkHttpClient implements SdkHttpClient {

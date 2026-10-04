@@ -16,7 +16,6 @@
 package com.scylladb.alternator.internal;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -31,8 +30,11 @@ import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -63,14 +65,14 @@ public class AlternatorLiveNodesDnsDiscoveryTest {
     port = server.getAddress().getPort();
 
     server.createContext(
-        "/localnodes",
+        "/",
         exchange -> {
-          requestCount.incrementAndGet();
-          byte[] body = "[\"localhost\",\"node-a.internal\"]".getBytes();
-          exchange.sendResponseHeaders(200, body.length);
-          try (OutputStream os = exchange.getResponseBody()) {
-            os.write(body);
+          String tableName = scanTable(exchange);
+          if (SystemTableTopologyDiscovery.LOCAL_TABLE.equals(tableName)) {
+            requestCount.incrementAndGet();
           }
+          writeResponse(
+              exchange, topologyResponse(tableName, "[\"localhost\",\"node-a.internal\"]"));
         });
 
     server.start();
@@ -215,14 +217,22 @@ public class AlternatorLiveNodesDnsDiscoveryTest {
             ipv4,
             0,
             exchange -> seedResponse.get(),
-            exchange -> seedDiscoveryRequests.incrementAndGet());
+            exchange -> {
+              if (isLocalScan(exchange)) {
+                seedDiscoveryRequests.incrementAndGet();
+              }
+            });
     int dualPort = seedServer.getAddress().getPort();
     HttpServer learnedServer =
         startServer(
             ipv6,
             dualPort,
             "[\"learned.test\"]",
-            exchange -> learnedDiscoveryRequests.incrementAndGet());
+            exchange -> {
+              if (isLocalScan(exchange)) {
+                learnedDiscoveryRequests.incrementAndGet();
+              }
+            });
     learnedServer.createContext(
         "/operation",
         exchange -> {
@@ -276,23 +286,13 @@ public class AlternatorLiveNodesDnsDiscoveryTest {
   public void testScopeBehaviorOverDualStackDns() throws Exception {
     InetAddress ipv4 = InetAddress.getByName("127.0.0.1");
     InetAddress ipv6 = InetAddress.getByName("::1");
-    AtomicReference<String> lastQuery = new AtomicReference<>();
+    AtomicReference<String> lastMethod = new AtomicReference<>();
     HttpServer scopeServer =
         startServer(
             ipv6,
             0,
-            exchange -> {
-              String query = exchange.getRequestURI().getRawQuery();
-              lastQuery.set(query);
-              if ("dc=dc1".equals(query)) {
-                return "[\"scoped-node.test\"]";
-              }
-              if (query == null) {
-                return "[\"fallback-node.test\"]";
-              }
-              return "[]";
-            },
-            exchange -> {});
+            "[\"scoped-node.test\"]",
+            exchange -> lastMethod.set(exchange.getRequestMethod()));
     int dualPort = scopeServer.getAddress().getPort();
     DnsResolver resolver = host -> new InetAddress[] {ipv4, ipv6};
     try {
@@ -303,7 +303,7 @@ public class AlternatorLiveNodesDnsDiscoveryTest {
                 dnsConfig(dualPort, DatacenterScope.of("dc1", null)), validClient);
         valid.updateLiveNodes();
         assertEquals("scoped-node.test", valid.nextAsURI().getHost());
-        assertEquals("dc=dc1", lastQuery.get());
+        assertEquals("POST", lastMethod.get());
       } finally {
         validClient.close();
       }
@@ -330,8 +330,8 @@ public class AlternatorLiveNodesDnsDiscoveryTest {
                 dnsConfig(dualPort, DatacenterScope.of("wrong", ClusterScope.create())),
                 fallbackClient);
         fallback.updateLiveNodes();
-        assertEquals("fallback-node.test", fallback.nextAsURI().getHost());
-        assertNull(lastQuery.get());
+        assertEquals("scoped-node.test", fallback.nextAsURI().getHost());
+        assertEquals("POST", lastMethod.get());
       } finally {
         fallbackClient.close();
       }
@@ -401,7 +401,9 @@ public class AlternatorLiveNodesDnsDiscoveryTest {
             dnsPort,
             "[\"127.0.0.4\"]",
             exchange -> {
-              recoveryRequests.incrementAndGet();
+              if (isLocalScan(exchange)) {
+                recoveryRequests.incrementAndGet();
+              }
               recoveryHostHeader.set(exchange.getRequestHeaders().getFirst("Host"));
             });
 
@@ -508,10 +510,12 @@ public class AlternatorLiveNodesDnsDiscoveryTest {
       throws IOException {
     HttpServer httpServer = HttpServer.create(new InetSocketAddress(listenAddress, listenPort), 0);
     httpServer.createContext(
-        "/localnodes",
+        "/",
         exchange -> {
+          String tableName = scanTable(exchange);
+          exchange.setAttribute("scanTable", tableName);
           observer.observe(exchange);
-          writeResponse(exchange, responseProvider.response(exchange));
+          writeResponse(exchange, topologyResponse(tableName, responseProvider.response(exchange)));
         });
     httpServer.start();
     return httpServer;
@@ -536,11 +540,79 @@ public class AlternatorLiveNodesDnsDiscoveryTest {
   }
 
   private static void writeResponse(HttpExchange exchange, String responseBody) throws IOException {
-    byte[] body = responseBody.getBytes();
+    byte[] body = responseBody.getBytes(StandardCharsets.UTF_8);
+    exchange.getResponseHeaders().set("Content-Type", "application/x-amz-json-1.0");
     exchange.sendResponseHeaders(200, body.length);
     try (OutputStream output = exchange.getResponseBody()) {
       output.write(body);
     }
+  }
+
+  private static String scanTable(HttpExchange exchange) throws IOException {
+    String requestBody =
+        new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+    if (requestBody.contains(SystemTableTopologyDiscovery.LOCAL_TABLE)) {
+      return SystemTableTopologyDiscovery.LOCAL_TABLE;
+    }
+    if (requestBody.contains(SystemTableTopologyDiscovery.PEERS_TABLE)) {
+      return SystemTableTopologyDiscovery.PEERS_TABLE;
+    }
+    return "";
+  }
+
+  private static boolean isLocalScan(HttpExchange exchange) {
+    return SystemTableTopologyDiscovery.LOCAL_TABLE.equals(exchange.getAttribute("scanTable"));
+  }
+
+  private static String topologyResponse(String tableName, String nodeList) {
+    List<String> nodes = parseNodeList(nodeList);
+    if (nodes == null) {
+      return nodeList;
+    }
+    if (SystemTableTopologyDiscovery.LOCAL_TABLE.equals(tableName)) {
+      return scanResponse(nodes.isEmpty() ? nodes : nodes.subList(0, 1));
+    }
+    return scanResponse(nodes.size() <= 1 ? new ArrayList<>() : nodes.subList(1, nodes.size()));
+  }
+
+  private static List<String> parseNodeList(String nodeList) {
+    String value = nodeList.trim();
+    if (!value.startsWith("[") || !value.endsWith("]")) {
+      return null;
+    }
+    String contents = value.substring(1, value.length() - 1).trim();
+    List<String> nodes = new ArrayList<>();
+    if (contents.isEmpty()) {
+      return nodes;
+    }
+    for (String token : contents.split(",")) {
+      String host = token.trim();
+      if (host.length() < 2 || host.charAt(0) != '"' || host.charAt(host.length() - 1) != '"') {
+        return null;
+      }
+      nodes.add(host.substring(1, host.length() - 1));
+    }
+    return nodes;
+  }
+
+  private static String scanResponse(List<String> addresses) {
+    StringBuilder response = new StringBuilder("{\"Items\":[");
+    for (int i = 0; i < addresses.size(); i++) {
+      if (i > 0) {
+        response.append(',');
+      }
+      response
+          .append("{\"rpc_address\":{\"S\":\"")
+          .append(addresses.get(i))
+          .append("\"},\"data_center\":{\"S\":\"dc1\"},\"rack\":{\"S\":\"rack1\"}}");
+    }
+    return response
+        .append("],\"Count\":")
+        .append(addresses.size())
+        .append(",\"ScannedCount\":")
+        .append(addresses.size())
+        .append('}')
+        .toString();
   }
 
   private interface ExchangeObserver {

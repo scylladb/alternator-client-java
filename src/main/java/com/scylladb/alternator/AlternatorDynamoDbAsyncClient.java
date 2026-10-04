@@ -110,6 +110,8 @@ public class AlternatorDynamoDbAsyncClient {
     private final AlternatorConfig.Builder configBuilder;
     private URI seedUri;
     private Region region;
+    private AwsCredentialsProvider topologyCredentialsProvider;
+    private Region topologyRegion;
     private boolean seedHostsSet = false;
     private boolean disableCertificateChecks = false;
     private boolean httpClientSet = false;
@@ -142,10 +144,9 @@ public class AlternatorDynamoDbAsyncClient {
      * Sets the seed host addresses used for Alternator node discovery.
      *
      * <p>{@link #endpointOverride(URI)} is still required and supplies the scheme and port for
-     * these hosts. When {@code ClusterScope} is used, each configured seed is queried for {@code
-     * /localnodes}; provide seeds from every datacenter that should participate in cluster-wide
-     * routing. For datacenter or rack scoped routing in a multi-datacenter cluster, provide a seed
-     * from the target datacenter.
+     * these hosts. Any reachable seed can provide cluster-wide topology through the Alternator
+     * views of {@code system.local} and {@code system.peers}; additional seeds provide discovery
+     * failover.
      *
      * @param hosts collection of seed host addresses (IP or hostname)
      * @return this builder instance
@@ -617,10 +618,9 @@ public class AlternatorDynamoDbAsyncClient {
     @Override
     public AlternatorDynamoDbAsyncClientBuilder credentialsProvider(
         AwsCredentialsProvider credentialsProvider) {
-      if (credentialsProvider != null) {
-        this.credentialsProviderSet = true;
-        configBuilder.authenticationEnabled(true);
-      }
+      this.credentialsProviderSet = credentialsProvider != null;
+      this.topologyCredentialsProvider = credentialsProvider;
+      configBuilder.authenticationEnabled(credentialsProvider != null);
       delegate.credentialsProvider(credentialsProvider);
       return this;
     }
@@ -704,7 +704,7 @@ public class AlternatorDynamoDbAsyncClient {
         boolean endpointDiscoveryEnabled) {
       throw new UnsupportedOperationException(
           "AlternatorDynamoDbAsyncClient does not support AWS endpoint discovery. "
-              + "Node discovery is handled automatically via the /localnodes API.");
+              + "Node discovery is handled automatically via Alternator system-table scans.");
     }
 
     /** {@inheritDoc} */
@@ -712,7 +712,7 @@ public class AlternatorDynamoDbAsyncClient {
     public AlternatorDynamoDbAsyncClientBuilder enableEndpointDiscovery() {
       throw new UnsupportedOperationException(
           "AlternatorDynamoDbAsyncClient does not support AWS endpoint discovery. "
-              + "Node discovery is handled automatically via the /localnodes API.");
+              + "Node discovery is handled automatically via Alternator system-table scans.");
     }
 
     /** {@inheritDoc} */
@@ -763,8 +763,11 @@ public class AlternatorDynamoDbAsyncClient {
 
       if (!credentialsProviderSet) {
         configBuilder.authenticationEnabled(false);
-        delegate.credentialsProvider(AnonymousCredentialsProvider.create());
+        topologyCredentialsProvider = AnonymousCredentialsProvider.create();
+        delegate.credentialsProvider(topologyCredentialsProvider);
       }
+
+      topologyRegion = region != null ? region : Region.of("fake-aws-region");
 
       applyEndpointToConfig();
 
@@ -850,7 +853,7 @@ public class AlternatorDynamoDbAsyncClient {
 
         delegate.endpointOverride(seedUri);
         if (region == null) {
-          delegate.region(Region.of("fake-aws-region"));
+          delegate.region(topologyRegion);
         }
 
         client = delegate.build();
@@ -956,7 +959,8 @@ public class AlternatorDynamoDbAsyncClient {
 
     AlternatorLiveNodes createLiveNodes(
         AlternatorConfig alternatorConfig, SdkHttpClient pollingClient) {
-      return new AlternatorLiveNodes(alternatorConfig, pollingClient);
+      return new AlternatorLiveNodes(
+          alternatorConfig, pollingClient, topologyCredentialsProvider, topologyRegion);
     }
 
     private SdkAsyncHttpClient configureMainAsyncClient(

@@ -56,6 +56,8 @@ import software.amazon.awssdk.services.dynamodb.model.*;
 @RunWith(Parameterized.class)
 public class ConnectionPoolIT {
 
+  private static final int EXPECTED_CLUSTER_NODE_COUNT = 3;
+
   private final URI seedUri;
 
   public ConnectionPoolIT(String scheme, URI seedUri) {
@@ -83,12 +85,23 @@ public class ConnectionPoolIT {
     return new AlternatorLiveNodes(builder.build());
   }
 
+  private static void assertTopologyDiscoverySucceeds(AlternatorLiveNodes liveNodes)
+      throws Exception {
+    assertTrue(
+        "Topology system tables should be readable",
+        liveNodes.checkIfRackDatacenterFeatureIsSupported());
+    assertEquals(
+        "Topology discovery should publish every cluster node",
+        EXPECTED_CLUSTER_NODE_COUNT,
+        liveNodes.getDiscoveredNodes().size());
+  }
+
   /**
-   * Verifies that the polling pool does not exhaust. After many {@code refreshDiscoveredNodes()}
-   * calls, all requests should succeed without hanging.
+   * Verifies that the topology-discovery pool does not exhaust. After many {@code
+   * refreshDiscoveredNodes()} calls, all system-table scans should succeed without hanging.
    */
   @Test(timeout = 10_000)
-  public void testPollingPoolDoesNotExhaust() throws Exception {
+  public void testTopologyDiscoveryPoolDoesNotExhaust() throws Exception {
     AlternatorLiveNodes liveNodes = createLiveNodes();
 
     try {
@@ -98,15 +111,14 @@ public class ConnectionPoolIT {
         liveNodes.refreshDiscoveredNodes();
       }
 
-      int nodeCount = liveNodes.getDiscoveredNodes().size();
-      assertTrue("Should have discovered at least one node", nodeCount > 0);
+      assertTopologyDiscoverySucceeds(liveNodes);
     } finally {
       liveNodes.shutdownAndWait();
     }
   }
 
   /**
-   * Verifies that the polling pool remains usable after an idle period.
+   * Verifies that the topology-discovery pool remains usable after an idle period.
    *
    * <p>After the idle period, making more requests should succeed without timeout. This test does
    * not claim physical connection identity; the socket-level unit tests make that assertion.
@@ -115,7 +127,7 @@ public class ConnectionPoolIT {
    * triggering the default 60-second idle reaper.
    */
   @Test(timeout = 30_000)
-  public void testConnectionSurvivesIdlePeriod() throws Exception {
+  public void testTopologyDiscoveryConnectionSurvivesIdlePeriod() throws Exception {
     AlternatorLiveNodes liveNodes = createLiveNodes();
 
     try {
@@ -123,8 +135,8 @@ public class ConnectionPoolIT {
       for (int i = 0; i < 30; i++) {
         liveNodes.refreshDiscoveredNodes();
       }
+      assertTopologyDiscoverySucceeds(liveNodes);
       int nodesBefore = liveNodes.getDiscoveredNodes().size();
-      assertTrue("Should have discovered at least one node", nodesBefore > 0);
 
       // Let connections sit idle for 10 seconds — enough to verify survival
       // without hitting the default 60-second idle reaper
@@ -134,8 +146,10 @@ public class ConnectionPoolIT {
       for (int i = 0; i < 30; i++) {
         liveNodes.refreshDiscoveredNodes();
       }
+      assertTopologyDiscoverySucceeds(liveNodes);
       int nodesAfter = liveNodes.getDiscoveredNodes().size();
-      assertEquals("Node count should remain consistent after idle period", nodesBefore, nodesAfter);
+      assertEquals(
+          "Node count should remain consistent after idle period", nodesBefore, nodesAfter);
     } finally {
       liveNodes.shutdownAndWait();
     }
@@ -167,8 +181,7 @@ public class ConnectionPoolIT {
     Process proc = pb.start();
     long count = 0;
     String pidFilter = "pid=" + pid;
-    try (BufferedReader reader =
-        new BufferedReader(new InputStreamReader(proc.getInputStream()))) {
+    try (BufferedReader reader = new BufferedReader(new InputStreamReader(proc.getInputStream()))) {
       String line;
       while ((line = reader.readLine()) != null) {
         if (line.contains(pidFilter)) {
@@ -388,8 +401,7 @@ public class ConnectionPoolIT {
    */
   @Test(timeout = 180_000)
   public void testDynamoDbConnectionPoolRemainsBoundedWithHeadersOptimization() throws Exception {
-    runDynamoDbConnectionPoolSmokeTest(
-        buildDynamoWrapperWithHeaders(), "conn_pool_it_headers_opt");
+    runDynamoDbConnectionPoolSmokeTest(buildDynamoWrapperWithHeaders(), "conn_pool_it_headers_opt");
   }
 
   // --- Async client connection-pool tests (Netty HTTP stack) ---
@@ -410,8 +422,8 @@ public class ConnectionPoolIT {
    * Runs the async DynamoDB connection-pool smoke test with the given client wrapper and table
    * name.
    *
-   * <p>Mirrors the sync {@link #runDynamoDbConnectionPoolSmokeTest} but uses the async client, which
-   * runs on a Netty HTTP stack instead of Apache HttpClient.
+   * <p>Mirrors the sync {@link #runDynamoDbConnectionPoolSmokeTest} but uses the async client,
+   * which runs on a Netty HTTP stack instead of Apache HttpClient.
    */
   private void runAsyncDynamoDbConnectionPoolSmokeTest(
       AlternatorDynamoDbAsyncClientWrapper wrapper, String tableName) throws Exception {
@@ -420,7 +432,9 @@ public class ConnectionPoolIT {
 
     // Create test table
     try {
-      client.deleteTable(DeleteTableRequest.builder().tableName(tableName).build()).get(10, TimeUnit.SECONDS);
+      client
+          .deleteTable(DeleteTableRequest.builder().tableName(tableName).build())
+          .get(10, TimeUnit.SECONDS);
       Thread.sleep(500);
     } catch (Exception e) {
       // Table doesn't exist or other error, that's fine
@@ -574,17 +588,18 @@ public class ConnectionPoolIT {
     runAsyncDynamoDbConnectionPoolSmokeTest(buildAsyncWrapper(), "conn_pool_it_async_default");
   }
 
-  // --- /localnodes polling path connection-pool tests ---
+  // --- Topology-discovery connection-pool tests ---
 
   /**
-   * Verifies that the {@code /localnodes} polling path keeps its TCP connection count bounded as
+   * Verifies that DynamoDB system-table topology scans keep their TCP connection count bounded as
    * measured by {@code ss}.
    *
-   * <p>This complements {@link #testPollingPoolDoesNotExhaust()} with a coarse connection-count
-   * check. Exact polling connection identity is covered by socket-level unit tests.
+   * <p>This complements {@link #testTopologyDiscoveryPoolDoesNotExhaust()} with a coarse
+   * connection-count check. Exact discovery connection identity is covered by socket-level unit
+   * tests.
    */
   @Test(timeout = 30_000)
-  public void testPollingConnectionsRemainBoundedUnderSs() throws Exception {
+  public void testTopologyDiscoveryConnectionsRemainBoundedUnderSs() throws Exception {
     AlternatorLiveNodes liveNodes = createLiveNodes();
     int port = seedUri.getPort();
 
@@ -593,21 +608,21 @@ public class ConnectionPoolIT {
       for (int i = 0; i < 10; i++) {
         liveNodes.refreshDiscoveredNodes();
       }
-      assertTrue(
-          "Should have discovered at least one node", liveNodes.getDiscoveredNodes().size() > 0);
+      assertTopologyDiscoverySucceeds(liveNodes);
       // Wait for stale connections from previous tests to drain and for the polling client's
       // connection pool to stabilize.
       long baseline = awaitStableConnectionCount(port);
       assertTrue("Should have at least 1 established connection after warmup", baseline >= 1);
 
-      // Perform many more polling cycles — connection count should stay bounded
+      // Perform many more topology refreshes — connection count should stay bounded
       for (int i = 0; i < 50; i++) {
         liveNodes.refreshDiscoveredNodes();
       }
+      assertTopologyDiscoverySucceeds(liveNodes);
 
       long afterBulk = countEstablishedConnections(port);
       assertTrue(
-          "Polling connections should not grow significantly during 50 polling cycles"
+          "Topology-discovery connections should not grow significantly during 50 refreshes"
               + " (baseline="
               + baseline
               + ", after="
@@ -621,11 +636,12 @@ public class ConnectionPoolIT {
       for (int i = 0; i < 10; i++) {
         liveNodes.refreshDiscoveredNodes();
       }
+      assertTopologyDiscoverySucceeds(liveNodes);
 
       long afterIdle = countEstablishedConnections(port);
       long minAcceptable = Math.max(1, baseline / 3);
       assertTrue(
-          "Polling connections should survive 3s idle period"
+          "Topology-discovery connections should survive 3s idle period"
               + " (baseline="
               + baseline
               + ", after="
