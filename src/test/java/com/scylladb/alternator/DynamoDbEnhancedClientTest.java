@@ -39,6 +39,9 @@ import software.amazon.awssdk.enhanced.dynamodb.DynamoDbTable;
 import software.amazon.awssdk.enhanced.dynamodb.TableSchema;
 import software.amazon.awssdk.enhanced.dynamodb.mapper.annotations.DynamoDbBean;
 import software.amazon.awssdk.enhanced.dynamodb.mapper.annotations.DynamoDbPartitionKey;
+import software.amazon.awssdk.http.ExecutableHttpRequest;
+import software.amazon.awssdk.http.HttpExecuteRequest;
+import software.amazon.awssdk.http.SdkHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
@@ -122,7 +125,7 @@ public class DynamoDbEnhancedClientTest {
             .withPort(nodes.get(0).getPort())
             .withNodeHealthConfig(NodeHealthConfig.disabled())
             .build();
-    return new AlternatorLiveNodes(config);
+    return new AlternatorLiveNodes(config, new UnusedTopologyHttpClient());
   }
 
   @Test
@@ -156,6 +159,7 @@ public class DynamoDbEnhancedClientTest {
     assertNotNull("Table reference should be created", table);
 
     client.close();
+    liveNodes.shutdownAndWait();
   }
 
   @Test
@@ -184,6 +188,7 @@ public class DynamoDbEnhancedClientTest {
     assertNotNull("Enhanced async client should be created successfully", enhancedAsyncClient);
 
     asyncClient.close();
+    liveNodes.shutdownAndWait();
   }
 
   @Test
@@ -250,6 +255,7 @@ public class DynamoDbEnhancedClientTest {
     assertTrue("Should have targeted 127.0.0.3", targetedHosts.contains("127.0.0.3"));
 
     client.close();
+    liveNodes.shutdownAndWait();
   }
 
   @Test
@@ -257,8 +263,7 @@ public class DynamoDbEnhancedClientTest {
       throws URISyntaxException, IOException {
     List<URI> nodes = createLocalNodes();
 
-    AlternatorLiveNodes liveNodes =
-        new AlternatorLiveNodes(nodes, "http", nodes.get(0).getPort(), "", "");
+    AlternatorLiveNodes liveNodes = liveNodesWithHealthDisabled(nodes);
     BasicQueryPlanInterceptor interceptor = new BasicQueryPlanInterceptor(liveNodes);
 
     // Track which hosts are being targeted
@@ -323,14 +328,14 @@ public class DynamoDbEnhancedClientTest {
     assertTrue("Should have targeted 127.0.0.3", targetedHosts.contains("127.0.0.3"));
 
     asyncClient.close();
+    liveNodes.shutdownAndWait();
   }
 
   @Test
   public void testEnhancedClientWithQueryPlanInterceptor() throws URISyntaxException, IOException {
     List<URI> nodes = createLocalNodes();
 
-    AlternatorLiveNodes liveNodes =
-        new AlternatorLiveNodes(nodes, "http", nodes.get(0).getPort(), "", "");
+    AlternatorLiveNodes liveNodes = liveNodesWithHealthDisabled(nodes);
     BasicQueryPlanInterceptor interceptor = new BasicQueryPlanInterceptor(liveNodes);
 
     // Track hosts
@@ -381,6 +386,7 @@ public class DynamoDbEnhancedClientTest {
     assertEquals("Should target all 3 nodes", 3, targetedHosts.size());
 
     client.close();
+    liveNodes.shutdownAndWait();
   }
 
   @Test
@@ -391,5 +397,20 @@ public class DynamoDbEnhancedClientTest {
     assertNotNull("Schema should be created", schema);
     assertEquals(
         "Should have partition key 'id'", "id", schema.tableMetadata().primaryPartitionKey());
+  }
+
+  private static final class UnusedTopologyHttpClient implements SdkHttpClient {
+    @Override
+    public ExecutableHttpRequest prepareRequest(HttpExecuteRequest request) {
+      throw new AssertionError("topology HTTP client should not be used by enhanced client tests");
+    }
+
+    @Override
+    public void close() {}
+
+    @Override
+    public String clientName() {
+      return "unused-topology";
+    }
   }
 }

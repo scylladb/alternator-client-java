@@ -26,16 +26,25 @@ import com.scylladb.alternator.AlternatorDynamoDbClientWrapper;
 import com.scylladb.alternator.IntegrationTestConfig;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.OutputStream;
-import java.net.HttpURLConnection;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import org.apache.http.Header;
+import org.apache.http.client.config.RequestConfig;
+import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.client.methods.RequestBuilder;
 import org.apache.http.conn.DnsResolver;
+import org.apache.http.entity.ByteArrayEntity;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClients;
+import org.apache.http.util.EntityUtils;
 import org.junit.Before;
 import org.junit.Test;
 import software.amazon.awssdk.http.SdkHttpClient;
@@ -162,13 +171,33 @@ public class AlternatorLiveNodesDnsDiscoveryIT {
   private void assertSuccessfulDiscovery(
       DnsEntrypointProxy proxy, List<URI> liveNodes, URI seedUri) {
     assertTrue("DNS entrypoint should be contacted", proxy.getRequestCount() > 0);
+    assertTrue("system.local should be scanned", proxy.getLocalScanRequestCount() > 0);
+    assertTrue("system.peers should be scanned", proxy.getPeersScanRequestCount() > 0);
     assertFalse("Should discover live cluster nodes", liveNodes.isEmpty());
-    assertFalse("Configured seed should be replaced by discovered nodes", liveNodes.contains(seedUri));
+    assertFalse(
+        "Configured seed should be replaced by discovered nodes", liveNodes.contains(seedUri));
   }
 
   private static class DnsEntrypointProxy implements AutoCloseable {
+    private static final Pattern TABLE_NAME_PATTERN =
+        Pattern.compile("\"TableName\"\\s*:\\s*\"([^\"]*)\"");
+
     private final HttpServer server;
+    private final CloseableHttpClient proxyClient =
+        HttpClients.custom()
+            .setDefaultRequestConfig(
+                RequestConfig.custom()
+                    .setConnectTimeout(5000)
+                    .setConnectionRequestTimeout(5000)
+                    .setSocketTimeout(5000)
+                    .build())
+            .disableAutomaticRetries()
+            .disableContentCompression()
+            .disableRedirectHandling()
+            .build();
     private final AtomicInteger requestCount = new AtomicInteger(0);
+    private final AtomicInteger localScanRequestCount = new AtomicInteger(0);
+    private final AtomicInteger peersScanRequestCount = new AtomicInteger(0);
     private final AtomicInteger seedDataRequestCount = new AtomicInteger(0);
     private final AtomicInteger discoveredNodeDataRequestCount = new AtomicInteger(0);
 
@@ -198,6 +227,14 @@ public class AlternatorLiveNodesDnsDiscoveryIT {
       return requestCount.get();
     }
 
+    int getLocalScanRequestCount() {
+      return localScanRequestCount.get();
+    }
+
+    int getPeersScanRequestCount() {
+      return peersScanRequestCount.get();
+    }
+
     int getSeedDataRequestCount() {
       return seedDataRequestCount.get();
     }
@@ -207,14 +244,24 @@ public class AlternatorLiveNodesDnsDiscoveryIT {
     }
 
     @Override
-    public void close() {
+    public void close() throws IOException {
       server.stop(0);
+      proxyClient.close();
     }
 
     private void handleRequest(com.sun.net.httpserver.HttpExchange exchange) throws IOException {
       requestCount.incrementAndGet();
       String path = exchange.getRequestURI().toASCIIString();
-      if (!exchange.getRequestURI().getPath().equals("/localnodes")) {
+      byte[] requestBody = exchange.getRequestBody().readAllBytes();
+      boolean localScan =
+          isScanForTable(exchange, requestBody, SystemTableTopologyDiscovery.LOCAL_TABLE);
+      boolean peersScan =
+          isScanForTable(exchange, requestBody, SystemTableTopologyDiscovery.PEERS_TABLE);
+      if (localScan) {
+        localScanRequestCount.incrementAndGet();
+      } else if (peersScan) {
+        peersScanRequestCount.incrementAndGet();
+      } else {
         String host = exchange.getRequestHeaders().getFirst("Host");
         String normalizedHost = host == null ? "" : host.toLowerCase(java.util.Locale.ROOT);
         if (normalizedHost.equals("localhost")
@@ -235,46 +282,48 @@ public class AlternatorLiveNodesDnsDiscoveryIT {
                   + ":"
                   + IntegrationTestConfig.HTTP_PORT
                   + path);
-      HttpURLConnection connection = (HttpURLConnection) upstream.toURL().openConnection();
-      connection.setConnectTimeout(5000);
-      connection.setReadTimeout(5000);
-      connection.setRequestMethod(exchange.getRequestMethod());
+      RequestBuilder request = RequestBuilder.create(exchange.getRequestMethod()).setUri(upstream);
       exchange
           .getRequestHeaders()
           .forEach(
               (name, values) -> {
-                if (!"Host".equalsIgnoreCase(name) && !"Content-Length".equalsIgnoreCase(name)) {
-                  connection.setRequestProperty(name, String.join(",", values));
+                if (!"Content-Length".equalsIgnoreCase(name)) {
+                  request.setHeader(name, String.join(",", values));
                 }
               });
-      byte[] requestBody = exchange.getRequestBody().readAllBytes();
       if (requestBody.length > 0) {
-        connection.setDoOutput(true);
-        try (OutputStream output = connection.getOutputStream()) {
-          output.write(requestBody);
-        }
+        request.setEntity(new ByteArrayEntity(requestBody));
       }
 
-      int status = connection.getResponseCode();
-      byte[] body = new byte[0];
-      InputStream responseBody = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
-      if (responseBody != null) {
-        try (InputStream input = responseBody) {
-          body = input.readAllBytes();
+      try (CloseableHttpResponse response = proxyClient.execute(request.build())) {
+        int status = response.getStatusLine().getStatusCode();
+        byte[] body =
+            response.getEntity() == null
+                ? new byte[0]
+                : EntityUtils.toByteArray(response.getEntity());
+        Header contentType = response.getFirstHeader("Content-Type");
+        if (contentType != null) {
+          exchange.getResponseHeaders().add("Content-Type", contentType.getValue());
         }
-      }
-      String contentType = connection.getHeaderField("Content-Type");
-      if (contentType != null) {
-        exchange.getResponseHeaders().add("Content-Type", contentType);
-      }
-      try {
         exchange.sendResponseHeaders(status, body.length);
         try (OutputStream output = exchange.getResponseBody()) {
           output.write(body);
         }
-      } finally {
-        connection.disconnect();
       }
+    }
+
+    private static boolean isScanForTable(
+        com.sun.net.httpserver.HttpExchange exchange, byte[] requestBody, String tableName) {
+      String target = exchange.getRequestHeaders().getFirst("X-Amz-Target");
+      return "POST".equals(exchange.getRequestMethod())
+          && target != null
+          && target.endsWith(".Scan")
+          && tableName.equals(scanTableName(requestBody));
+    }
+
+    private static String scanTableName(byte[] requestBody) {
+      Matcher matcher = TABLE_NAME_PATTERN.matcher(new String(requestBody, StandardCharsets.UTF_8));
+      return matcher.find() ? matcher.group(1) : null;
     }
   }
 }

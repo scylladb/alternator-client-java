@@ -401,8 +401,8 @@ public class AlternatorConfig {
    * Gets the list of seed host addresses for cluster discovery.
    *
    * <p>The seed hosts are the initial endpoints (IP addresses or hostnames) used to discover the
-   * full cluster topology via the {@code /localnodes} API. Use {@link #getScheme()} and {@link
-   * #getPort()} to construct full URIs.
+   * full cluster topology through the Alternator views of {@code system.local} and {@code
+   * system.peers}. Use {@link #getScheme()} and {@link #getPort()} to construct full URIs.
    *
    * @return an unmodifiable list of seed host addresses, never null but may be empty
    * @since 2.0.0
@@ -785,7 +785,7 @@ public class AlternatorConfig {
      * Sets a single seed node URI for cluster discovery.
      *
      * <p>This is a convenience method that extracts the host, scheme, and port from a URI. The URI
-     * will be used to discover all other nodes in the cluster via the {@code /localnodes} API.
+     * will be used to discover all other nodes through Alternator system-table scans.
      *
      * @param seedUri the seed URI for Alternator cluster discovery
      * @return this builder instance

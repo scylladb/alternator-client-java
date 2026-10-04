@@ -30,7 +30,7 @@ endpoints therefore enter quarantine until directly verified.
 | Health-neutral response | Response that clears transmission bookkeeping without changing health state, counters, or update time. |
 | Admission quarantine | Initial validation of a configured or newly discovered endpoint. |
 | Recovery quarantine | Validation after a down endpoint passes recovery probes. |
-| Direct validation probe | Direct `GET /localnodes` whose HTTP 200 response activates a quarantined endpoint. |
+| Direct validation probe | Direct DynamoDB `Scan` of `.scylla.alternator.system.local` whose successful service response activates a quarantined endpoint. |
 | Base query plan | Request-scoped candidate order containing discovered endpoints without interpreting health. |
 | Health-aware query plan | Request-scoped final eligibility layer over a base plan. |
 | Traffic cycle | Traversal returning each currently eligible canonical endpoint at most once before repetition. |
@@ -88,17 +88,21 @@ they neither reset nor advance counters and do not update health time.
 
 | Probe outcome | Health action |
 | --- | --- |
-| HTTP 200 | `PROBE_SUCCESS` |
-| Any other status | `PROBE_FAILURE` |
-| Failure before a response | `PROBE_FAILURE` |
+| Successfully unmarshalled DynamoDB response | `PROBE_SUCCESS` |
+| DynamoDB service or authorization error | `PROBE_FAILURE` |
+| Timeout or transport failure | `PROBE_FAILURE` |
 
 Probe outcomes must not demote an active endpoint. A successful direct probe activates quarantine;
 a failed quarantine probe leaves state and traffic counters unchanged. A discovery or probe failure
 is not a traffic failure.
 
-Standalone probes classify by status without parsing response bodies. Topology discovery requires a
-syntactically valid body before reporting successful contact; a valid empty array still proves
-direct contact.
+Standalone probes send exactly one targeted, consistent `system.local` scan with `Select.COUNT` and
+a limit of one, then classify the SDK result without requiring a row or topology attributes.
+Topology discovery has a stronger atomic success condition: every page from both the `system.local`
+and `system.peers` scans must succeed and be unmarshalled before the contacted endpoint receives a
+successful probe observation. A failure in either scan or the absence of a usable local row
+produces one failed observation and publishes no partial topology; unusable individual peer rows
+are ignored as specified below.
 
 ### State transitions
 
@@ -150,8 +154,8 @@ observations do not use traffic generations.
 ### Endpoint admission
 
 1. Configured seeds start quarantined and remain bootstrap candidates.
-2. A successful direct HTTP 200 `/localnodes` contact activates the contacted quarantined endpoint.
-   Topology discovery additionally requires a parseable body; an empty array is valid.
+2. A successful direct `Scan` of `.scylla.alternator.system.local` activates the contacted
+   quarantined endpoint. A standalone probe does not require a returned row.
 3. Endpoints listed by another node are added in quarantine unless health history already exists.
 4. Background and explicit validation directly probe quarantined endpoints in the discovered set.
 5. Before the first successful topology update, the discovered set consists of bootstrap seeds.
@@ -187,15 +191,16 @@ Explicit blocking calls return, and asynchronous calls complete, after their sna
 Per-node transport and status failures do not fail an explicit batch. A later explicit call must not
 reuse a completed result still awaiting physical cleanup.
 
-Probe timeout begins when work starts, reports probe failure, aborts the prepared request, and
-ignores late completion. Transports must honor abortion for timeout and shutdown.
+Probe timeout begins when work starts, reports probe failure, and ignores late completion. The
+control-plane client's request timeout must bound a scan that cannot be cancelled directly.
 
 Successful traffic on a quarantined endpoint suppresses one queued or upcoming background
 quarantine probe. A running probe continues. Explicit probes ignore suppression. Traffic failure or
 transition out of quarantine clears suppression.
 
-Shutdown rejects new probes, cancels queued work without reporting failure, aborts running
-control-plane requests, and waits only for its configured bounded shutdown period.
+Shutdown rejects new probes, cancels queued work without reporting failure, closes the
+control-plane client, and waits only for its configured bounded shutdown period. A running SDK scan
+that cannot be cancelled directly remains bounded by the configured request timeout.
 
 ## Interactions with other features
 
@@ -203,12 +208,40 @@ control-plane requests, and waits only for its configured bounded shutdown perio
 
 Topology membership and health are separate. Discovery fallback continues through configured
 scopes until a non-empty result is found or scopes are exhausted. Omission does not delete health
-history. Seeds remain discovery and down-recovery fallback candidates when absent from the current
-ring.
+history. A complete set of snapshots proving that no endpoint belongs to a terminal strict scope
+publishes an empty ring; total topology-read failure retains the prior ring. Seeds remain discovery
+and down-recovery fallback candidates when absent from the current ring.
 
-Discovery independently randomizes active, quarantined, and down partitions and tries them in that
-order for both current nodes and seed fallback. A down endpoint may provide topology as final
-control-plane fallback, but its discovery result must not change recovery counters.
+Each discovery attempt directs signed, consistent DynamoDB `Scan` requests first for
+`.scylla.alternator.system.local` and then for `.scylla.alternator.system.peers` to the same
+candidate. The scans request `rpc_address`, `data_center`, and `rack`; they must fully follow
+`LastEvaluatedKey` pagination for both tables and must publish only after the complete pair
+succeeds with a usable local row. The local row and peer rows contribute endpoints from
+`rpc_address`; `peer` and `preferred_ip` must not be used as client endpoints. A missing or invalid
+local `rpc_address` fails the attempt, while incomplete peer rows are ignored. Each valid row
+retains its `data_center` and `rack` metadata. Routing scopes are applied to that combined metadata
+on the client. An empty or all-down filtered set advances to the next discovery candidate; only
+after every candidate misses the preferred scope does discovery evaluate configured scope
+fallbacks over the complete snapshots already read.
+
+Discovery independently randomizes active, quarantined, and down partitions. It tries available
+current nodes, available bootstrap seeds, down current nodes, then down seeds, so persistent stale
+peers cannot make every configured seed wait behind a full timeout. A down endpoint may provide
+topology as final control-plane fallback, but its discovery result must not change recovery
+counters.
+
+### Control-plane authentication and authorization
+
+Discovery and direct probes use a dedicated DynamoDB control-plane client with the application's
+effective region and credentials provider. Each request is sent directly to, and signed for, its
+selected endpoint; it must not enter the ordinary routing query plan. Anonymous application
+configuration produces anonymous control-plane requests. The control-plane client must not retry
+requests internally; discovery candidate failover and health attribution own each attempt.
+
+When ScyllaDB authorization is enforced, the authenticated role must have `SELECT` permission on
+`system.local` and `system.peers`. The first table is required for direct probes and discovery; the
+second is required for discovery. Missing permission is a control-plane failure, not a successful
+health contact.
 
 ### Query plans and retries
 
@@ -224,9 +257,10 @@ preserve their subsequences. See [Key-route affinity](key-route-affinity.md).
 
 ### Error handling and compression
 
-Classification uses final HTTP status or absence of a response, not a parsed application exception.
-It must not consume, replace, or corrupt response content used by protocol parsing or
-[Compression](compression.md).
+Application-traffic classification uses final HTTP status or absence of a response, not a parsed
+application exception. Control-plane classification uses the topology client's completed response
+or service exception as defined above. Neither path may consume, replace, or corrupt response
+content used by protocol parsing or [Compression](compression.md).
 
 ### Blocking and non-blocking clients
 
@@ -243,8 +277,18 @@ features continue normally and no physical health probes are issued.
 
 ### Feature interactions
 
-- Discovery activates only the contacted endpoint, never endpoints merely listed in its body.
+- Discovery activates only the contacted endpoint, never endpoints merely listed in its
+  system-table results.
+- A persistent `system.peers` row does not prove liveness; a newly listed peer enters quarantine
+  even if the contacted node is active.
+- A topology attempt that fails either scan or any pagination page publishes none of that
+  attempt's rows.
+- An invalid or missing local `rpc_address` fails topology discovery; an invalid or missing peer
+  `rpc_address` is ignored. Missing datacenter or rack metadata excludes a row from targeted scopes
+  but not cluster scope.
 - An empty configured scope followed by a successful fallback publishes only the non-empty result.
+- An empty terminal strict scope proven by complete topology snapshots publishes an empty ring;
+  complete failure to read topology retains the prior ring.
 - Topology removal after lazy snapshot initialization does not rewrite the current request's plan.
 - A retryable server response leaves quarantine progress unchanged.
 - A candidate becoming down before final selection is skipped.
@@ -278,8 +322,8 @@ must match the defaults and constraints in this specification.
 
 ### HEALTH-REQ-002: Outcome classification
 
-Every traffic response, transport failure, and direct probe must produce exactly the specified
-observation or health-neutral action.
+Every traffic response, transport failure, direct `system.local` probe, and control-plane service
+error must produce exactly the specified observation or health-neutral action.
 
 ### HEALTH-REQ-003: State transitions
 
@@ -293,8 +337,8 @@ state, counters, or update time.
 
 ### HEALTH-REQ-005: Admission and retained history
 
-Seeds and newly discovered endpoints must enter quarantine, require direct evidence for activation,
-and retain health history across topology removal and rediscovery.
+Seeds and newly discovered system-table endpoints must enter quarantine, require direct evidence
+for activation, and retain health history across topology removal and rediscovery.
 
 ### HEALTH-REQ-006: Health-aware routing
 
@@ -308,8 +352,9 @@ explicit-call completion behavior without reporting shutdown cancellation as fai
 
 ### HEALTH-REQ-008: Discovery interaction
 
-Topology discovery must use health-tiered candidates and scope fallback without trusting indirect
-membership reports or changing down-node recovery progress.
+Topology discovery must use health-tiered candidates, atomic paginated `system.local` and
+`system.peers` scans, client-side scope fallback, and `rpc_address` endpoints without trusting
+indirect membership reports as health evidence or changing down-node recovery progress.
 
 ### HEALTH-REQ-009: Lifecycle and client-form parity
 

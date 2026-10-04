@@ -26,6 +26,7 @@ import com.scylladb.alternator.AlternatorDynamoDbClient;
 import com.scylladb.alternator.AlternatorDynamoDbClientWrapper;
 import com.scylladb.alternator.HttpClientType;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -42,6 +43,8 @@ import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 @RunWith(Parameterized.class)
 public class AlternatorClientNetworkLifecycleTest {
   private static final long REFRESH_INTERVAL_MS = 250;
+  private static final String SCAN_TARGET = "DynamoDB_20120810.Scan";
+  private static final String LIST_TABLES_TARGET = "DynamoDB_20120810.ListTables";
 
   private enum ClientPath {
     APACHE_SYNC,
@@ -73,16 +76,22 @@ public class AlternatorClientNetworkLifecycleTest {
   public void closeStopsPollingAndClosesOwnedSockets() throws Exception {
     try (SocketTrackingHttpServer server =
         new SocketTrackingHttpServer(
-            request ->
-                "GET".equals(request.method())
-                    ? SocketTrackingHttpServer.Response.json("[\"127.0.0.1\"]")
-                    : SocketTrackingHttpServer.Response.json("{\"TableNames\":[]}"))) {
+            request -> {
+              if (SCAN_TARGET.equals(request.header("x-amz-target"))) {
+                String requestBody = new String(request.body(), StandardCharsets.UTF_8);
+                return SocketTrackingHttpServer.Response.json(
+                    requestBody.contains(SystemTableTopologyDiscovery.LOCAL_TABLE)
+                        ? localScanResponse("127.0.0.1")
+                        : emptyScanResponse());
+              }
+              return SocketTrackingHttpServer.Response.json("{\"TableNames\":[]}");
+            })) {
       server.start();
       ClientSession session = openClient(server.uri());
       try {
         assertTrue(
-            "background polling should reach /localnodes",
-            server.awaitRequestCountByMethod("GET", 1, 10, TimeUnit.SECONDS));
+            "background polling should issue a DynamoDB scan",
+            server.awaitRequestCountByMethod("POST", 1, 10, TimeUnit.SECONDS));
 
         session.executeDynamoDbRequest();
         assertTrue(
@@ -90,9 +99,9 @@ public class AlternatorClientNetworkLifecycleTest {
             server.awaitActiveConnectionsAtLeast(2, 10, TimeUnit.SECONDS));
 
         SocketTrackingHttpServer.Request pollingRequest =
-            findRequest(server.requestsSince(0), "GET", "/localnodes");
+            findRequest(server.requestsSince(0), SCAN_TARGET);
         SocketTrackingHttpServer.Request mainRequest =
-            findRequest(server.requestsSince(0), "POST", "/");
+            findRequest(server.requestsSince(0), LIST_TABLES_TARGET);
         assertNotNull("a polling request should be recorded", pollingRequest);
         assertNotNull("a DynamoDB request should be recorded", mainRequest);
         assertNotEquals(
@@ -118,9 +127,9 @@ public class AlternatorClientNetworkLifecycleTest {
 
       Thread.sleep(REFRESH_INTERVAL_MS * 4);
       assertEquals(
-          "no /localnodes request may start after close returns",
+          "no topology scan may start after close returns",
           0,
-          server.requestCountByMethodAfter("GET", closeCompletedAtNanos));
+          requestCountByTargetAfter(server, SCAN_TARGET, closeCompletedAtNanos));
       assertEquals(
           "no transport socket may reopen after close returns",
           0,
@@ -183,13 +192,36 @@ public class AlternatorClientNetworkLifecycleTest {
   }
 
   private SocketTrackingHttpServer.Request findRequest(
-      List<SocketTrackingHttpServer.Request> requests, String method, String targetPrefix) {
+      List<SocketTrackingHttpServer.Request> requests, String target) {
     for (SocketTrackingHttpServer.Request request : requests) {
-      if (method.equals(request.method()) && request.path().startsWith(targetPrefix)) {
+      if (target.equals(request.header("x-amz-target"))) {
         return request;
       }
     }
     return null;
+  }
+
+  private int requestCountByTargetAfter(
+      SocketTrackingHttpServer server, String target, long timestampNanos) {
+    int count = 0;
+    for (SocketTrackingHttpServer.Request request : server.requestsSince(0)) {
+      if (target.equals(request.header("x-amz-target"))
+          && request.receivedAtNanos() > timestampNanos) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  private static String localScanResponse(String address) {
+    return "{\"Items\":[{\"rpc_address\":{\"S\":\""
+        + address
+        + "\"},\"data_center\":{\"S\":\"dc1\"},\"rack\":{\"S\":\"rack1\"}}],"
+        + "\"Count\":1,\"ScannedCount\":1}";
+  }
+
+  private static String emptyScanResponse() {
+    return "{\"Items\":[],\"Count\":0,\"ScannedCount\":0}";
   }
 
   private interface RequestAction {

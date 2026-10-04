@@ -180,7 +180,7 @@ public class AlternatorDynamoDbAsyncClientWrapper implements AutoCloseable {
    *
    * <p>This control-plane operation is synchronous and uses the client's polling HTTP transport.
    *
-   * @return endpoints that returned HTTP 200 during this probe operation
+   * @return endpoints that completed the system-table probe
    * @since 2.1.0
    */
   public List<URI> probeQuarantinedNodes() {
@@ -190,7 +190,7 @@ public class AlternatorDynamoDbAsyncClientWrapper implements AutoCloseable {
   /**
    * Asynchronously probes and activates reachable quarantined nodes.
    *
-   * @return future containing endpoints that returned HTTP 200 in snapshot order
+   * @return future containing endpoints that completed the system-table probe in snapshot order
    * @since 2.1.0
    */
   public CompletableFuture<List<URI>> probeQuarantinedNodesAsync() {

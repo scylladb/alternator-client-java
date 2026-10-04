@@ -67,14 +67,18 @@ public class AlternatorLiveNodesInterruptTest {
       return new ExecutableHttpRequest() {
         @Override
         public HttpExecuteResponse call() {
-          if (callNumber == 1) {
+          if (callNumber == 2) {
             firstCall.countDown();
-          } else {
+          } else if (callNumber == 4) {
             secondCall.countDown();
           }
-          byte[] body = "[\"127.0.0.1\"]".getBytes(StandardCharsets.UTF_8);
+          byte[] body = scanResponse("127.0.0.1").getBytes(StandardCharsets.UTF_8);
           return HttpExecuteResponse.builder()
-              .response(SdkHttpFullResponse.builder().statusCode(200).build())
+              .response(
+                  SdkHttpFullResponse.builder()
+                      .statusCode(200)
+                      .putHeader("Content-Type", "application/x-amz-json-1.0")
+                      .build())
               .responseBody(AbortableInputStream.create(new ByteArrayInputStream(body)))
               .build();
         }
@@ -91,5 +95,12 @@ public class AlternatorLiveNodesInterruptTest {
     public String clientName() {
       return "counting-success";
     }
+  }
+
+  private static String scanResponse(String address) {
+    return "{\"Items\":[{\"rpc_address\":{\"S\":\""
+        + address
+        + "\"},\"data_center\":{\"S\":\"dc1\"},\"rack\":{\"S\":\"rack1\"}}],"
+        + "\"Count\":1,\"ScannedCount\":1}";
   }
 }

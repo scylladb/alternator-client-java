@@ -181,7 +181,7 @@ public class AlternatorDynamoDbClientWrapper implements AutoCloseable {
   /**
    * Directly probes and activates reachable quarantined nodes in the current discovered set.
    *
-   * @return endpoints that returned HTTP 200 during this probe operation
+   * @return endpoints that completed the system-table probe
    * @since 2.1.0
    */
   public List<URI> probeQuarantinedNodes() {
@@ -191,7 +191,7 @@ public class AlternatorDynamoDbClientWrapper implements AutoCloseable {
   /**
    * Asynchronously probes and activates reachable quarantined nodes.
    *
-   * @return future containing endpoints that returned HTTP 200 in snapshot order
+   * @return future containing endpoints that completed the system-table probe in snapshot order
    * @since 2.1.0
    */
   public CompletableFuture<List<URI>> probeQuarantinedNodesAsync() {

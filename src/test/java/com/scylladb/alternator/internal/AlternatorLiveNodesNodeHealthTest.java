@@ -25,12 +25,17 @@ import com.scylladb.alternator.NodeHealthState;
 import com.scylladb.alternator.routing.DatacenterScope;
 import com.scylladb.alternator.routing.RoutingScope;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.lang.reflect.Field;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -48,7 +53,7 @@ public class AlternatorLiveNodesNodeHealthTest {
   @CoversRequirements("HEALTH-REQ-005")
   public void discoveryActivatesContactedSeedButQuarantinesNewNodesUntilDirectProbe()
       throws Exception {
-    LocalNodesHttpClient httpClient = new LocalNodesHttpClient("[\"seed.local\",\"new.local\"]");
+    SystemTableHttpClient httpClient = new SystemTableHttpClient("seed.local", "new.local");
     AlternatorConfig config =
         AlternatorConfig.builder()
             .withSeedHosts(Arrays.asList("seed.local"))
@@ -73,11 +78,14 @@ public class AlternatorLiveNodesNodeHealthTest {
 
     assertEquals(Arrays.asList(discovered, seed), liveNodes.getActiveNodes());
     assertTrue(liveNodes.getQuarantinedNodes().isEmpty());
+    assertEquals(3, httpClient.requests.size());
+    assertEquals("new.local", httpClient.requests.get(2).host());
+    assertDirectProbe(httpClient, 2);
   }
 
   @Test
   public void probeQuarantinedNodesReturnsPartialSuccessAndLeavesFailuresQuarantined() {
-    LocalNodesHttpClient httpClient = new LocalNodesHttpClient("[]", 1);
+    SystemTableHttpClient httpClient = new SystemTableHttpClient(Arrays.asList(), 1);
     AlternatorConfig config =
         AlternatorConfig.builder()
             .withSeedHosts(Arrays.asList("node-a.local", "node-b.local"))
@@ -97,7 +105,7 @@ public class AlternatorLiveNodesNodeHealthTest {
 
   @Test
   public void probeQuarantinedNodesSkipsActiveAndDownNodes() {
-    LocalNodesHttpClient httpClient = new LocalNodesHttpClient("[]");
+    SystemTableHttpClient httpClient = new SystemTableHttpClient();
     AlternatorConfig config =
         AlternatorConfig.builder()
             .withSeedHosts(Arrays.asList("active.local", "down.local", "quarantined.local"))
@@ -117,6 +125,7 @@ public class AlternatorLiveNodesNodeHealthTest {
 
     assertEquals(1, httpClient.requests.size());
     assertEquals("quarantined.local", httpClient.requests.get(0).host());
+    assertDirectProbe(httpClient, 0);
     assertEquals(NodeHealthState.ACTIVE, liveNodes.getNodeHealthStatus(active).getState());
     assertEquals(NodeHealthState.DOWN, liveNodes.getNodeHealthStatus(down).getState());
     assertEquals(NodeHealthState.ACTIVE, liveNodes.getNodeHealthStatus(quarantined).getState());
@@ -125,7 +134,10 @@ public class AlternatorLiveNodesNodeHealthTest {
   @Test
   @CoversRequirements("HEALTH-REQ-008")
   public void topologyRefreshUsesHealthBucketsAndDownFallbackIsHealthNeutral() throws Exception {
-    LocalNodesHttpClient httpClient = new LocalNodesHttpClient("[]");
+    SystemTableHttpClient httpClient =
+        new SystemTableHttpClient(
+            Arrays.asList("down.local"),
+            new HashSet<>(Arrays.asList("active.local", "quarantined.local")));
     AlternatorConfig config =
         AlternatorConfig.builder()
             .withSeedHosts(Arrays.asList("down.local", "quarantined.local", "active.local"))
@@ -144,11 +156,13 @@ public class AlternatorLiveNodesNodeHealthTest {
 
     liveNodes.refreshDiscoveredNodes();
 
-    assertEquals(3, httpClient.requests.size());
+    assertEquals(4, httpClient.requests.size());
     assertEquals("active.local", httpClient.requests.get(0).host());
     assertEquals("quarantined.local", httpClient.requests.get(1).host());
     assertEquals("down.local", httpClient.requests.get(2).host());
-    assertEquals(NodeHealthState.ACTIVE, liveNodes.getNodeHealthStatus(quarantined).getState());
+    assertEquals("down.local", httpClient.requests.get(3).host());
+    assertEquals(
+        NodeHealthState.QUARANTINED, liveNodes.getNodeHealthStatus(quarantined).getState());
     assertEquals(NodeHealthState.DOWN, liveNodes.getNodeHealthStatus(down).getState());
     assertEquals(downRecoveryBefore, liveNodes.getNodeHealthStatus(down).getConsecutiveSuccesses());
   }
@@ -158,7 +172,7 @@ public class AlternatorLiveNodesNodeHealthTest {
     AlternatorLiveNodes liveNodes =
         liveNodes(
             NodeHealthConfig.builder().withDownNodeRecoverySuccessThreshold(1).build(),
-            new LocalNodesHttpClient());
+            new SystemTableHttpClient());
     URI recovering = node("recovering.local");
 
     markNodeDown(liveNodes, recovering);
@@ -174,7 +188,7 @@ public class AlternatorLiveNodesNodeHealthTest {
     AlternatorLiveNodes liveNodes =
         liveNodes(
             NodeHealthConfig.builder().withDownNodeRecoverySuccessThreshold(2).build(),
-            new LocalNodesHttpClient());
+            new SystemTableHttpClient());
     URI recovering = node("recovering.local");
 
     markNodeDown(liveNodes, recovering);
@@ -189,27 +203,27 @@ public class AlternatorLiveNodesNodeHealthTest {
   }
 
   @Test
-  public void featureCheckUsesRandomQueryPlanNode() throws Exception {
-    LocalNodesHttpClient httpClient = new LocalNodesHttpClient("[\"active.local\"]");
+  public void featureCheckUsesHealthTieredNodeForSystemTableScans() throws Exception {
+    SystemTableHttpClient httpClient = new SystemTableHttpClient("active.local");
     AlternatorLiveNodes liveNodes = liveNodes(NodeHealthConfig.getDefault(), httpClient);
     URI recovering = node("recovering.local");
 
     markNodeDown(liveNodes, recovering);
 
-    assertFalse(liveNodes.checkIfRackDatacenterFeatureIsSupported());
+    assertTrue(liveNodes.checkIfRackDatacenterFeatureIsSupported());
 
     assertEquals(2, httpClient.requests.size());
     assertEquals("active.local", httpClient.requests.get(0).host());
     assertEquals("active.local", httpClient.requests.get(1).host());
-    assertEquals("/localnodes", httpClient.requests.get(0).encodedPath());
-    assertEquals("/localnodes", httpClient.requests.get(1).encodedPath());
-    assertTrue(httpClient.requests.get(0).rawQueryParameters().containsKey("rack"));
-    assertTrue(httpClient.requests.get(1).rawQueryParameters().isEmpty());
+    assertEquals("/", httpClient.requests.get(0).encodedPath());
+    assertEquals("/", httpClient.requests.get(1).encodedPath());
+    assertScanTargetsTable(httpClient, 0, SystemTableTopologyDiscovery.LOCAL_TABLE);
+    assertScanTargetsTable(httpClient, 1, SystemTableTopologyDiscovery.PEERS_TABLE);
   }
 
   @Test
-  public void featureCheckTriesNextQueryPlanNodeWhenOneNodeFails() throws Exception {
-    LocalNodesHttpClient httpClient = new LocalNodesHttpClient("[\"active.local\"]", 1);
+  public void featureCheckTriesNextHealthCandidateWhenOneNodeFails() throws Exception {
+    SystemTableHttpClient httpClient = new SystemTableHttpClient(Arrays.asList("active.local"), 1);
     AlternatorConfig config =
         AlternatorConfig.builder()
             .withSeedHosts(Arrays.asList("node-a.local", "node-b.local"))
@@ -218,27 +232,21 @@ public class AlternatorLiveNodesNodeHealthTest {
             .withActiveRefreshIntervalMs(60_000)
             .withIdleRefreshIntervalMs(60_000)
             .build();
-    AlternatorLiveNodes liveNodes =
-        new AlternatorLiveNodes(config, httpClient) {
-          @Override
-          public List<URI> getQueryPlanNodes() {
-            return Arrays.asList(node("node-a.local"), node("node-b.local"));
-          }
-        };
+    AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(config, httpClient);
 
-    assertFalse(liveNodes.checkIfRackDatacenterFeatureIsSupported());
+    assertTrue(liveNodes.checkIfRackDatacenterFeatureIsSupported());
 
     assertEquals(3, httpClient.requests.size());
-    assertTrue(httpClient.requests.get(0).rawQueryParameters().containsKey("rack"));
     assertNotEquals(httpClient.requests.get(0).host(), httpClient.requests.get(1).host());
     assertEquals(httpClient.requests.get(1).host(), httpClient.requests.get(2).host());
-    assertTrue(httpClient.requests.get(1).rawQueryParameters().containsKey("rack"));
-    assertTrue(httpClient.requests.get(2).rawQueryParameters().isEmpty());
+    assertScanTargetsTable(httpClient, 0, SystemTableTopologyDiscovery.LOCAL_TABLE);
+    assertScanTargetsTable(httpClient, 1, SystemTableTopologyDiscovery.LOCAL_TABLE);
+    assertScanTargetsTable(httpClient, 2, SystemTableTopologyDiscovery.PEERS_TABLE);
   }
 
   @Test
   public void featureCheckProbeOutcomesDoNotAffectActiveNodeHealth() throws Exception {
-    LocalNodesHttpClient httpClient = new LocalNodesHttpClient("[\"active.local\"]", 1);
+    SystemTableHttpClient httpClient = new SystemTableHttpClient(Arrays.asList("active.local"), 1);
     AlternatorLiveNodes liveNodes =
         liveNodes(
             NodeHealthConfig.builder().withConsecutiveFailureThreshold(2).build(),
@@ -255,38 +263,10 @@ public class AlternatorLiveNodesNodeHealthTest {
     }
     assertEquals(0, liveNodes.getNodeHealthStatus(active).getConsecutiveFailures());
 
-    assertFalse(liveNodes.checkIfRackDatacenterFeatureIsSupported());
+    assertTrue(liveNodes.checkIfRackDatacenterFeatureIsSupported());
 
     assertEquals(0, liveNodes.getNodeHealthStatus(active).getConsecutiveFailures());
     assertTrue(liveNodes.getDownNodes().isEmpty());
-  }
-
-  @Test
-  public void featureCheckRejectsNullQueryPlanNodeWithoutNpe() throws Exception {
-    LocalNodesHttpClient httpClient = new LocalNodesHttpClient();
-    AlternatorConfig config =
-        AlternatorConfig.builder()
-            .withSeedHosts(Arrays.asList("active.local"))
-            .withScheme("http")
-            .withPort(8080)
-            .withActiveRefreshIntervalMs(60_000)
-            .withIdleRefreshIntervalMs(60_000)
-            .build();
-    AlternatorLiveNodes liveNodes =
-        new AlternatorLiveNodes(config, httpClient) {
-          @Override
-          public List<URI> getQueryPlanNodes() {
-            return Arrays.asList((URI) null);
-          }
-        };
-
-    try {
-      liveNodes.checkIfRackDatacenterFeatureIsSupported();
-      fail("Expected FailedToCheck");
-    } catch (AlternatorLiveNodes.FailedToCheck e) {
-      assertEquals("No live nodes available", e.getMessage());
-    }
-    assertTrue(httpClient.requests.isEmpty());
   }
 
   @Test
@@ -297,7 +277,7 @@ public class AlternatorLiveNodesNodeHealthTest {
                 .withDownNodeRecoverySuccessThreshold(1)
                 .withQuarantineSuccessThreshold(3)
                 .build(),
-            new LocalNodesHttpClient(),
+            new SystemTableHttpClient(),
             null,
             Arrays.asList(
                 "active01.local",
@@ -329,7 +309,7 @@ public class AlternatorLiveNodesNodeHealthTest {
                 .withDownNodeRecoverySuccessThreshold(1)
                 .withQuarantineSuccessThreshold(3)
                 .build(),
-            new LocalNodesHttpClient());
+            new SystemTableHttpClient());
     URI active = node("active.local");
     URI recovering = node("recovering.local");
     long recoveringHash = hashWhereFirstNodeIs(Arrays.asList(active, recovering), recovering);
@@ -352,7 +332,7 @@ public class AlternatorLiveNodesNodeHealthTest {
                 .withDownNodeRecoverySuccessThreshold(1)
                 .withQuarantineSuccessThreshold(3)
                 .build(),
-            new LocalNodesHttpClient());
+            new SystemTableHttpClient());
     URI active = node("active.local");
     URI recovering = node("recovering.local");
     long recoveringHash = hashWhereFirstNodeIs(Arrays.asList(active, recovering), recovering);
@@ -380,7 +360,7 @@ public class AlternatorLiveNodesNodeHealthTest {
                 .withDownNodeRecoverySuccessThreshold(1)
                 .withQuarantineSuccessThreshold(2)
                 .build(),
-            new LocalNodesHttpClient());
+            new SystemTableHttpClient());
     URI recovering = node("recovering.local");
 
     markNodeDown(liveNodes, recovering);
@@ -400,7 +380,7 @@ public class AlternatorLiveNodesNodeHealthTest {
 
   @Test
   public void backgroundRecoversDownNodeAndActivatesItWithDirectProbe() throws Exception {
-    LocalNodesHttpClient httpClient = new LocalNodesHttpClient();
+    SystemTableHttpClient httpClient = new SystemTableHttpClient();
     AlternatorLiveNodes liveNodes =
         liveNodes(
             NodeHealthConfig.builder()
@@ -427,7 +407,7 @@ public class AlternatorLiveNodesNodeHealthTest {
 
   @Test
   public void backgroundDirectlyProbesAndActivatesNewlyDiscoveredNode() throws Exception {
-    LocalNodesHttpClient httpClient = new LocalNodesHttpClient("[\"active.local\",\"new.local\"]");
+    SystemTableHttpClient httpClient = new SystemTableHttpClient("active.local", "new.local");
     AlternatorLiveNodes liveNodes =
         liveNodes(
             NodeHealthConfig.builder().withDownNodeProbePeriodMs(10).build(),
@@ -453,7 +433,7 @@ public class AlternatorLiveNodesNodeHealthTest {
 
   @Test
   public void refreshPublishesDiscoveredNodesInSortedOrder() throws Exception {
-    LocalNodesHttpClient httpClient = new LocalNodesHttpClient("[\"z.local\",\"a.local\"]");
+    SystemTableHttpClient httpClient = new SystemTableHttpClient("z.local", "a.local");
     AlternatorLiveNodes liveNodes = liveNodes(NodeHealthConfig.getDefault(), httpClient);
 
     liveNodes.refreshDiscoveredNodes();
@@ -462,8 +442,8 @@ public class AlternatorLiveNodesNodeHealthTest {
   }
 
   @Test
-  public void localNodesNonOkDoesNotMarkActiveSeedDown() throws Exception {
-    LocalNodesHttpClient httpClient = new LocalNodesHttpClient(400);
+  public void systemTableNonOkDoesNotMarkActiveSeedDown() throws Exception {
+    SystemTableHttpClient httpClient = new SystemTableHttpClient(400);
     AlternatorLiveNodes liveNodes =
         liveNodes(
             NodeHealthConfig.builder().withConsecutiveFailureThreshold(1).build(),
@@ -479,7 +459,7 @@ public class AlternatorLiveNodesNodeHealthTest {
 
   @Test
   public void duplicateSeedDiscoveryFailureRunsOncePerRefresh() throws Exception {
-    LocalNodesHttpClient httpClient = new LocalNodesHttpClient(400);
+    SystemTableHttpClient httpClient = new SystemTableHttpClient(400);
     AlternatorLiveNodes liveNodes =
         liveNodes(
             NodeHealthConfig.builder().withConsecutiveFailureThreshold(2).build(),
@@ -502,7 +482,7 @@ public class AlternatorLiveNodesNodeHealthTest {
   }
 
   @Test
-  public void localNodesRuntimeFailureDoesNotMarkActiveSeedDown() throws Exception {
+  public void systemTableRuntimeFailureDoesNotMarkActiveSeedDown() throws Exception {
     RuntimeFailureHttpClient httpClient = new RuntimeFailureHttpClient();
     AlternatorLiveNodes liveNodes =
         liveNodes(
@@ -518,8 +498,8 @@ public class AlternatorLiveNodesNodeHealthTest {
   }
 
   @Test
-  public void localNodesInvalidBodyDoesNotMarkActiveSeedDown() throws Exception {
-    LocalNodesHttpClient httpClient = new LocalNodesHttpClient("not-json");
+  public void systemTableInvalidBodyDoesNotMarkActiveSeedDown() throws Exception {
+    SystemTableHttpClient httpClient = SystemTableHttpClient.withRawResponse("not-json");
     AlternatorLiveNodes liveNodes =
         liveNodes(
             NodeHealthConfig.builder().withConsecutiveFailureThreshold(1).build(),
@@ -534,8 +514,8 @@ public class AlternatorLiveNodesNodeHealthTest {
   }
 
   @Test
-  public void localNodesMissingBodyDoesNotMarkActiveSeedDown() throws Exception {
-    LocalNodesHttpClient httpClient = new LocalNodesHttpClient((String) null);
+  public void systemTableMissingBodyDoesNotMarkActiveSeedDown() throws Exception {
+    SystemTableHttpClient httpClient = SystemTableHttpClient.withRawResponse(null);
     AlternatorLiveNodes liveNodes =
         liveNodes(
             NodeHealthConfig.builder().withConsecutiveFailureThreshold(1).build(),
@@ -572,7 +552,7 @@ public class AlternatorLiveNodesNodeHealthTest {
 
   @Test
   public void featureCheckInvalidBodyDoesNotMarkSelectedNodeDown() throws Exception {
-    LocalNodesHttpClient httpClient = new LocalNodesHttpClient("not-json");
+    SystemTableHttpClient httpClient = SystemTableHttpClient.withRawResponse("not-json");
     AlternatorLiveNodes liveNodes =
         liveNodes(
             NodeHealthConfig.builder().withConsecutiveFailureThreshold(1).build(),
@@ -593,7 +573,7 @@ public class AlternatorLiveNodesNodeHealthTest {
 
   @Test
   public void rediscoveredNodeKeepsPreviousHealthState() throws Exception {
-    LocalNodesHttpClient httpClient = new LocalNodesHttpClient("[\"transient.local\"]");
+    SystemTableHttpClient httpClient = new SystemTableHttpClient("transient.local");
     AlternatorLiveNodes liveNodes =
         liveNodes(
             NodeHealthConfig.builder().withConsecutiveFailureThreshold(1).build(),
@@ -606,12 +586,12 @@ public class AlternatorLiveNodesNodeHealthTest {
     markNodeDown(liveNodes, transientNode);
     assertEquals(NodeHealthState.DOWN, liveNodes.getNodeHealthStatus(transientNode).getState());
 
-    httpClient.setResponseBody("[\"other.local\"]");
+    httpClient.setTopologyHosts("other.local");
     liveNodes.refreshDiscoveredNodes();
     assertFalse(liveNodes.getDiscoveredNodes().contains(transientNode));
     assertEquals(NodeHealthState.DOWN, liveNodes.getNodeHealthStatus(transientNode).getState());
 
-    httpClient.setResponseBody("[\"transient.local\"]");
+    httpClient.setTopologyHosts("transient.local");
     liveNodes.refreshDiscoveredNodes();
 
     assertTrue(liveNodes.getDiscoveredNodes().contains(transientNode));
@@ -621,7 +601,7 @@ public class AlternatorLiveNodesNodeHealthTest {
 
   @Test
   public void runDownNodeProbesSkipsDownNodeMissingFromDiscoveredRing() throws Exception {
-    LocalNodesHttpClient httpClient = new LocalNodesHttpClient("[\"transient.local\"]");
+    SystemTableHttpClient httpClient = new SystemTableHttpClient("transient.local");
     AlternatorLiveNodes liveNodes =
         liveNodes(
             NodeHealthConfig.builder()
@@ -637,9 +617,9 @@ public class AlternatorLiveNodesNodeHealthTest {
     markNodeDown(liveNodes, transientNode);
     assertEquals(NodeHealthState.DOWN, liveNodes.getNodeHealthStatus(transientNode).getState());
 
-    httpClient.setResponseBody("[\"other.local\"]");
+    httpClient.setTopologyHosts("other.local");
     liveNodes.refreshDiscoveredNodes();
-    httpClient.requests.clear();
+    httpClient.clearCapturedRequests();
 
     assertTrue(liveNodes.runDownNodeProbes().isEmpty());
     assertTrue(httpClient.requests.isEmpty());
@@ -648,7 +628,7 @@ public class AlternatorLiveNodesNodeHealthTest {
 
   @Test
   public void runDownNodeProbesProbesDownSeedMissingFromDiscoveredRing() throws Exception {
-    LocalNodesHttpClient httpClient = new LocalNodesHttpClient("[\"active.local\"]", 1);
+    SystemTableHttpClient httpClient = new SystemTableHttpClient(Arrays.asList("active.local"), 1);
     AlternatorLiveNodes liveNodes =
         liveNodes(
             NodeHealthConfig.builder()
@@ -664,7 +644,7 @@ public class AlternatorLiveNodesNodeHealthTest {
     assertFalse(liveNodes.getDiscoveredNodes().contains(seed));
     markNodeDown(liveNodes, seed);
     assertEquals(NodeHealthState.DOWN, liveNodes.getNodeHealthStatus(seed).getState());
-    httpClient.requests.clear();
+    httpClient.clearCapturedRequests();
 
     assertEquals(Arrays.asList(seed), liveNodes.runDownNodeProbes());
 
@@ -675,8 +655,8 @@ public class AlternatorLiveNodesNodeHealthTest {
 
   @Test
   public void duplicateDiscoveredDownNodeProbeCountsOncePerCycle() throws Exception {
-    LocalNodesHttpClient httpClient =
-        new LocalNodesHttpClient("[\"recovering.local\",\"recovering.local\"]");
+    SystemTableHttpClient httpClient =
+        new SystemTableHttpClient("recovering.local", "recovering.local");
     AlternatorLiveNodes liveNodes =
         liveNodes(
             NodeHealthConfig.builder()
@@ -690,7 +670,7 @@ public class AlternatorLiveNodesNodeHealthTest {
 
     liveNodes.refreshDiscoveredNodes();
     markNodeDown(liveNodes, recovering);
-    httpClient.requests.clear();
+    httpClient.clearCapturedRequests();
 
     assertTrue(liveNodes.runDownNodeProbes().isEmpty());
 
@@ -702,7 +682,7 @@ public class AlternatorLiveNodesNodeHealthTest {
 
   @Test
   public void omittedActiveNodeDoesNotMakeDownDiscoveredNodeEligible() throws Exception {
-    LocalNodesHttpClient httpClient = new LocalNodesHttpClient("[\"stale-active.local\"]");
+    SystemTableHttpClient httpClient = new SystemTableHttpClient("stale-active.local");
     AlternatorLiveNodes liveNodes =
         liveNodes(
             NodeHealthConfig.builder().withConsecutiveFailureThreshold(1).build(),
@@ -716,7 +696,7 @@ public class AlternatorLiveNodesNodeHealthTest {
     liveNodes.probeQuarantinedNodes();
     assertTrue(liveNodes.getActiveNodes().contains(node("stale-active.local")));
 
-    httpClient.setResponseBody("[\"current.local\"]");
+    httpClient.setTopologyHosts("current.local");
     liveNodes.refreshDiscoveredNodes();
     markNodeDown(liveNodes, seed);
     markNodeDown(liveNodes, current);
@@ -728,7 +708,7 @@ public class AlternatorLiveNodesNodeHealthTest {
 
   @Test
   public void downNodeProbeRequiresHttpOk() {
-    LocalNodesHttpClient httpClient = new LocalNodesHttpClient(403);
+    SystemTableHttpClient httpClient = new SystemTableHttpClient(403);
     AlternatorLiveNodes liveNodes =
         liveNodes(
             NodeHealthConfig.builder().withConsecutiveFailureThreshold(1).build(), httpClient);
@@ -742,26 +722,29 @@ public class AlternatorLiveNodesNodeHealthTest {
 
   @Test
   public void clusterRefreshUsesDownNodeAsHealthNeutralControlPlaneFallback() throws Exception {
-    LocalNodesHttpClient httpClient =
-        new LocalNodesHttpClient("[\"active.local\",\"recovering.local\"]");
+    SystemTableHttpClient httpClient =
+        new SystemTableHttpClient(
+            Arrays.asList("active.local", "recovering.local"),
+            new HashSet<>(Arrays.asList("active.local")));
     AlternatorLiveNodes liveNodes =
         liveNodes(NodeHealthConfig.builder().withDownNodeProbePeriodMs(1).build(), httpClient);
     URI recovering = node("recovering.local");
 
     markNodeDown(liveNodes, recovering);
-    httpClient.requests.clear();
+    httpClient.clearCapturedRequests();
     liveNodes.refreshDiscoveredNodes();
 
-    assertEquals(2, httpClient.requests.size());
+    assertEquals(3, httpClient.requests.size());
     assertEquals("active.local", httpClient.requests.get(0).host());
     assertEquals("recovering.local", httpClient.requests.get(1).host());
+    assertEquals("recovering.local", httpClient.requests.get(2).host());
     assertEquals(Arrays.asList(recovering), liveNodes.getDownNodes());
   }
 
   @Test
   public void backgroundDiscoveryDoesNotMarkClientActivity() throws Exception {
-    LocalNodesHttpClient httpClient =
-        new LocalNodesHttpClient("[\"active.local\",\"recovering.local\"]");
+    SystemTableHttpClient httpClient =
+        new SystemTableHttpClient("active.local", "recovering.local");
     AlternatorLiveNodes liveNodes =
         liveNodes(NodeHealthConfig.getDefault(), httpClient, DatacenterScope.of("dc1", null));
 
@@ -773,8 +756,8 @@ public class AlternatorLiveNodesNodeHealthTest {
 
   @Test
   public void scopedRefreshDoesNotChangeActiveThenQuarantineQueryOrder() throws Exception {
-    LocalNodesHttpClient httpClient =
-        new LocalNodesHttpClient("[\"active.local\",\"recovering.local\"]");
+    SystemTableHttpClient httpClient =
+        new SystemTableHttpClient("active.local", "recovering.local");
     AlternatorLiveNodes liveNodes =
         liveNodes(
             NodeHealthConfig.builder()
@@ -873,65 +856,115 @@ public class AlternatorLiveNodesNodeHealthTest {
     return (AtomicLong) field.get(liveNodes);
   }
 
-  private static final class LocalNodesHttpClient implements SdkHttpClient {
+  private static void assertScanTargetsTable(
+      SystemTableHttpClient client, int requestIndex, String tableName) {
+    assertTrue(
+        client.requestBodies.get(requestIndex).contains("\"TableName\":\"" + tableName + "\""));
+  }
+
+  private static void assertDirectProbe(SystemTableHttpClient client, int requestIndex) {
+    assertScanTargetsTable(client, requestIndex, SystemTableTopologyDiscovery.LOCAL_TABLE);
+    assertTrue(client.requestBodies.get(requestIndex).contains("\"Select\":\"COUNT\""));
+    assertTrue(client.requestBodies.get(requestIndex).contains("\"Limit\":1"));
+  }
+
+  private static final class SystemTableHttpClient implements SdkHttpClient {
     private final List<SdkHttpRequest> requests = new CopyOnWriteArrayList<>();
-    private volatile String responseBody;
-    private final String failingHost;
+    private final List<String> requestBodies = new CopyOnWriteArrayList<>();
+    private volatile String topologyResponseBody;
+    private final Set<String> failingHosts;
     private final int statusCode;
     private final AtomicLong requestsToFail;
 
-    private LocalNodesHttpClient() {
-      this("[]");
+    private SystemTableHttpClient(String... topologyHosts) {
+      this(scanResponse(Arrays.asList(topologyHosts)), Collections.emptySet(), 200, 0);
     }
 
-    private LocalNodesHttpClient(int statusCode) {
-      this("[]", null, statusCode);
+    private SystemTableHttpClient(int statusCode) {
+      this(scanResponse(Collections.emptyList()), Collections.emptySet(), statusCode, 0);
     }
 
-    private LocalNodesHttpClient(String responseBody) {
-      this(responseBody, null);
+    private SystemTableHttpClient(List<String> topologyHosts, int requestsToFail) {
+      this(scanResponse(topologyHosts), Collections.emptySet(), 200, requestsToFail);
     }
 
-    private LocalNodesHttpClient(String responseBody, String failingHost) {
-      this(responseBody, failingHost, 200);
+    private SystemTableHttpClient(List<String> topologyHosts, Set<String> failingHosts) {
+      this(scanResponse(topologyHosts), failingHosts, 200, 0);
     }
 
-    private LocalNodesHttpClient(String responseBody, int requestsToFail) {
-      this(responseBody, null, 200, requestsToFail);
-    }
-
-    private LocalNodesHttpClient(String responseBody, String failingHost, int statusCode) {
-      this(responseBody, failingHost, statusCode, 0);
-    }
-
-    private LocalNodesHttpClient(
-        String responseBody, String failingHost, int statusCode, long requestsToFail) {
-      this.responseBody = responseBody;
-      this.failingHost = failingHost;
+    private SystemTableHttpClient(
+        String topologyResponseBody,
+        Set<String> failingHosts,
+        int statusCode,
+        long requestsToFail) {
+      this.topologyResponseBody = topologyResponseBody;
+      this.failingHosts = new HashSet<>(failingHosts);
       this.statusCode = statusCode;
       this.requestsToFail = new AtomicLong(requestsToFail);
     }
 
-    private void setResponseBody(String responseBody) {
-      this.responseBody = responseBody;
+    private static SystemTableHttpClient withRawResponse(String responseBody) {
+      return new SystemTableHttpClient(responseBody, Collections.emptySet(), 200, 0);
+    }
+
+    private void setTopologyHosts(String... topologyHosts) {
+      this.topologyResponseBody = scanResponse(Arrays.asList(topologyHosts));
+    }
+
+    private synchronized void clearCapturedRequests() {
+      requests.clear();
+      requestBodies.clear();
+    }
+
+    private static String scanResponse(List<String> topologyHosts) {
+      StringBuilder response = new StringBuilder("{\"Items\":[");
+      for (int i = 0; i < topologyHosts.size(); i++) {
+        if (i > 0) {
+          response.append(',');
+        }
+        response
+            .append("{\"rpc_address\":{\"S\":\"")
+            .append(topologyHosts.get(i))
+            .append("\"},\"data_center\":{\"S\":\"dc1\"},\"rack\":{\"S\":\"rack1\"}}");
+      }
+      return response
+          .append("],\"Count\":")
+          .append(topologyHosts.size())
+          .append(",\"ScannedCount\":")
+          .append(topologyHosts.size())
+          .append('}')
+          .toString();
     }
 
     @Override
     public ExecutableHttpRequest prepareRequest(HttpExecuteRequest request) {
       SdkHttpRequest httpRequest = request.httpRequest();
-      requests.add(httpRequest);
+      String requestBody = readRequestBody(request);
+      synchronized (this) {
+        requests.add(httpRequest);
+        requestBodies.add(requestBody);
+      }
       return new ExecutableHttpRequest() {
         @Override
         public HttpExecuteResponse call() throws IOException {
           if (requestsToFail.getAndUpdate(value -> value > 0 ? value - 1 : value) > 0) {
             throw new IOException("simulated connection failure");
           }
-          if (httpRequest.host().equals(failingHost)) {
-            throw new IOException("simulated connection failure for " + failingHost);
+          if (failingHosts.contains(httpRequest.host())) {
+            throw new IOException("simulated connection failure for " + httpRequest.host());
           }
           HttpExecuteResponse.Builder response =
               HttpExecuteResponse.builder()
                   .response(SdkHttpFullResponse.builder().statusCode(statusCode).build());
+          String responseBody;
+          if (requestBody.contains("\"Select\":\"COUNT\"")) {
+            responseBody = "{\"Count\":1,\"ScannedCount\":1}";
+          } else if (requestBody.contains(
+              "\"TableName\":\"" + SystemTableTopologyDiscovery.PEERS_TABLE + "\"")) {
+            responseBody = scanResponse(Collections.emptyList());
+          } else {
+            responseBody = topologyResponseBody;
+          }
           if (responseBody != null) {
             byte[] body = responseBody.getBytes(StandardCharsets.UTF_8);
             response.responseBody(AbortableInputStream.create(new ByteArrayInputStream(body)));
@@ -949,7 +982,24 @@ public class AlternatorLiveNodesNodeHealthTest {
 
     @Override
     public String clientName() {
-      return "localnodes";
+      return "system-tables";
+    }
+
+    private static String readRequestBody(HttpExecuteRequest request) {
+      if (!request.contentStreamProvider().isPresent()) {
+        return "";
+      }
+      try (InputStream input = request.contentStreamProvider().get().newStream();
+          ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+        byte[] buffer = new byte[256];
+        int read;
+        while ((read = input.read(buffer)) != -1) {
+          output.write(buffer, 0, read);
+        }
+        return new String(output.toByteArray(), StandardCharsets.UTF_8);
+      } catch (IOException e) {
+        throw new IllegalStateException("failed to capture DynamoDB request", e);
+      }
     }
   }
 

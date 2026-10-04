@@ -238,8 +238,10 @@ that each of these requests goes to a different live Alternator node.
 The load balancer library is also responsible for _discovering_ which
 Alternator nodes exist, and maintaining this list as the Alternator cluster
 changes. It does this using an additional background thread, which
-periodically polls one of the known nodes, asking it for a list of all other
-nodes (in this data-center).
+periodically sends DynamoDB `Scan` requests for the ScyllaDB
+`.scylla.alternator.system.local` and `.scylla.alternator.system.peers` tables
+to a known node. The client combines the node metadata and applies the
+configured datacenter and rack scope locally.
 
 ### Using the library
 
@@ -262,9 +264,10 @@ code that looks something like this:
 The AWS region is still part of the AWS SDK client configuration even when
 `endpointOverride()` sends every request to Alternator instead of an AWS
 DynamoDB regional endpoint. Alternator does not use this value for routing; the
-library chooses nodes from `/localnodes` and the configured routing scope.
-However, the SDK requires a region for signing and configuration resolution, and
-the value can appear in tracing, logging, metrics, or debug output.
+library chooses nodes from the ScyllaDB `system.local` and `system.peers` metadata
+and the configured routing scope. However, the SDK requires a region for signing
+and configuration resolution, including signing the internal topology-discovery
+scans, and the value can appear in tracing, logging, metrics, or debug output.
 
 `AlternatorDynamoDbClient` sets `fake-aws-region` when the application does not
 provide a region so the SDK does not fall back to profile or environment
@@ -735,10 +738,11 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
 
 #### Cluster-Wide Discovery Across Datacenters
 
-For cluster-wide routing, the client queries the configured seed hosts and merges the returned node
-lists. Some Scylla versions return only the contacted node's datacenter from `/localnodes`, even
-with cluster scope. When using those versions across multiple datacenters, configure seed hosts
-from every datacenter that should participate in cluster-wide routing:
+For cluster-wide routing, the client scans `.scylla.alternator.system.local` and
+`.scylla.alternator.system.peers` on a reachable discovery candidate. These node-local system
+tables describe the contacted node and all peers known to it, so one reachable seed can discover
+nodes across datacenters. Configure multiple seeds to improve bootstrap and discovery availability;
+they no longer need to cover every datacenter:
 
 ```java
 import java.util.Arrays;
@@ -749,21 +753,59 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
     .withRoutingScope(ClusterScope.create())
     .withSeedHosts(Arrays.asList(
         "dc1-node.example.com",
-        "dc2-node.example.com",
-        "dc3-node.example.com"))
+        "dc1-backup.example.com"))
     .build();
 ```
+
+Discovery uses each row's `rpc_address` as the client endpoint. A usable local row is required;
+incomplete peer rows without a usable `rpc_address` are ignored. The client does not route to the
+`peer` or `preferred_ip` values, which describe internode communication rather than the address
+advertised for client RPC.
+
+The virtual system-table names used by discovery require ScyllaDB 4.1 or later. ScyllaDB 5.2 or
+later is recommended when a node's bind and advertised RPC addresses differ: starting with 5.2,
+`system.local.rpc_address` reliably contains the advertised address. Peer rows are persistent
+topology metadata, not a liveness report, so newly found peers enter quarantine and direct health
+checks keep unreachable or stale entries out of active routing.
+
+#### Discovery Authentication and Permissions
+
+Topology discovery uses DynamoDB `Scan`, not the unauthenticated `/localnodes` endpoint. The
+library sends the scans directly to the selected discovery candidate, uses the same effective AWS
+credentials provider and region as the application client, and signs each request for that
+candidate. Clients configured without a credentials provider use anonymous credentials for both
+application and discovery requests. Control-plane scans use the configured health-probe timeout
+and make one SDK attempt so the library can attribute failure and move to the next candidate.
+
+When Alternator authentication and authorization are enabled, the authenticated role needs
+`SELECT` permission on both underlying ScyllaDB system tables:
+
+```sql
+GRANT SELECT ON TABLE system.local TO application_role;
+GRANT SELECT ON TABLE system.peers TO application_role;
+```
+
+These grants are required even though the wire operation is DynamoDB `Scan`. Missing either grant
+causes topology discovery to fail with an authorization error. This is a deployment requirement
+when upgrading from versions of the library that used unauthenticated `/localnodes` requests.
+
+Applications that construct `AlternatorLiveNodes` directly must use its credentials-and-region
+constructor for authenticated clusters. Constructors without those arguments intentionally make
+anonymous system-table requests.
 
 #### Fallback Chains
 
 Each scope can have a fallback scope. When no nodes are available in the current scope,
 the client automatically falls back to the next scope in the chain:
 
-For datacenter or rack scoped routing in a multi-datacenter cluster, include a seed host from the
-target datacenter. The client queries configured seeds with the scope filter and only falls back
-after no seed returns nodes for that scope. Configured seed hosts remain discovery candidates, but
-they are not added to the routing node list unless `/localnodes` returns them for the selected
-scope.
+For datacenter or rack scoped routing, the client reads the complete metadata from a discovery
+candidate and filters rows by `data_center` and `rack` locally. It tries later candidates when a
+complete snapshot lacks an available node in the preferred scope, allowing a fresher peer view to
+win. It advances through the configured fallback chain only after every candidate misses that
+scope; persistent rows for nodes already known down do not block a healthy fallback. A seed may
+belong to any datacenter, and configured seed hosts remain discovery candidates without
+automatically becoming routing nodes; a seed is added to the routing ring only when its
+`rpc_address` appears in the system-table metadata and matches the effective scope.
 
 ```java
 // Rack -> Datacenter -> Cluster fallback chain
@@ -783,6 +825,10 @@ RoutingScope scope = DatacenterScope.of("dc1", ClusterScope.create());
 // Strict targeting (no fallback) - fails if no nodes available
 RoutingScope scope = DatacenterScope.of("dc1", null);
 ```
+
+A complete topology refresh that finds no member of a strict scope publishes an empty routing ring,
+so requests fail locally instead of continuing to a node now known to be outside that scope. If no
+candidate can complete the topology reads, the last published ring is retained.
 
 #### Combining with other features
 
@@ -936,31 +982,35 @@ The normative, language-agnostic behavior is defined in the
 The client tracks active, quarantined, and down nodes while routing requests:
 
 - configured seeds and newly discovered nodes start quarantined
-- a successful direct `GET /localnodes` contact activates a quarantined node
+- a successful direct DynamoDB `Scan` of `.scylla.alternator.system.local` activates a quarantined
+  node
 - DynamoDB transport failures count as traffic health failures
 - consecutive traffic failures mark an active node down
-- down nodes are probed in the background with `GET /localnodes`
-- enough consecutive HTTP 200 probe responses move a down node into quarantine
+- down nodes are probed in the background with direct `system.local` scans
+- enough consecutive successful probe responses move a down node into quarantine
 - quarantined nodes are also probed directly during each background health cycle
 - enough consecutive successful contacts from a quarantined node promote it back to active
 - traffic failures in quarantine reset promotion progress, and enough consecutive traffic failures
   return the node to down
 
-For DynamoDB API requests, successful, application-level, and authentication responses count as
-successful health contacts. In particular, body-coded errors such as `InvalidSignatureException`,
-`MissingAuthenticationTokenException`, or `UnrecognizedClientException`, and authentication HTTP
-statuses such as `401` or `403`, do not mark a node unhealthy. Retryable HTTP statuses `500`, `502`,
-`503`, and `504` produce no health observation: they neither advance nor reset health counters
-because Alternator can report coordinator timeouts and unrelated internal failures with the same
-`InternalServerError` type. This avoids removing capacity during cluster-wide overload. Failures
-that occur before an HTTP response is received count as DynamoDB traffic health failures.
+For routed application DynamoDB API requests, successful, application-level, and authentication
+responses count as successful health contacts. In particular, body-coded errors such as
+`InvalidSignatureException`, `MissingAuthenticationTokenException`, or
+`UnrecognizedClientException`, and authentication HTTP statuses such as `401` or `403`, do not
+mark a node unhealthy. Retryable HTTP statuses `500`, `502`, `503`, and `504` produce no health
+observation: they neither advance nor reset health counters because Alternator can report
+coordinator timeouts and unrelated internal failures with the same `InternalServerError` type.
+This avoids removing capacity during cluster-wide overload. Failures that occur before an HTTP
+response is received count as DynamoDB traffic health failures.
 
-For `/localnodes`, any non-200 HTTP status or transport failure is a discovery or recovery-probe
-failure. A successful direct HTTP 200 probe activates a quarantined node; a failed probe leaves it
-quarantined without changing its traffic counters. Probe outcomes do not demote active nodes. For a
-down node, a probe failure resets probe-recovery progress and a successful HTTP 200 probe advances
-it. DynamoDB traffic results received after a node becomes down are treated as stale and do not
-change its state, counters, or probe-recovery progress.
+For direct `system.local` probes, any successfully decoded DynamoDB response is a probe success;
+service errors, authorization errors, timeouts, and transport failures are probe failures. A probe
+does not need topology attributes because it verifies only direct contact with the selected node.
+A successful direct probe activates a quarantined node; a failed probe leaves it quarantined
+without changing its traffic counters. Probe outcomes do not demote active nodes. For a down node,
+a probe failure resets probe-recovery progress and a successful probe advances it. DynamoDB traffic
+results received after a node becomes down are treated as stale and do not change its state,
+counters, or probe-recovery progress.
 
 Key route affinity hashes and votes over all known discovered nodes so candidate order is stable
 while health changes. Every request makes two passes over its source order: it first returns active
@@ -1007,14 +1057,17 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
     .build();
 ```
 
-Wrappers expose `probeQuarantinedNodes()` and `probeQuarantinedNodesAsync()` to send `GET /localnodes`
-directly to every quarantined endpoint in the current discovered set and return those that answered
-with HTTP 200. Successful probes activate those endpoints; individual failures leave them
-quarantined. Calls after client shutdown fail immediately.
+Wrappers expose `probeQuarantinedNodes()` and `probeQuarantinedNodesAsync()` to send a
+`.scylla.alternator.system.local` scan directly to every quarantined endpoint in the current
+discovered set and return those that answered successfully. Successful probes activate those
+endpoints; individual failures leave them quarantined. Calls after client shutdown fail
+immediately.
 
 Topology refresh independently shuffles active, quarantined, and down candidate buckets, then tries
-them in that order. Down nodes are used only as final control-plane discovery fallback and topology
-requests do not change their recovery counters.
+available current nodes, available bootstrap seeds, down current nodes, and finally down seeds. Each
+attempt fully paginates both `system.local` and `system.peers`, publishes only a complete pair of
+results, and applies scope filters on the client. Down-node topology requests do not change recovery
+counters.
 
 For custom integrations, `AlternatorLiveNodes` exposes `reportNodeResult(...)`,
 `probeQuarantinedNodes()`, `probeQuarantinedNodesAsync()`, `getActiveNodes()`,

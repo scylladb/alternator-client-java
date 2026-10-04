@@ -24,24 +24,33 @@ import com.scylladb.alternator.internal.AlternatorLiveNodes;
 import com.scylladb.alternator.internal.AsyncClientDetector;
 import com.scylladb.alternator.internal.SyncClientDetector;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.Test;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.http.AbortableInputStream;
 import software.amazon.awssdk.http.ExecutableHttpRequest;
 import software.amazon.awssdk.http.HttpExecuteRequest;
 import software.amazon.awssdk.http.HttpExecuteResponse;
 import software.amazon.awssdk.http.SdkHttpClient;
 import software.amazon.awssdk.http.SdkHttpFullResponse;
+import software.amazon.awssdk.http.SdkHttpMethod;
+import software.amazon.awssdk.http.SdkHttpRequest;
 import software.amazon.awssdk.http.async.AsyncExecuteRequest;
 import software.amazon.awssdk.http.async.SdkAsyncHttpClient;
+import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.utils.AttributeMap;
@@ -49,6 +58,13 @@ import software.amazon.awssdk.utils.AttributeMap;
 /** Regression tests for resources owned by the Alternator client builders. */
 public class AlternatorDynamoDbClientLifecycleTest {
   private static final URI SEED_URI = URI.create("http://127.0.0.1:8000");
+  private static final String LOCAL_TABLE = ".scylla.alternator.system.local";
+  private static final String PEERS_TABLE = ".scylla.alternator.system.peers";
+  private static final String TEST_ACCESS_KEY = "topology-access-key";
+  private static final Region TEST_REGION = Region.of("topology-test-region");
+  private static final StaticCredentialsProvider TEST_CREDENTIALS =
+      StaticCredentialsProvider.create(
+          AwsBasicCredentials.create(TEST_ACCESS_KEY, "topology-secret-key"));
 
   @Test
   public void syncStandardClientCloseClosesInternalResourcesOnce() {
@@ -191,11 +207,12 @@ public class AlternatorDynamoDbClientLifecycleTest {
     RunningSyncBuilder builder = new RunningSyncBuilder();
     builder.endpointOverride(SEED_URI);
     builder.withNodeHealthDisabled();
-    builder.withActiveRefreshIntervalMs(10);
-    builder.withIdleRefreshIntervalMs(10);
+    builder.withActiveRefreshIntervalMs(1000);
+    builder.withIdleRefreshIntervalMs(1000);
 
     DynamoDbClient client = builder.build();
-    assertTrue(builder.pollingClient.firstRequest.await(1, TimeUnit.SECONDS));
+    assertTrue(builder.pollingClient.firstTopologyRefresh.await(1, TimeUnit.SECONDS));
+    assertTrue(awaitDiscoveredNode(builder.liveNodes, URI.create("http://127.0.0.2:8000")));
 
     client.close();
 
@@ -211,11 +228,12 @@ public class AlternatorDynamoDbClientLifecycleTest {
     RunningAsyncBuilder builder = new RunningAsyncBuilder();
     builder.endpointOverride(SEED_URI);
     builder.withNodeHealthDisabled();
-    builder.withActiveRefreshIntervalMs(10);
-    builder.withIdleRefreshIntervalMs(10);
+    builder.withActiveRefreshIntervalMs(1000);
+    builder.withIdleRefreshIntervalMs(1000);
 
     DynamoDbAsyncClient client = builder.build();
-    assertTrue(builder.pollingClient.firstRequest.await(1, TimeUnit.SECONDS));
+    assertTrue(builder.pollingClient.firstTopologyRefresh.await(1, TimeUnit.SECONDS));
+    assertTrue(awaitDiscoveredNode(builder.liveNodes, URI.create("http://127.0.0.2:8000")));
 
     client.close();
 
@@ -224,6 +242,46 @@ public class AlternatorDynamoDbClientLifecycleTest {
     assertEquals(1, builder.pollingClient.closeCount.get());
     assertEquals(1, builder.mainClient.closeCount.get());
     assertPollingHasStopped(builder.pollingClient);
+  }
+
+  @Test(timeout = 5000)
+  public void syncTopologyScansUseConfiguredCredentialsAndRegion() throws Exception {
+    RunningSyncBuilder builder = new RunningSyncBuilder();
+    builder.endpointOverride(SEED_URI);
+    builder.credentialsProvider(TEST_CREDENTIALS);
+    builder.region(TEST_REGION);
+    builder.withNodeHealthDisabled();
+    builder.withActiveRefreshIntervalMs(60_000);
+    builder.withIdleRefreshIntervalMs(60_000);
+
+    DynamoDbClient client = builder.build();
+    try {
+      assertTrue(builder.pollingClient.firstTopologyRefresh.await(1, TimeUnit.SECONDS));
+      assertTrue(awaitDiscoveredNode(builder.liveNodes, URI.create("http://127.0.0.2:8000")));
+      assertSignedTopologyScans(builder.pollingClient);
+    } finally {
+      client.close();
+    }
+  }
+
+  @Test(timeout = 5000)
+  public void asyncTopologyScansUseConfiguredCredentialsAndRegion() throws Exception {
+    RunningAsyncBuilder builder = new RunningAsyncBuilder();
+    builder.endpointOverride(SEED_URI);
+    builder.credentialsProvider(TEST_CREDENTIALS);
+    builder.region(TEST_REGION);
+    builder.withNodeHealthDisabled();
+    builder.withActiveRefreshIntervalMs(60_000);
+    builder.withIdleRefreshIntervalMs(60_000);
+
+    DynamoDbAsyncClient client = builder.build();
+    try {
+      assertTrue(builder.pollingClient.firstTopologyRefresh.await(1, TimeUnit.SECONDS));
+      assertTrue(awaitDiscoveredNode(builder.liveNodes, URI.create("http://127.0.0.2:8000")));
+      assertSignedTopologyScans(builder.pollingClient);
+    } finally {
+      client.close();
+    }
   }
 
   @Test
@@ -311,6 +369,38 @@ public class AlternatorDynamoDbClientLifecycleTest {
     int requestsAfterClose = pollingClient.requestCount.get();
     Thread.sleep(50);
     assertEquals(requestsAfterClose, pollingClient.requestCount.get());
+  }
+
+  private static void assertSignedTopologyScans(SuccessfulPollingClient pollingClient) {
+    assertTrue(pollingClient.requests.size() >= 2);
+    assertTrue(pollingClient.requestBodies.size() >= 2);
+
+    SdkHttpRequest localRequest = pollingClient.requests.get(0);
+    SdkHttpRequest peersRequest = pollingClient.requests.get(1);
+    assertEquals(SdkHttpMethod.POST, localRequest.method());
+    assertEquals(SdkHttpMethod.POST, peersRequest.method());
+    assertEquals("DynamoDB_20120810.Scan", localRequest.firstMatchingHeader("X-Amz-Target").get());
+    assertEquals("DynamoDB_20120810.Scan", peersRequest.firstMatchingHeader("X-Amz-Target").get());
+    assertTrue(pollingClient.requestBodies.get(0).contains(LOCAL_TABLE));
+    assertTrue(pollingClient.requestBodies.get(1).contains(PEERS_TABLE));
+
+    for (SdkHttpRequest request : Arrays.asList(localRequest, peersRequest)) {
+      String authorization = request.firstMatchingHeader("Authorization").get();
+      assertTrue(authorization.contains("Credential=" + TEST_ACCESS_KEY + "/"));
+      assertTrue(authorization.contains("/" + TEST_REGION.id() + "/dynamodb/aws4_request"));
+    }
+  }
+
+  private static boolean awaitDiscoveredNode(AlternatorLiveNodes liveNodes, URI node)
+      throws InterruptedException {
+    long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+    while (System.nanoTime() < deadlineNanos) {
+      if (liveNodes.getDiscoveredNodes().contains(node)) {
+        return true;
+      }
+      Thread.sleep(5);
+    }
+    return liveNodes.getDiscoveredNodes().contains(node);
   }
 
   private static final class TestSyncBuilder
@@ -404,7 +494,7 @@ public class AlternatorDynamoDbClientLifecycleTest {
     @Override
     AlternatorLiveNodes createLiveNodes(
         AlternatorConfig alternatorConfig, SdkHttpClient pollingClient) {
-      liveNodes = new AlternatorLiveNodes(alternatorConfig, pollingClient);
+      liveNodes = super.createLiveNodes(alternatorConfig, pollingClient);
       return liveNodes;
     }
   }
@@ -434,7 +524,7 @@ public class AlternatorDynamoDbClientLifecycleTest {
     @Override
     AlternatorLiveNodes createLiveNodes(
         AlternatorConfig alternatorConfig, SdkHttpClient pollingClient) {
-      liveNodes = new AlternatorLiveNodes(alternatorConfig, pollingClient);
+      liveNodes = super.createLiveNodes(alternatorConfig, pollingClient);
       return liveNodes;
     }
   }
@@ -458,7 +548,7 @@ public class AlternatorDynamoDbClientLifecycleTest {
     public boolean shutdownAndWait() {
       shutdownCount.incrementAndGet();
       events.add("live-nodes-stop");
-      return true;
+      return super.shutdownAndWait();
     }
   }
 
@@ -535,21 +625,36 @@ public class AlternatorDynamoDbClientLifecycleTest {
   }
 
   private static final class SuccessfulPollingClient implements SdkHttpClient {
-    private final CountDownLatch firstRequest = new CountDownLatch(1);
+    private final CountDownLatch firstTopologyRefresh = new CountDownLatch(2);
     private final AtomicInteger requestCount = new AtomicInteger();
     private final AtomicInteger closeCount = new AtomicInteger();
+    private final List<SdkHttpRequest> requests = new CopyOnWriteArrayList<>();
+    private final List<String> requestBodies = new CopyOnWriteArrayList<>();
 
     @Override
     public ExecutableHttpRequest prepareRequest(HttpExecuteRequest request) {
+      SdkHttpRequest httpRequest = request.httpRequest();
+      String requestBody = readRequestBody(request);
       return new ExecutableHttpRequest() {
         @Override
         public HttpExecuteResponse call() {
+          requests.add(httpRequest);
+          requestBodies.add(requestBody);
           requestCount.incrementAndGet();
-          firstRequest.countDown();
-          byte[] body = "[\"127.0.0.1\"]".getBytes(StandardCharsets.UTF_8);
+          firstTopologyRefresh.countDown();
+          String responseBody =
+              requestBody.contains(LOCAL_TABLE)
+                  ? localScanResponse("127.0.0.1")
+                  : localScanResponse("127.0.0.2");
+          byte[] body = responseBody.getBytes(StandardCharsets.UTF_8);
           return HttpExecuteResponse.builder()
-              .response(SdkHttpFullResponse.builder().statusCode(200).build())
-              .responseBody(AbortableInputStream.create(new ByteArrayInputStream(body), () -> {}))
+              .response(
+                  SdkHttpFullResponse.builder()
+                      .statusCode(200)
+                      .putHeader("Content-Type", "application/x-amz-json-1.0")
+                      .putHeader("Content-Length", String.valueOf(body.length))
+                      .build())
+              .responseBody(AbortableInputStream.create(new ByteArrayInputStream(body)))
               .build();
         }
 
@@ -566,6 +671,30 @@ public class AlternatorDynamoDbClientLifecycleTest {
     @Override
     public String clientName() {
       return "successful-polling";
+    }
+
+    private static String readRequestBody(HttpExecuteRequest request) {
+      if (!request.contentStreamProvider().isPresent()) {
+        return "";
+      }
+      try (InputStream input = request.contentStreamProvider().get().newStream();
+          ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+        byte[] buffer = new byte[256];
+        int read;
+        while ((read = input.read(buffer)) != -1) {
+          output.write(buffer, 0, read);
+        }
+        return new String(output.toByteArray(), StandardCharsets.UTF_8);
+      } catch (IOException e) {
+        throw new IllegalStateException("failed to read topology request", e);
+      }
+    }
+
+    private static String localScanResponse(String address) {
+      return "{\"Items\":[{\"rpc_address\":{\"S\":\""
+          + address
+          + "\"},\"data_center\":{\"S\":\"dc1\"},\"rack\":{\"S\":\"rack1\"}}],"
+          + "\"Count\":1,\"ScannedCount\":1}";
     }
   }
 

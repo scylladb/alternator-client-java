@@ -383,8 +383,10 @@ public class AlternatorLiveNodesConcurrentProbeTest {
   }
 
   private static HttpExecuteResponse okResponse() {
+    byte[] body = "{}".getBytes(StandardCharsets.UTF_8);
     return HttpExecuteResponse.builder()
         .response(SdkHttpFullResponse.builder().statusCode(200).build())
+        .responseBody(AbortableInputStream.create(new ByteArrayInputStream(body)))
         .build();
   }
 
@@ -661,7 +663,12 @@ public class AlternatorLiveNodesConcurrentProbeTest {
             }
             return okResponse();
           }
-          byte[] body = "[\"active.local\"]".getBytes(StandardCharsets.UTF_8);
+          byte[] body =
+              ("{\"Items\":[{\"rpc_address\":{\"S\":\"active.local\"},"
+                      + "\"data_center\":{\"S\":\"dc1\"},"
+                      + "\"rack\":{\"S\":\"rack1\"}}],"
+                      + "\"Count\":1,\"ScannedCount\":1}")
+                  .getBytes(StandardCharsets.UTF_8);
           return HttpExecuteResponse.builder()
               .response(SdkHttpFullResponse.builder().statusCode(200).build())
               .responseBody(AbortableInputStream.create(new ByteArrayInputStream(body)))
