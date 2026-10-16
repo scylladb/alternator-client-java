@@ -1,4 +1,5 @@
 SHELL := bash
+RELEASE_GUARD ?= scripts/release/guard.py
 .ONESHELL:
 .SHELLFLAGS := -eo pipefail -c
 
@@ -143,41 +144,39 @@ ccm-install:
 	echo "Using CCM executable: $(PINNED_SCYLLA_CCM_PATH)"
 
 release-prepare:
-	@if [[ "${MAVEN_GPG_PASSPHRASE}" == "" ]]; then
+	@if [[ -z "$${MAVEN_GPG_PASSPHRASE}" ]]; then
 		echo "MAVEN_GPG_PASSPHRASE is empty, can't continue"
 		exit 1
 	fi
-	if [[ "${RELEASE_SKIP_TESTS}" == "true" ]] || [[ "${RELEASE_SKIP_TESTS}" == "1" ]]; then
-		export MAVEN_OPTS="${MAVEN_OPTS} -DskipTests=true -DskipITs=true"
+	if [[ "$${RELEASE_SKIP_TESTS}" == "true" ]] || [[ "$${RELEASE_SKIP_TESTS}" == "1" ]]; then
+		export MAVEN_OPTS="$${MAVEN_OPTS} -DskipTests=true -DskipITs=true"
 	fi
-	NEXT_RELEASE=""
-	if [[ -n "${RELEASE_VERSION}" ]]; then
-		NEXT_RELEASE="-DreleaseVersion=${RELEASE_VERSION}"
+	NEXT_RELEASE=()
+	if [[ -n "$${RELEASE_VERSION}" ]]; then
+		NEXT_RELEASE=("-DreleaseVersion=$${RELEASE_VERSION}")
 	fi
 	export MAVEN_OPTS
-	${mvn} release:prepare -DpushChanges=false $${NEXT_RELEASE}
+	python3 "$(RELEASE_GUARD)" run ${mvn} -B release:prepare -DpushChanges=false "$${NEXT_RELEASE[@]}"
 
 release:
-	@if [[ "${MAVEN_GPG_PASSPHRASE}" == "" ]]; then
+	@if [[ -z "$${MAVEN_GPG_PASSPHRASE}" ]]; then
 		echo "MAVEN_GPG_PASSPHRASE is empty, can't continue"
 		exit 1
 	fi
-	if [[ "${RELEASE_SKIP_TESTS}" == "true" ]] || [[ "${RELEASE_SKIP_TESTS}" == "1" ]]; then
-		export MAVEN_OPTS="${MAVEN_OPTS} -DskipTests=true -DskipITs=true"
+	if [[ "$${RELEASE_SKIP_TESTS}" == "true" ]] || [[ "$${RELEASE_SKIP_TESTS}" == "1" ]]; then
+		export MAVEN_OPTS="$${MAVEN_OPTS} -DskipTests=true -DskipITs=true"
 	fi
-	mkdir /tmp/release-logs/ 2>/dev/null || true
-	${mvn} release:perform -Drelease.autopublish=true > >(tee /tmp/release-logs/stdout.log) 2> >(tee /tmp/release-logs/stderr.log)
+	python3 "$(RELEASE_GUARD)" run ${mvn} -B release:perform -Drelease.autopublish=true
 
 release-dry-run:
-	@if [[ "${MAVEN_GPG_PASSPHRASE}" == "" ]]; then
+	@if [[ -z "$${MAVEN_GPG_PASSPHRASE}" ]]; then
 		echo "MAVEN_GPG_PASSPHRASE is empty, can't continue"
 		exit 1
 	fi
-	if [[ -n "${RELEASE_SKIP_TESTS}" ]]; then
-		export MAVEN_OPTS="${MAVEN_OPTS} -DskipTests=true -DskipITs=true"
+	if [[ "$${RELEASE_SKIP_TESTS}" == "true" ]] || [[ "$${RELEASE_SKIP_TESTS}" == "1" ]]; then
+		export MAVEN_OPTS="$${MAVEN_OPTS} -DskipTests=true -DskipITs=true"
 	fi
-	mkdir /tmp/release-logs/ 2>/dev/null || true
-	${mvn} release:perform > >(tee /tmp/release-logs/stdout.log) 2> >(tee /tmp/release-logs/stderr.log)
+	python3 "$(RELEASE_GUARD)" run ${mvn} -B release:perform
 
 checkout-one-commit-before:
 	@if [[ "${RELEASE_TARGET_TAG}" == 3.* ]]; then
