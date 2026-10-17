@@ -73,6 +73,30 @@ class ReleaseCommandTests(unittest.TestCase):
             self.assertEqual((root / "logs/stdout.log").read_text(), "stdout: [REDACTED]\n" * 3)
             self.assertEqual((root / "logs/stderr.log").read_text(), "stderr: [REDACTED]\n" * 3)
 
+    def test_main_release_rejects_other_dispatch_refs_before_preserving_guard(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        command = next(script for script in guard.workflow_commands(workflow)
+                       if 'Releases targeting main' in script)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for target, ref, accepted in (
+                ("main", "refs/heads/main", True),
+                ("main", "refs/heads/feature", False),
+                ("main", "refs/tags/main", False),
+                ("v1.0", "refs/heads/main", True),
+            ):
+                with self.subTest(target=target, ref=ref):
+                    runner = root / str(len(list(root.iterdir())))
+                    runner.mkdir()
+                    result = subprocess.run(
+                        ["bash", "-eo", "pipefail", "-c", command], cwd=ROOT,
+                        env={**os.environ, "RELEASE_TARGET_TAG": target, "GITHUB_REF": ref,
+                             "RUNNER_TEMP": str(runner), "GITHUB_ENV": str(runner / "env")},
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    self.assertEqual(result.returncode == 0, accepted, result.stderr)
+                    self.assertEqual((runner / "release-safety").exists(), accepted)
+
     def test_workflow_uses_preserved_recipes_in_target_checkout(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         commands = [script.strip() for script in guard.workflow_commands(workflow)

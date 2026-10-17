@@ -58,7 +58,15 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Preserve release guard
+        env:
+          RELEASE_TARGET_TAG: ${{ inputs.target-tag }}
         run: |
+          if [[ "$RELEASE_TARGET_TAG" == main ]]; then
+            if [[ "$GITHUB_REF" != refs/heads/main ]]; then
+              echo "Releases targeting main must be dispatched from main."
+              exit 1
+            fi
+          fi
           mkdir -p "$RUNNER_TEMP/release-safety"
           cp scripts/release/*.py Makefile "$RUNNER_TEMP/release-safety/"
           echo "RELEASE_GUARD=$RUNNER_TEMP/release-safety/guard.py" >> "$GITHUB_ENV"
