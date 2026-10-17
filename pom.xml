@@ -15,6 +15,7 @@
         <maven.compiler.target>11</maven.compiler.target>
         <test.forkCount>2</test.forkCount>
         <release.autopublish>false</release.autopublish>
+        <gpg.bestPractices>true</gpg.bestPractices>
     </properties>
 
     <dependencyManagement>
@@ -231,7 +232,7 @@
             <plugin>
                 <groupId>org.sonatype.central</groupId>
                 <artifactId>central-publishing-maven-plugin</artifactId>
-                <version>0.8.0</version>
+                <version>0.12.0</version>
                 <extensions>true</extensions>
                 <configuration>
                     <publishingServerId>central</publishingServerId>

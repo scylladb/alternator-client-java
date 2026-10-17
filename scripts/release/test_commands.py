@@ -1,0 +1,232 @@
+"""Exercise actual release recipes with a fake Maven executable and synthetic secrets."""
+
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+import guard
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+class ReleaseCommandTests(unittest.TestCase):
+    def fake_environment(self, directory):
+        root = Path(directory)
+        binary = root / "mvn"
+        binary.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, sys\n"
+            "with open(os.environ['FAKE_MAVEN_TRACE'], 'a') as trace:\n"
+            " trace.write(json.dumps({'args': sys.argv[1:], "
+            "'passphrase': os.environ['MAVEN_GPG_PASSPHRASE'], "
+            "'opts': os.environ.get('MAVEN_OPTS', ''), 'cwd': os.getcwd()}) + '\\n')\n"
+            "print('stdout: ' + os.environ['MAVEN_GPG_PASSPHRASE'])\n"
+            "print('stderr: ' + os.environ['MAVEN_GPG_PASSPHRASE'], file=sys.stderr)\n"
+            "raise SystemExit(int(os.environ.get('FAKE_MAVEN_STATUS', '0')))\n"
+        )
+        binary.chmod(0o755)
+        env = {key: value for key, value in os.environ.items() if key not in guard.ENV_OPTIONS}
+        env.update(
+            PATH=str(root) + os.pathsep + env.get("PATH", ""),
+            PYTHONDONTWRITEBYTECODE="1",
+            MAVEN_GPG_PASSPHRASE="synthetic-passphrase",
+            SONATYPE_TOKEN_USERNAME="synthetic-user",
+            SONATYPE_TOKEN_PASSWORD="synthetic-password",
+            RELEASE_LOG_DIR=str(root / "logs"),
+            FAKE_MAVEN_TRACE=str(root / "trace.jsonl"),
+            RELEASE_SKIP_TESTS="false",
+            RELEASE_VERSION="",
+            IS_CICD="true",
+        )
+        return root, env
+
+    def run_make(self, target, env):
+        return subprocess.run(
+            ["make", "--no-print-directory", target], cwd=ROOT, env=env,
+            capture_output=True, text=True, timeout=10,
+        )
+
+    def test_all_release_phases_capture_both_streams_and_keep_credentials_in_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, env = self.fake_environment(directory)
+            for target in ("release-prepare", "release", "release-dry-run"):
+                result = self.run_make(target, env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn(env["MAVEN_GPG_PASSPHRASE"], result.stdout + result.stderr)
+            calls = [json.loads(line) for line in (root / "trace.jsonl").read_text().splitlines()]
+            self.assertEqual(len(calls), 3)
+            self.assertIn("release:prepare", calls[0]["args"])
+            self.assertIn("release:perform", calls[1]["args"])
+            self.assertIn("release:perform", calls[2]["args"])
+            self.assertIn("-Drelease.autopublish=true", calls[1]["args"])
+            self.assertNotIn("-Drelease.autopublish=true", calls[2]["args"])
+            for call in calls:
+                self.assertEqual(call["passphrase"], env["MAVEN_GPG_PASSPHRASE"])
+                self.assertNotIn(env["MAVEN_GPG_PASSPHRASE"], " ".join(call["args"]))
+                self.assertNotIn("-DskipTests=true", call["opts"])
+            self.assertEqual((root / "logs/stdout.log").read_text(), "stdout: [REDACTED]\n" * 3)
+            self.assertEqual((root / "logs/stderr.log").read_text(), "stderr: [REDACTED]\n" * 3)
+
+    def test_main_release_rejects_other_dispatch_refs_before_preserving_guard(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        command = next(script for script in guard.workflow_commands(workflow)
+                       if 'Releases targeting main' in script)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for target, ref, accepted in (
+                ("main", "refs/heads/main", True),
+                ("main", "refs/heads/feature", False),
+                ("main", "refs/tags/main", False),
+                ("v1.0", "refs/heads/main", True),
+            ):
+                with self.subTest(target=target, ref=ref):
+                    runner = root / str(len(list(root.iterdir())))
+                    runner.mkdir()
+                    result = subprocess.run(
+                        ["bash", "-eo", "pipefail", "-c", command], cwd=ROOT,
+                        env={**os.environ, "RELEASE_TARGET_TAG": target, "GITHUB_REF": ref,
+                             "RUNNER_TEMP": str(runner), "GITHUB_ENV": str(runner / "env")},
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    self.assertEqual(result.returncode == 0, accepted, result.stderr)
+                    self.assertEqual((runner / "release-safety").exists(), accepted)
+
+    def test_workflow_uses_preserved_recipes_in_target_checkout(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        commands = [script.strip() for script in guard.workflow_commands(workflow)
+                    if script.strip().startswith("make -f ")]
+        self.assertEqual(len(commands), 3)
+        with tempfile.TemporaryDirectory() as directory:
+            root, env = self.fake_environment(directory)
+            target = root / "target-checkout"
+            target.mkdir()
+            (target / "pom.xml").write_text("historical target POM")
+            marker = target / "unsafe-target-executed"
+            # Any read of target Makefiles, including parse-time shell execution,
+            # would create the marker and expose the passphrase before capture.
+            unsafe = (f"$(shell touch {marker})\nSHELL := bash\n.SHELLFLAGS := -x -c\n"
+                      "override RELEASE_GUARD := unsafe.py\n"
+                      "release-prepare release release-dry-run:\n"
+                      "\techo $${MAVEN_GPG_PASSPHRASE}\n")
+            for name in ("Makefile", "GNUmakefile"):
+                (target / name).write_text(unsafe)
+            preserved = root / "release-safety"
+            preserved.mkdir()
+            shutil.copy2(ROOT / "Makefile", preserved / "Makefile")
+            shutil.copy2(ROOT / "scripts/release/guard.py", preserved / "guard.py")
+            env.update(RUNNER_TEMP=str(root), RELEASE_GUARD=str(target / "unsafe.py"))
+            for command in commands:
+                result = subprocess.run(
+                    ["bash", "-eo", "pipefail", "-c", command], cwd=target, env=env,
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn(env["MAVEN_GPG_PASSPHRASE"], result.stdout + result.stderr)
+                self.assertFalse(marker.exists())
+            calls = [json.loads(line) for line in (root / "trace.jsonl").read_text().splitlines()]
+            self.assertEqual(len(calls), 3)
+            self.assertTrue(all(call["cwd"] == str(target) for call in calls))
+            self.assertEqual((target / "pom.xml").read_text(), "historical target POM")
+            for name in ("stdout", "stderr"):
+                output = (root / f"logs/{name}.log").read_text()
+                self.assertNotIn(env["MAVEN_GPG_PASSPHRASE"], output)
+                self.assertEqual(output.count("[REDACTED]"), 3)
+
+    def test_passphrase_quotes_and_shell_syntax_never_become_shell_code(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, env = self.fake_environment(directory)
+            marker = root / "must-not-exist"
+            env["MAVEN_GPG_PASSPHRASE"] = f'synthetic "quoted" $(touch {marker}) secret'
+            result = self.run_make("release-prepare", env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(marker.exists())
+            call = json.loads((root / "trace.jsonl").read_text())
+            self.assertEqual(call["passphrase"], env["MAVEN_GPG_PASSPHRASE"])
+            self.assertNotIn(env["MAVEN_GPG_PASSPHRASE"], result.stdout + result.stderr)
+
+    def test_requested_skip_flags_apply_to_prepare_perform_and_dry_run(self):
+        for target in ("release-prepare", "release", "release-dry-run"):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as directory:
+                root, env = self.fake_environment(directory)
+                env["RELEASE_SKIP_TESTS"] = "true"
+                result = self.run_make(target, env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                call = json.loads((root / "trace.jsonl").read_text())
+                self.assertIn("-DskipTests=true", call["opts"])
+                self.assertIn("-DskipITs=true", call["opts"])
+
+    def test_version_override_remains_one_argument(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, env = self.fake_environment(directory)
+            env["RELEASE_VERSION"] = "2.0.8"
+            result = self.run_make("release-prepare", env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            call = json.loads((root / "trace.jsonl").read_text())
+            self.assertIn("-DreleaseVersion=2.0.8", call["args"])
+
+    def test_maven_failure_keeps_sanitized_artifacts_and_fails_make(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, env = self.fake_environment(directory)
+            env["FAKE_MAVEN_STATUS"] = "17"
+            result = self.run_make("release", env)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Error 17", result.stderr)
+            for name in ("stdout", "stderr"):
+                output = (root / f"logs/{name}.log").read_text()
+                self.assertIn("[REDACTED]", output)
+                self.assertNotIn(env["MAVEN_GPG_PASSPHRASE"], output)
+
+    def test_debug_environment_is_blocked_before_fake_maven_starts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, env = self.fake_environment(directory)
+            env["MAVEN_ARGS"] = "-B -X"
+            result = self.run_make("release", env)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((root / "trace.jsonl").exists())
+
+    def test_unsafe_environment_is_rejected_during_precredential_check(self):
+        with patch.dict(os.environ, {"MAVEN_ARGS": "-B -X"}, clear=True), patch.object(
+            sys, "argv", ["guard.py", "check"]
+        ), patch.object(guard, "check_policy") as policy:
+            self.assertEqual(guard.main(), 2)
+            policy.assert_not_called()
+
+    def test_guard_covers_lowercase_release_commands_but_allows_shell_executable_test(self):
+        guard.check_text('[[ -x "$executable" ]]', maven_options=False)
+        for command in ("${mvn}", "$(mvn)", "$(MVNCMD)"):
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                shutil.copy(ROOT / "pom.xml", root / "pom.xml")
+                shutil.copytree(ROOT / ".github", root / ".github")
+                (root / "Makefile").write_text(f"\t{command} release:perform\n")
+                with self.assertRaisesRegex(guard.Unsafe, "sanitized log capture"):
+                    guard.check_policy(root)
+
+    def test_json_escaped_credentials_are_removed_before_logs(self):
+        secret = 'synthetic "quote" \\ slash\nline é'
+        forms = guard.secret_forms({"MAVEN_GPG_PASSPHRASE": secret})
+        for ascii_only in (True, False):
+            serialized = json.dumps(secret, ensure_ascii=ascii_only)
+            with self.subTest(ascii_only=ascii_only):
+                cleaned = guard.redact(serialized.encode(), forms)
+                self.assertEqual(cleaned, b'"[REDACTED]"')
+
+    def test_workflow_preserves_helper_and_checks_target_before_credentials(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        self.assertLess(workflow.index("Preserve release guard"), workflow.index("Checkout release target"))
+        self.assertLess(workflow.index("Checkout release target"), workflow.index("Check release credential safety"))
+        self.assertLess(workflow.index("Check release credential safety"), workflow.index("gpg-private-key:"))
+        self.assertLess(workflow.index("Push changes to SCM"), workflow.index("Upload sanitized stdout"))
+        self.assertIn('git checkout "refs/tags/$RELEASE_TARGET_TAG~1"', workflow)
+        self.assertIn("default: main", workflow)
+        self.assertEqual(workflow.count("if: always()"), 2)
+
+
+if __name__ == "__main__":
+    unittest.main()

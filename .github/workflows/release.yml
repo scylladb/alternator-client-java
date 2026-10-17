@@ -15,7 +15,7 @@ on:
 
       target-tag:
         type: string
-        description: 'target-tag: tag or branch name to release. Use to re-release tagged releases'
+        description: 'target-tag: main, or a tag whose preceding commit passes release credential safety checks. Other branches and unsafe historical targets are unsupported.'
         default: main
 
       release-version:
@@ -31,9 +31,6 @@ jobs:
     permissions:
       contents: write
       issues: read
-
-    env:
-      MVNCMD: mvn -B -X -ntp
 
     steps:
       - name: Block release with open release blockers
@@ -60,22 +57,44 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      - name: Checkout Code One Commit Before ${{ inputs.target-tag }}
+      - name: Preserve release guard
+        env:
+          RELEASE_TARGET_TAG: ${{ inputs.target-tag }}
+        run: |
+          if [[ "$RELEASE_TARGET_TAG" == main ]]; then
+            if [[ "$GITHUB_REF" != refs/heads/main ]]; then
+              echo "Releases targeting main must be dispatched from main."
+              exit 1
+            fi
+          fi
+          mkdir -p "$RUNNER_TEMP/release-safety"
+          cp scripts/release/*.py Makefile "$RUNNER_TEMP/release-safety/"
+          echo "RELEASE_GUARD=$RUNNER_TEMP/release-safety/guard.py" >> "$GITHUB_ENV"
+          echo "RELEASE_LOG_DIR=$RUNNER_TEMP/release-logs" >> "$GITHUB_ENV"
+
+      - name: Checkout release target
         if: inputs.target-tag != 'main'
         env:
           RELEASE_TARGET_TAG: ${{ inputs.target-tag }}
-        run: make checkout-one-commit-before
+        run: |
+          git check-ref-format "refs/tags/$RELEASE_TARGET_TAG"
+          git fetch --prune --unshallow || git fetch --prune
+          git checkout "refs/tags/$RELEASE_TARGET_TAG~1"
+          git tag -d "$RELEASE_TARGET_TAG"
+
+      - name: Check release credential safety before importing credentials
+        run: python3 "$RUNNER_TEMP/release-safety/guard.py" check
 
       - name: Set up Java
-        uses: actions/setup-java@ad2b38190b15e4d6bdf0c97fb4fca8412226d287 # v5.3.0
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           java-version: '11'
           distribution: 'temurin'
           server-id: central
           gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
-          gpg-passphrase: MAVEN_GPG_PASSPHRASE
-          server-username: SONATYPE_TOKEN_USERNAME
-          server-password: SONATYPE_TOKEN_PASSWORD
+          gpg-passphrase-env-var: MAVEN_GPG_PASSPHRASE
+          server-username-env-var: SONATYPE_TOKEN_USERNAME
+          server-password-env-var: SONATYPE_TOKEN_PASSWORD
           cache: maven
 
       - name: Configure Git user
@@ -91,7 +110,7 @@ jobs:
           RELEASE_TARGET_TAG: ${{ inputs.target-tag }}
           IS_CICD: true
         run: |
-          make release-prepare
+          make -f "$RUNNER_TEMP/release-safety/Makefile" RELEASE_GUARD="$RUNNER_TEMP/release-safety/guard.py" release-prepare
 
       - name: Recheck for open release blockers
         if: inputs.dry-run == false
@@ -122,7 +141,7 @@ jobs:
           SONATYPE_TOKEN_USERNAME: ${{ secrets.SONATYPE_TOKEN_USERNAME }}
           SONATYPE_TOKEN_PASSWORD: ${{ secrets.SONATYPE_TOKEN_PASSWORD }}
           IS_CICD: true
-        run: make release
+        run: make -f "$RUNNER_TEMP/release-safety/Makefile" RELEASE_GUARD="$RUNNER_TEMP/release-safety/guard.py" release
 
       - name: Perform release dry-run
         if: inputs.dry-run == true
@@ -132,17 +151,26 @@ jobs:
           SONATYPE_TOKEN_USERNAME: ${{ secrets.SONATYPE_TOKEN_USERNAME }}
           SONATYPE_TOKEN_PASSWORD: ${{ secrets.SONATYPE_TOKEN_PASSWORD }}
           IS_CICD: true
-        run: make release-dry-run
-
-      - name: Upload release logs
-        if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: maven-stdout
-          path: /tmp/release-logs/*.log
+        run: make -f "$RUNNER_TEMP/release-safety/Makefile" RELEASE_GUARD="$RUNNER_TEMP/release-safety/guard.py" release-dry-run
 
       - name: Push changes to SCM
         if: ${{ inputs.dry-run == false && inputs.target-tag == 'main' }}
         run: |
           git status && git log -3
           git push origin --follow-tags -v
+
+      - name: Upload sanitized stdout
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: maven-stdout
+          path: ${{ runner.temp }}/release-logs/stdout.log
+          if-no-files-found: ignore
+
+      - name: Upload sanitized stderr
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: maven-stderr
+          path: ${{ runner.temp }}/release-logs/stderr.log
+          if-no-files-found: ignore
