@@ -172,7 +172,8 @@ public class AlternatorConfigHeadersTest {
     assertTrue(headers.contains("X-Amz-Date"));
     assertTrue(headers.contains("Connection"));
     assertTrue(headers.contains("User-Agent"));
-    assertEquals(10, headers.size());
+    assertTrue(headers.contains(AlternatorRequestOptions.SERVER_TIMEOUT_HEADER));
+    assertEquals(11, headers.size());
   }
 
   @Test
@@ -321,7 +322,8 @@ public class AlternatorConfigHeadersTest {
     assertFalse(noAuthHeaders.contains("X-Amz-Date"));
     assertTrue(noAuthHeaders.contains("Connection"));
     assertTrue(noAuthHeaders.contains("User-Agent"));
-    assertEquals(8, noAuthHeaders.size());
+    assertTrue(noAuthHeaders.contains(AlternatorRequestOptions.SERVER_TIMEOUT_HEADER));
+    assertEquals(9, noAuthHeaders.size());
   }
 
   @Test
@@ -332,18 +334,22 @@ public class AlternatorConfigHeadersTest {
             .withCompressionAlgorithm(RequestCompressionAlgorithm.NONE)
             .authenticationEnabled(false)
             .build();
-    assertEquals(6, noCompressionNoAuth.getRequiredHeaders().size());
+    assertEquals(7, noCompressionNoAuth.getRequiredHeaders().size());
     assertFalse(noCompressionNoAuth.getRequiredHeaders().contains("Content-Encoding"));
     assertFalse(noCompressionNoAuth.getRequiredHeaders().contains("Accept-Encoding"));
     assertFalse(noCompressionNoAuth.getRequiredHeaders().contains("Authorization"));
     assertTrue(noCompressionNoAuth.getRequiredHeaders().contains("User-Agent"));
+    assertTrue(
+        noCompressionNoAuth
+            .getRequiredHeaders()
+            .contains(AlternatorRequestOptions.SERVER_TIMEOUT_HEADER));
 
     AlternatorConfig withCompressionNoAuth =
         AlternatorConfig.builder()
             .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
             .authenticationEnabled(false)
             .build();
-    assertEquals(7, withCompressionNoAuth.getRequiredHeaders().size());
+    assertEquals(8, withCompressionNoAuth.getRequiredHeaders().size());
     assertTrue(withCompressionNoAuth.getRequiredHeaders().contains("Content-Encoding"));
     assertFalse(withCompressionNoAuth.getRequiredHeaders().contains("Accept-Encoding"));
     assertFalse(withCompressionNoAuth.getRequiredHeaders().contains("Authorization"));
@@ -353,7 +359,7 @@ public class AlternatorConfigHeadersTest {
             .withCompressionAlgorithm(RequestCompressionAlgorithm.NONE)
             .authenticationEnabled(true)
             .build();
-    assertEquals(8, noCompressionWithAuth.getRequiredHeaders().size());
+    assertEquals(9, noCompressionWithAuth.getRequiredHeaders().size());
     assertFalse(noCompressionWithAuth.getRequiredHeaders().contains("Content-Encoding"));
     assertFalse(noCompressionWithAuth.getRequiredHeaders().contains("Accept-Encoding"));
     assertTrue(noCompressionWithAuth.getRequiredHeaders().contains("Authorization"));
@@ -363,7 +369,7 @@ public class AlternatorConfigHeadersTest {
             .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
             .authenticationEnabled(true)
             .build();
-    assertEquals(9, withCompressionWithAuth.getRequiredHeaders().size());
+    assertEquals(10, withCompressionWithAuth.getRequiredHeaders().size());
     assertTrue(withCompressionWithAuth.getRequiredHeaders().contains("Content-Encoding"));
     assertFalse(withCompressionWithAuth.getRequiredHeaders().contains("Accept-Encoding"));
     assertTrue(withCompressionWithAuth.getRequiredHeaders().contains("Authorization"));
@@ -375,23 +381,24 @@ public class AlternatorConfigHeadersTest {
     AlternatorConfig.Builder builder = AlternatorConfig.builder();
     Set<String> defaultRequired = builder.getRequiredHeaders();
     // Default is no compression, with auth
-    assertEquals(8, defaultRequired.size());
+    assertEquals(9, defaultRequired.size());
     assertFalse(defaultRequired.contains("Content-Encoding"));
     assertFalse(defaultRequired.contains("Accept-Encoding"));
     assertTrue(defaultRequired.contains("Authorization"));
     assertTrue(defaultRequired.contains("User-Agent"));
+    assertTrue(defaultRequired.contains(AlternatorRequestOptions.SERVER_TIMEOUT_HEADER));
 
     // Enable request compression
     builder.withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP);
     Set<String> withCompression = builder.getRequiredHeaders();
-    assertEquals(9, withCompression.size());
+    assertEquals(10, withCompression.size());
     assertTrue(withCompression.contains("Content-Encoding"));
     assertFalse(withCompression.contains("Accept-Encoding"));
 
     // Disable auth
     builder.authenticationEnabled(false);
     Set<String> noAuth = builder.getRequiredHeaders();
-    assertEquals(7, noAuth.size());
+    assertEquals(8, noAuth.size());
     assertTrue(noAuth.contains("Content-Encoding"));
     assertFalse(noAuth.contains("Accept-Encoding"));
     assertFalse(noAuth.contains("Authorization"));
@@ -399,7 +406,7 @@ public class AlternatorConfigHeadersTest {
     // Enable response compression
     builder.withResponseCompression(ResponseCompressionAlgorithm.GZIP);
     Set<String> withResponseCompression = builder.getRequiredHeaders();
-    assertEquals(8, withResponseCompression.size());
+    assertEquals(9, withResponseCompression.size());
     assertTrue(withResponseCompression.contains("Content-Encoding"));
     assertTrue(withResponseCompression.contains("Accept-Encoding"));
     assertFalse(withResponseCompression.contains("Authorization"));
@@ -414,11 +421,27 @@ public class AlternatorConfigHeadersTest {
             .build();
 
     Set<String> required = config.getRequiredHeaders();
-    assertEquals(9, required.size());
+    assertEquals(10, required.size());
     assertTrue(required.contains("Content-Encoding"));
     assertFalse(required.contains("Accept-Encoding"));
     assertTrue(required.contains("Authorization"));
     assertTrue(required.contains("User-Agent"));
+    assertTrue(required.contains(AlternatorRequestOptions.SERVER_TIMEOUT_HEADER));
+  }
+
+  @Test
+  public void testCustomWhitelistAddsServerTimeoutHeaderForCompatibility() {
+    Set<String> whitelist = new HashSet<>(AlternatorConfig.builder().getRequiredHeaders());
+    whitelist.remove(AlternatorRequestOptions.SERVER_TIMEOUT_HEADER);
+
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withOptimizeHeaders(true)
+            .withHeadersWhitelist(whitelist)
+            .build();
+
+    assertTrue(
+        config.getHeadersWhitelist().contains(AlternatorRequestOptions.SERVER_TIMEOUT_HEADER));
   }
 
   @Test(expected = IllegalArgumentException.class)

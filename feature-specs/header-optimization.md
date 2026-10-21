@@ -21,7 +21,7 @@ or transport lifecycle.
 | Header optimization | Removal of non-whitelisted outgoing HTTP headers immediately before transport execution. |
 | Whitelist | Case-insensitive set of header names allowed on the wire. |
 | Required headers | Minimum whitelist derived from enabled client features. |
-| Base headers | Headers required for every Alternator request. |
+| Base headers | Headers that must remain eligible for every Alternator request. |
 | Conditional headers | Headers required only when authentication, compression, or user-agent reporting is enabled. |
 | Main transport | Transport used for DynamoDB data-plane operations. |
 | Polling transport | Transport used for topology discovery and health probes. |
@@ -29,9 +29,11 @@ or transport lifecycle.
 ## Configuration and defaults
 
 Header optimization is disabled by default. An optional custom whitelist replaces the computed
-default and may add application-specific headers. A custom whitelist must be non-null, non-empty,
-contain only non-null and non-empty header names, and contain the complete required set for the
-final configuration. The machine-readable default is recorded in
+default and may add application-specific headers. Client-managed request-option headers are added
+to either form automatically so a new request option does not invalidate an older custom
+whitelist. A custom whitelist must be non-null, non-empty, contain only non-null and non-empty
+header names, and contain the remaining required set for the final configuration. The
+machine-readable default is recorded in
 [`defaults.tsv`](vectors/defaults.tsv).
 
 Validation must be case-insensitive and independent of process locale. It must occur after all
@@ -62,7 +64,7 @@ Whitelist membership is by header name, not by value.
 
 The effective default whitelist is the union of the applicable sets below.
 
-#### Always required
+#### Always eligible
 
 | Header | Purpose |
 | --- | --- |
@@ -71,6 +73,7 @@ The effective default whitelist is the union of the applicable sets below.
 | `Content-Type` | DynamoDB protocol media type. |
 | `Content-Length` | Request-body framing. |
 | `Connection` | Explicit connection reuse behavior. |
+| `X-Scylla-Timeout` | Optional per-request server timeout. |
 
 #### Conditionally required
 
@@ -105,6 +108,14 @@ Changing either setting changes the computed minimum whitelist. See [Compression
 If user-agent reporting is enabled, `User-Agent` must reach the wire even when filtering is enabled.
 If reporting is disabled, it is not required and must not be reintroduced by wrapper ordering.
 
+### Request timeout
+
+The per-request timeout header must remain in the effective whitelist even when no request has yet
+selected a timeout. Client construction cannot know which later operation requests will select the
+option. The client must add this managed header to a custom whitelist automatically; callers need
+not update an existing whitelist. The header must remain absent from requests that do not select a
+timeout. See [Request timeout](request-timeout.md).
+
 ### Query plans and retries
 
 Per-attempt routing may depend on internal execution identifiers present before filtering. Routing
@@ -135,6 +146,8 @@ cancellation and error behavior.
 
 - Enabling request compression with a custom whitelist lacking `Content-Encoding` must fail.
 - Enabling response compression with a custom whitelist lacking `Accept-Encoding` must fail.
+- A custom whitelist lacking a client-managed request-option header must remain valid, and the
+  effective whitelist must add that header automatically.
 - Disabling response compression makes a whitelist without `Accept-Encoding` valid.
 - Disabling user-agent reporting makes a whitelist without `User-Agent` valid.
 - Disabling authentication makes a whitelist without authentication headers valid.
@@ -142,6 +155,7 @@ cancellation and error behavior.
 - Route changes must update the effective destination before filtering without losing required
   `Host` behavior.
 - Compression and signing may replace headers; filtering must inspect final values on every attempt.
+- A configured per-request timeout must retain the same header value on every retry attempt.
 - Closing the filtering wrapper must close its wrapped main transport according to normal ownership
   rules.
 
@@ -169,8 +183,9 @@ headers required by authentication and signing.
 
 ### HEAD-REQ-003: Custom whitelist safety
 
-Custom whitelists must be validated after final configuration, copied immutably, and rejected when
-null, empty, malformed, or incomplete.
+Custom whitelists must be augmented with client-managed request-option headers, validated after
+final configuration, copied immutably, and rejected when null, empty, malformed, or otherwise
+incomplete.
 
 ### HEAD-REQ-004: Feature ordering
 

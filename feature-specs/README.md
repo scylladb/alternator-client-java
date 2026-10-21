@@ -53,6 +53,7 @@ Every behavior change should:
 | Key-route affinity | [Key-route affinity](key-route-affinity.md) | [Implementation details](implementation/key-route-affinity.md) |
 | Node health | [Node health](node-health.md) | [Implementation details](implementation/node-health.md) |
 | Query plans | [Query plans](query-plan.md) | [Implementation details](implementation/query-plan.md) |
+| Request timeout | [Request timeout](request-timeout.md) | [Implementation details](implementation/request-timeout.md) |
 
 ## Structured contract data
 
