@@ -20,11 +20,13 @@ Never upload the full primary private-key backup to CI. Packages, release commit
 and annotated release tags use the same signing subkey, selected by its complete
 fingerprint with `!`. The primary key certifies the signing subkey and remains offline.
 
-The `release-prepare`, `release`, and `release-dry-run` Make targets automatically
-require the GitHub user `scylladb-publisher` before importing credentials or changing
-the checkout. Locally, the check uses the active `gh` account; switch accounts with
-`gh auth switch` if needed. Actions checks the triggering actor, including on reruns.
-Dry runs and internal release recipes enforce the same account requirement.
+Locally, the `release-prepare`, `release`, and `release-dry-run` Make targets
+require the active `gh` account to be `scylladb-publisher` before importing
+credentials or changing the checkout; switch accounts with `gh auth switch` if
+needed. Local dry runs and internal release recipes enforce the same account
+requirement. In Actions, the protected `release` environment authorizes operators,
+including dry runs and reruns. The triggering actor need not be the publisher
+account: signing still uses the repository's pinned publisher subkey and identity.
 
 Each target runs its Maven commands in a scoped `signing.py exec` session. The
 session imports only the protected signing-subkey export, checks that primary

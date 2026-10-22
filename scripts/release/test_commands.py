@@ -56,8 +56,8 @@ class ReleaseCommandTests(unittest.TestCase):
             RELEASE_VERSION="",
             IS_CICD="true",
             GITHUB_ACTIONS="true",
-            GITHUB_ACTOR="scylladb-publisher",
-            GITHUB_TRIGGERING_ACTOR="scylladb-publisher",
+            GITHUB_ACTOR="release-operator",
+            GITHUB_TRIGGERING_ACTOR="rerun-operator",
             RELEASE_SIGNING_HELPER=str(helper),
         )
         return root, env
@@ -287,7 +287,6 @@ class ReleaseCommandTests(unittest.TestCase):
         self.assertLess(workflow.index("Checkout release target"), workflow.index("Check release credential safety"))
         self.assertLess(workflow.index("Check release credential safety"), workflow.index("RELEASE_GPG_PRIVATE_KEY:"))
         self.assertNotIn("gpg-private-key:", workflow)
-        self.assertLess(workflow.index("Require publisher account"), workflow.index("Checkout release target"))
         self.assertLess(workflow.index("Push changes to SCM"), workflow.index("Upload sanitized stdout"))
         self.assertIn('git checkout "refs/tags/$RELEASE_TARGET_TAG~1"', workflow)
         self.assertIn("default: main", workflow)

@@ -59,9 +59,6 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      - name: Require publisher account
-        run: make release-check-user
-
       - name: Preserve release guard
         env:
           RELEASE_TARGET_TAG: ${{ inputs.target-tag }}
