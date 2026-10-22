@@ -1,5 +1,6 @@
 SHELL := bash
 RELEASE_GUARD ?= scripts/release/guard.py
+RELEASE_SIGNING_HELPER ?= $(dir $(RELEASE_GUARD))signing.py
 .ONESHELL:
 .SHELLFLAGS := -eo pipefail -c
 
@@ -10,6 +11,7 @@ ifdef IS_CICD
 endif
 
 MAKEFILE_PATH := $(abspath $(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
+RELEASE_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
 BIN := $(MAKEFILE_PATH)/bin
 
 SCYLLA_CCM_COMMIT := d15a2fab9d22fffad8a30c806a7c8e1632e58aae
@@ -32,6 +34,7 @@ RELEASE_TARGET_TAG ?=
 RELEASE_VERSION ?=
 
 .PHONY: clean verify lint lint-specs lint-docs lint-fix compile compile-test compile-demo test-unit test-integration test-all ccm-install release-prepare release release-dry-run checkout-one-commit-before
+.PHONY: release-check-user test-release-signing _release-prepare _release _release-dry-run
 
 clean:
 	${mvn} clean
@@ -143,7 +146,39 @@ ccm-install:
 	mv -fT -- "$$temporary_marker" "$(SCYLLA_CCM_INSTALL_MARKER)"
 	echo "Using CCM executable: $(PINNED_SCYLLA_CCM_PATH)"
 
-release-prepare:
+release-check-user:
+	@set -eu
+	if [ "$${GITHUB_ACTIONS:-}" = true ]; then
+		user=$${GITHUB_TRIGGERING_ACTOR:-$${GITHUB_ACTOR:-}}
+	else
+		if ! user=$$(gh api user --jq .login); then
+			echo "Release requires GitHub user scylladb-publisher. Run gh auth login or gh auth switch." >&2
+			exit 1
+		fi
+	fi
+	if [ "$$user" != scylladb-publisher ]; then
+		echo "Release requires GitHub user scylladb-publisher (current: $$user)." >&2
+		exit 1
+	fi
+
+release-prepare: release-check-user
+	@python3 "$(RELEASE_GUARD)" check
+	+@python3 "$(RELEASE_SIGNING_HELPER)" exec $(MAKE) -f "$(RELEASE_MAKEFILE)" _release-prepare
+
+release: release-check-user
+	@python3 "$(RELEASE_GUARD)" check
+	@python3 "$(RELEASE_SIGNING_HELPER)" verify-prepared
+	+@python3 "$(RELEASE_SIGNING_HELPER)" exec $(MAKE) -f "$(RELEASE_MAKEFILE)" _release
+
+release-dry-run: release-check-user
+	@python3 "$(RELEASE_GUARD)" check
+	@python3 "$(RELEASE_SIGNING_HELPER)" verify-prepared
+	+@python3 "$(RELEASE_SIGNING_HELPER)" exec $(MAKE) -f "$(RELEASE_MAKEFILE)" _release-dry-run
+
+test-release-signing:
+	python3 -m unittest discover -s scripts/release -p 'test_signing.py' -v
+
+_release-prepare: release-check-user
 	@if [[ -z "$${MAVEN_GPG_PASSPHRASE}" ]]; then
 		echo "MAVEN_GPG_PASSPHRASE is empty, can't continue"
 		exit 1
@@ -156,9 +191,11 @@ release-prepare:
 		NEXT_RELEASE=("-DreleaseVersion=$${RELEASE_VERSION}")
 	fi
 	export MAVEN_OPTS
+	baseline=$$(git rev-parse HEAD)
 	python3 "$(RELEASE_GUARD)" run ${mvn} -B release:prepare -DpushChanges=false "$${NEXT_RELEASE[@]}"
+	python3 "$(RELEASE_SIGNING_HELPER)" verify-prepared "$$baseline"
 
-release:
+_release: release-check-user
 	@if [[ -z "$${MAVEN_GPG_PASSPHRASE}" ]]; then
 		echo "MAVEN_GPG_PASSPHRASE is empty, can't continue"
 		exit 1
@@ -168,7 +205,7 @@ release:
 	fi
 	python3 "$(RELEASE_GUARD)" run ${mvn} -B release:perform -Drelease.autopublish=true
 
-release-dry-run:
+_release-dry-run: release-check-user
 	@if [[ -z "$${MAVEN_GPG_PASSPHRASE}" ]]; then
 		echo "MAVEN_GPG_PASSPHRASE is empty, can't continue"
 		exit 1
@@ -178,7 +215,7 @@ release-dry-run:
 	fi
 	python3 "$(RELEASE_GUARD)" run ${mvn} -B release:perform
 
-checkout-one-commit-before:
+checkout-one-commit-before: release-check-user
 	@if [[ "${RELEASE_TARGET_TAG}" == 3.* ]]; then
 		echo "Checking out one commit before ${RELEASE_TARGET_TAG}"
 		cp -f Makefile /tmp/tmp-Makefile

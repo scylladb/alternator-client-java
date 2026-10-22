@@ -25,12 +25,24 @@ class ReleaseCommandTests(unittest.TestCase):
             "with open(os.environ['FAKE_MAVEN_TRACE'], 'a') as trace:\n"
             " trace.write(json.dumps({'args': sys.argv[1:], "
             "'passphrase': os.environ['MAVEN_GPG_PASSPHRASE'], "
-            "'opts': os.environ.get('MAVEN_OPTS', ''), 'cwd': os.getcwd()}) + '\\n')\n"
+            "'opts': os.environ.get('MAVEN_OPTS', ''), 'cwd': os.getcwd(), "
+            "'baseline': os.environ.get('RELEASE_BASE_COMMIT', '')}) + '\\n')\n"
             "print('stdout: ' + os.environ['MAVEN_GPG_PASSPHRASE'])\n"
             "print('stderr: ' + os.environ['MAVEN_GPG_PASSPHRASE'], file=sys.stderr)\n"
             "raise SystemExit(int(os.environ.get('FAKE_MAVEN_STATUS', '0')))\n"
         )
         binary.chmod(0o755)
+        helper = root / "signing.py"
+        helper.write_text(
+            "import os, pathlib, subprocess, sys\n"
+            "if 'FAKE_PUBLISHER_CERT' in os.environ:\n"
+            " assert pathlib.Path(__file__).with_name('publisher.asc').read_text() "
+            "== os.environ['FAKE_PUBLISHER_CERT']\n"
+            "if 'FAKE_RELEASE_BASE' in os.environ:\n"
+            " assert os.environ.get('RELEASE_BASE_COMMIT') == os.environ['FAKE_RELEASE_BASE']\n"
+            "if sys.argv[1] == 'exec':\n"
+            " raise SystemExit(subprocess.run(sys.argv[2:]).returncode)\n"
+        )
         env = {key: value for key, value in os.environ.items() if key not in guard.ENV_OPTIONS}
         env.update(
             PATH=str(root) + os.pathsep + env.get("PATH", ""),
@@ -43,6 +55,10 @@ class ReleaseCommandTests(unittest.TestCase):
             RELEASE_SKIP_TESTS="false",
             RELEASE_VERSION="",
             IS_CICD="true",
+            GITHUB_ACTIONS="true",
+            GITHUB_ACTOR="scylladb-publisher",
+            GITHUB_TRIGGERING_ACTOR="scylladb-publisher",
+            RELEASE_SIGNING_HELPER=str(helper),
         )
         return root, env
 
@@ -73,6 +89,24 @@ class ReleaseCommandTests(unittest.TestCase):
             self.assertEqual((root / "logs/stdout.log").read_text(), "stdout: [REDACTED]\n" * 3)
             self.assertEqual((root / "logs/stderr.log").read_text(), "stderr: [REDACTED]\n" * 3)
 
+    def test_public_key_selection_preserves_literal_jvm_options_for_every_release_phase(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, env = self.fake_environment(directory)
+            key_option = "-Dgpg.keyname=" + "A" * 40 + "!"
+            marker = root / "must-not-exist"
+            env["MAVEN_OPTS"] = (
+                "-Xmx512m -Dhome=$HOME -Dbraced=${HOME} "
+                f"'-Dmake=$(shell touch {marker})' " + key_option
+            )
+            for target in ("release-prepare", "release", "release-dry-run"):
+                result = self.run_make(target, env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+            calls = [json.loads(line) for line in (root / "trace.jsonl").read_text().splitlines()]
+            self.assertEqual(len(calls), 3)
+            for call in calls:
+                self.assertEqual(call["opts"], env["MAVEN_OPTS"])
+            self.assertFalse(marker.exists())
+
     def test_main_release_rejects_other_dispatch_refs_before_preserving_guard(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         command = next(script for script in guard.workflow_commands(workflow)
@@ -96,17 +130,27 @@ class ReleaseCommandTests(unittest.TestCase):
                     )
                     self.assertEqual(result.returncode == 0, accepted, result.stderr)
                     self.assertEqual((runner / "release-safety").exists(), accepted)
+                    if accepted:
+                        for filename in ("signing.py", "publisher.asc"):
+                            self.assertEqual(
+                                (runner / "release-safety" / filename).read_bytes(),
+                                (ROOT / "scripts/release" / filename).read_bytes(),
+                            )
 
     def test_workflow_uses_preserved_recipes_in_target_checkout(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         commands = [script.strip() for script in guard.workflow_commands(workflow)
-                    if script.strip().startswith("make -f ")]
-        self.assertEqual(len(commands), 3)
+                    if 'make -f "$RUNNER_TEMP/release-safety/Makefile"' in script
+                    or script.strip().startswith(
+                        'python3 "$RUNNER_TEMP/release-safety/signing.py" verify-prepared')]
+        self.assertEqual(len(commands), 4)
         with tempfile.TemporaryDirectory() as directory:
             root, env = self.fake_environment(directory)
             target = root / "target-checkout"
             target.mkdir()
-            (target / "pom.xml").write_text("historical target POM")
+            shutil.copy2(ROOT / "pom.xml", target / "pom.xml")
+            shutil.copytree(ROOT / ".github", target / ".github")
+            original_pom = (target / "pom.xml").read_text()
             marker = target / "unsafe-target-executed"
             # Any read of target Makefiles, including parse-time shell execution,
             # would create the marker and expose the passphrase before capture.
@@ -114,13 +158,28 @@ class ReleaseCommandTests(unittest.TestCase):
                       "override RELEASE_GUARD := unsafe.py\n"
                       "release-prepare release release-dry-run:\n"
                       "\techo $${MAVEN_GPG_PASSPHRASE}\n")
-            for name in ("Makefile", "GNUmakefile"):
-                (target / name).write_text(unsafe)
+            (target / "GNUmakefile").write_text(unsafe)
+            (target / "Makefile").write_text(
+                'release-prepare release release-dry-run:\n\ttouch "' + str(marker) + '"\n')
+            (target / "scripts/release").mkdir(parents=True)
+            (target / "scripts/release/signing.py").write_text(
+                f"from pathlib import Path\nPath({str(marker)!r}).touch()\nraise SystemExit(1)\n")
+            (target / "scripts/release/publisher.asc").write_text("unsafe-target-certificate\n")
+            subprocess.run(["git", "init", "--quiet", str(target)], check=True, capture_output=True)
+            subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                            "-c", "commit.gpgsign=false", "commit", "--quiet", "--allow-empty", "-m", "Fixture"],
+                           cwd=target, check=True, capture_output=True)
+            baseline = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=target, text=True).strip()
             preserved = root / "release-safety"
             preserved.mkdir()
             shutil.copy2(ROOT / "Makefile", preserved / "Makefile")
             shutil.copy2(ROOT / "scripts/release/guard.py", preserved / "guard.py")
-            env.update(RUNNER_TEMP=str(root), RELEASE_GUARD=str(target / "unsafe.py"))
+            shutil.copy2(env.pop("RELEASE_SIGNING_HELPER"), preserved / "signing.py")
+            shutil.copy2(ROOT / "scripts/release/publisher.asc", preserved / "publisher.asc")
+            env["FAKE_PUBLISHER_CERT"] = (preserved / "publisher.asc").read_text()
+            env.update(RUNNER_TEMP=str(root), RELEASE_GUARD=str(target / "unsafe.py"),
+                       GITHUB_ENV=str(root / "github-env"), FAKE_RELEASE_BASE=baseline)
             for command in commands:
                 result = subprocess.run(
                     ["bash", "-eo", "pipefail", "-c", command], cwd=target, env=env,
@@ -129,10 +188,15 @@ class ReleaseCommandTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertNotIn(env["MAVEN_GPG_PASSPHRASE"], result.stdout + result.stderr)
                 self.assertFalse(marker.exists())
+                # Actions makes public GITHUB_ENV values available to later steps.
+                public_state = (root / "github-env").read_text()
+                self.assertEqual(public_state, f"RELEASE_BASE_COMMIT={baseline}\n")
+                env["RELEASE_BASE_COMMIT"] = public_state.strip().split("=", 1)[1]
             calls = [json.loads(line) for line in (root / "trace.jsonl").read_text().splitlines()]
             self.assertEqual(len(calls), 3)
             self.assertTrue(all(call["cwd"] == str(target) for call in calls))
-            self.assertEqual((target / "pom.xml").read_text(), "historical target POM")
+            self.assertTrue(all(call["baseline"] == baseline for call in calls))
+            self.assertEqual((target / "pom.xml").read_text(), original_pom)
             for name in ("stdout", "stderr"):
                 output = (root / f"logs/{name}.log").read_text()
                 self.assertNotIn(env["MAVEN_GPG_PASSPHRASE"], output)
@@ -221,11 +285,14 @@ class ReleaseCommandTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         self.assertLess(workflow.index("Preserve release guard"), workflow.index("Checkout release target"))
         self.assertLess(workflow.index("Checkout release target"), workflow.index("Check release credential safety"))
-        self.assertLess(workflow.index("Check release credential safety"), workflow.index("gpg-private-key:"))
+        self.assertLess(workflow.index("Check release credential safety"), workflow.index("RELEASE_GPG_PRIVATE_KEY:"))
+        self.assertNotIn("gpg-private-key:", workflow)
+        self.assertLess(workflow.index("Require publisher account"), workflow.index("Checkout release target"))
         self.assertLess(workflow.index("Push changes to SCM"), workflow.index("Upload sanitized stdout"))
         self.assertIn('git checkout "refs/tags/$RELEASE_TARGET_TAG~1"', workflow)
         self.assertIn("default: main", workflow)
         self.assertEqual(workflow.count("if: always()"), 2)
+        self.assertRegex(workflow, r"(?m)^    environment: release$")
 
 
 if __name__ == "__main__":

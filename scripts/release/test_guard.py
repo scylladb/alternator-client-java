@@ -38,6 +38,26 @@ class ReleaseTests(unittest.TestCase):
     def test_repository_defaults(self):
         guard.check_policy(ROOT)
 
+    def test_release_account_and_baseline_lookups_allow_only_fixed_commands(self):
+        guard.check_maven_capture('if ! user=$(gh api user --jq .login); then')
+        guard.check_maven_capture('baseline=$(git rev-parse HEAD)')
+        for command in (
+            'if ! user=$(gh api user --jq "$(mvn release:perform)"); then',
+            'if ! user=$(gh api user --jq .login; mvn release:perform); then',
+            'baseline=$(git rev-parse HEAD; mvn release:perform)',
+        ):
+            with self.subTest(command=command), self.assertRaises(guard.Unsafe):
+                guard.check_maven_capture(command)
+
+    def test_internal_release_recipes_require_sanitized_capture(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copytree(ROOT / ".github", root / ".github")
+            shutil.copy(ROOT / "pom.xml", root / "pom.xml")
+            (root / "Makefile").write_text('_release:\n\tmvn deploy\n')
+            with self.assertRaisesRegex(guard.Unsafe, "sanitized log capture"):
+                guard.check_policy(root)
+
     def test_sourced_release_scripts_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -260,9 +260,10 @@ def check_maven_capture(command, require_capture=False, make_variables=False):
         # as a command substitution and must not be normalized away.
         command = re.sub(r"(?<!\$)\$\((\w+)\)", r"${\1}", command)
     command = command.replace("$$", "$")
-    # Allow only the existing blocker lookup, with fixed arguments and jq text.
+    # Allow only these fixed Git/blocker lookups, with fixed arguments and jq text.
     # Matching the whole assignment prevents nested shell commands hiding in it.
     for assignment in (
+        'baseline=$(git rev-parse HEAD)',
         'blocker=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open '
         '--label release-blocker --limit 1 --json title,url --jq \'.[0] // empty\')',
         'blocker_title=$(jq -r \'.title\' <<< "$blocker")',
@@ -270,6 +271,10 @@ def check_maven_capture(command, require_capture=False, make_variables=False):
     ):
         command = re.sub(r'(?m)^[ \t]*' + re.escape(assignment).replace(r'\ ', r'[ \t]+') + r'[ \t]*$',
                          'blocker=""', command)
+    command = re.sub(
+        r'(?m)^[ \t]*if ! user=\$\(gh api user --jq \.login\); then[ \t]*$',
+        'if ! user=; then', command,
+    )
     # These fixed, quoted array assignments belong to the current prepare recipe.
     # No target-supplied shell fragment is evaluated while checking them.
     command = re.sub(r'(?m)^[ \t]*NEXT_RELEASE=\(\)[ \t]*$', 'NEXT_RELEASE=', command)
@@ -486,11 +491,11 @@ def check_policy(root):
                     check_maven_capture(line.lstrip().lstrip("@+-"), require_capture=release_target, make_variables=True)
             elif re.match(r"^[^#:=\s][^:=]*:(?!=)", line):
                 release_target = any(
-                    re.fullmatch(r"\.?release(?:-[\w-]+)?", target)
+                    re.fullmatch(r"[._]?release(?:-[\w-]+)?", target)
                     for target in line.split(":", 1)[0].split()
                 )
                 prerequisites, separator, recipe = line.split(":", 1)[1].partition(";")
-                if release_target and prerequisites.strip():
+                if release_target and prerequisites.strip() not in ("", "release-check-user"):
                     raise Unsafe("release target prerequisites are unsupported")
                 if separator:
                     check_maven_capture(recipe.lstrip().lstrip("@+-"),

@@ -22,3 +22,6 @@ claude.log
 claude_history.json
 claude_config.json
 CLAUDE.md
+
+# Python release-helper caches
+__pycache__/
