@@ -587,7 +587,8 @@ class SigningTests(unittest.TestCase):
             ]) + "\n")
             maven.chmod(0o700)
             os.environ.update(PATH=str(tools) + os.pathsep + os.environ["PATH"],
-                              GITHUB_ACTIONS="true", GITHUB_ACTOR="scylladb-publisher",
+                              GITHUB_ACTIONS="true", GITHUB_ACTOR="release-operator",
+                              GITHUB_TRIGGERING_ACTOR="rerun-operator",
                               TEST_SIGNING_KEY=self.subkey, RELEASE_LOG_DIR=str(directory / "logs"))
             signing.run(["git", "add", "."])
             signing.run(["git", "-c", "user.name=Initial", "-c", "user.email=initial@example.invalid",
@@ -723,17 +724,39 @@ class DiagnosticTests(unittest.TestCase):
 
 
 class ReleaseUserTests(unittest.TestCase):
-    def test_release_commands_automatically_reject_other_users(self):
-        for target in ["release-prepare", "release", "release-dry-run", "checkout-one-commit-before",
-                       "_release-prepare", "_release", "_release-dry-run"]:
-            with self.subTest(target=target):
-                result = subprocess.run(["make", target], cwd=ROOT, capture_output=True, text=True, timeout=60,
-                                        env={**os.environ, "GITHUB_ACTIONS": "true",
-                                             "GITHUB_ACTOR": "scylladb-publisher",
-                                             "GITHUB_TRIGGERING_ACTOR": "someone-else"})
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("Release requires GitHub user scylladb-publisher", result.stderr)
-                self.assertNotIn("signing.py exec", result.stdout)
+    def test_actions_accepts_workflow_actors_without_local_gh_authentication(self):
+        with tempfile.TemporaryDirectory() as temp:
+            gh = Path(temp) / "gh"
+            gh.write_text("#!/bin/sh\nexit 99\n")
+            gh.chmod(0o700)
+            for actor, triggering_actor in [("release-operator", "release-operator"),
+                                            ("scylladb-publisher", "rerun-operator"),
+                                            ("release-operator", "")]:
+                with self.subTest(actor=actor, triggering_actor=triggering_actor):
+                    result = subprocess.run(
+                        ["make", "release-check-user"], cwd=ROOT, capture_output=True, text=True, timeout=60,
+                        env={**os.environ, "PATH": temp + os.pathsep + os.environ["PATH"],
+                             "GITHUB_ACTIONS": "true", "GITHUB_ACTOR": actor,
+                             "GITHUB_TRIGGERING_ACTOR": triggering_actor},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_local_release_commands_automatically_reject_other_users(self):
+        with tempfile.TemporaryDirectory() as temp:
+            gh = Path(temp) / "gh"
+            gh.write_text("#!/bin/sh\nprintf '%s\\n' someone-else\n")
+            gh.chmod(0o700)
+            for target in ["release-prepare", "release", "release-dry-run", "checkout-one-commit-before",
+                           "_release-prepare", "_release", "_release-dry-run"]:
+                with self.subTest(target=target):
+                    result = subprocess.run(
+                        ["make", target], cwd=ROOT, capture_output=True, text=True, timeout=60,
+                        env={**os.environ, "PATH": temp + os.pathsep + os.environ["PATH"],
+                             "GITHUB_ACTIONS": "false"},
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("Release requires GitHub user scylladb-publisher", result.stderr)
+                    self.assertNotIn("signing.py exec", result.stdout)
 
     def test_local_release_uses_authenticated_gh_user(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -149,12 +149,12 @@ ccm-install:
 release-check-user:
 	@set -eu
 	if [ "$${GITHUB_ACTIONS:-}" = true ]; then
-		user=$${GITHUB_TRIGGERING_ACTOR:-$${GITHUB_ACTOR:-}}
-	else
-		if ! user=$$(gh api user --jq .login); then
-			echo "Release requires GitHub user scylladb-publisher. Run gh auth login or gh auth switch." >&2
-			exit 1
-		fi
+		# The release environment authorizes workflow operators independently of the signer.
+		exit 0
+	fi
+	if ! user=$$(gh api user --jq .login); then
+		echo "Release requires GitHub user scylladb-publisher. Run gh auth login or gh auth switch." >&2
+		exit 1
 	fi
 	if [ "$$user" != scylladb-publisher ]; then
 		echo "Release requires GitHub user scylladb-publisher (current: $$user)." >&2
