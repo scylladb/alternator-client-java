@@ -290,8 +290,139 @@ class ReleaseCommandTests(unittest.TestCase):
         self.assertLess(workflow.index("Push changes to SCM"), workflow.index("Upload sanitized stdout"))
         self.assertIn('git checkout "refs/tags/$RELEASE_TARGET_TAG~1"', workflow)
         self.assertIn("default: main", workflow)
-        self.assertEqual(workflow.count("if: always()"), 2)
+        self.assertEqual(workflow.count("if: always()"), 4)
         self.assertRegex(workflow, r"(?m)^    environment: release$")
+
+    def test_validation_precedes_approval_on_a_separate_runner_without_release_secrets(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        validation, release = workflow.split("\n  release:\n", 1)
+        release_header = release.split("    steps:", 1)[0]
+        self.assertIn("\n  validate:\n", validation)
+        self.assertIn("    runs-on: ubuntu-latest\n", validation)
+        self.assertNotIn("environment:", validation)
+        self.assertNotIn("secrets.", validation)
+        self.assertIn("      contents: read\n", validation)
+        self.assertNotIn("contents: write", validation)
+        self.assertIn("    needs: validate\n", release_header)
+        self.assertIn("    runs-on: ubuntu-latest\n", release_header)
+        self.assertIn("    environment: release\n", release_header)
+        self.assertNotRegex(release_header, r"(?m)^    if:")
+        self.assertIn("RELEASE_TARGET_COMMIT: ${{ needs.validate.outputs.target-sha }}", release)
+        self.assertNotIn("cache: maven", release)
+        self.assertEqual(release.count("RELEASE_SKIP_TESTS: 'true'"), 3)
+        self.assertIn("python3 -m unittest discover", validation)
+
+    def test_validation_builds_unsigned_release_artifacts_without_deployment(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        command = next(script for script in guard.workflow_commands(workflow)
+                       if "-Dgpg.skip=true verify" in script)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            maven = root / "mvn"
+            maven.write_text(
+                f"#!{sys.executable}\n"
+                "import json, os, sys\n"
+                "from pathlib import Path\n"
+                "assert not any(os.environ.get(key) for key in "
+                "('RELEASE_GPG_PRIVATE_KEY', 'MAVEN_GPG_PASSPHRASE', "
+                "'SONATYPE_TOKEN_USERNAME', 'SONATYPE_TOKEN_PASSWORD'))\n"
+                "Path(os.environ['TRACE']).write_text(json.dumps("
+                "{'args': sys.argv[1:], 'opts': os.environ.get('MAVEN_OPTS', '')}))\n"
+            )
+            maven.chmod(0o700)
+            env = {key: value for key, value in os.environ.items()
+                   if not key.startswith("RELEASE_") and key not in guard.ENV_OPTIONS
+                   and key not in ("MAVEN_GPG_PASSPHRASE", "SONATYPE_TOKEN_USERNAME",
+                                   "SONATYPE_TOKEN_PASSWORD")}
+            env.update(PATH=str(root) + os.pathsep + os.environ["PATH"],
+                       RELEASE_GUARD=str(ROOT / "scripts/release/guard.py"),
+                       RELEASE_LOG_DIR=str(root / "logs"), TRACE=str(root / "trace"))
+            for skip in ("false", "true"):
+                with self.subTest(skip=skip):
+                    result = subprocess.run(
+                        ["bash", "-eo", "pipefail", "-c", command], cwd=ROOT,
+                        env={**env, "RELEASE_SKIP_TESTS": skip},
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    call = json.loads((root / "trace").read_text())
+                    self.assertEqual(call["args"], ["-B", "--no-transfer-progress", "-Prelease",
+                                                    "-Dgpg.skip=true", "verify"])
+                    self.assertEqual("-DskipTests=true" in call["opts"], skip == "true")
+
+    def target_fixture(self, root):
+        source = root / "source"
+        source.mkdir()
+        self.git(source, "init", "--quiet", "--initial-branch=main")
+        commits = []
+        for version in ("initial", "release", "development"):
+            (source / "version").write_text(version)
+            self.git(source, "add", "version")
+            self.git(source, "commit", "--quiet", "-m", version)
+            commits.append(self.git(source, "rev-parse", "HEAD"))
+            if version == "release":
+                self.git(source, "tag", "v1.0")
+        return source, commits
+
+    def git(self, directory, *args):
+        return subprocess.check_output(
+            ["git", "-c", "commit.gpgsign=false", "-c", "tag.gpgSign=false",
+             "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+             "-C", str(directory), *args], text=True, stderr=subprocess.PIPE,
+        ).strip()
+
+    def checkout_validated_target(self, root, source, tag, expected):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        resolve = next(script for script in guard.workflow_commands(workflow)
+                       if "sed 's/^/sha=/'" in script)
+        checkout = next(script for script in guard.workflow_commands(workflow)
+                        if 'git fetch --no-tags origin "$RELEASE_TARGET_COMMIT"' in script)
+        validation = root / "validation"
+        self.git(root, "clone", "--quiet", str(source), str(validation))
+        output = root / "output"
+        result = subprocess.run(
+            ["bash", "-eo", "pipefail", "-c", resolve], cwd=validation,
+            env={**os.environ, "RELEASE_TARGET_TAG": tag, "GITHUB_OUTPUT": str(output)},
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(output.read_text(), f"sha={expected}\n")
+        publisher = root / "publisher"
+        self.git(root, "clone", "--quiet", "--no-tags", str(source), str(publisher))
+        return checkout, publisher
+
+    def test_publishing_main_uses_validated_commit_and_rejects_an_advanced_branch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, commits = self.target_fixture(root)
+            checkout, publisher = self.checkout_validated_target(root, source, "main", commits[-1])
+            env = {**os.environ, "RELEASE_TARGET_TAG": "main", "RELEASE_TARGET_COMMIT": commits[-1]}
+            result = subprocess.run(["bash", "-eo", "pipefail", "-c", checkout], cwd=publisher,
+                                    env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.git(publisher, "rev-parse", "HEAD"), commits[-1])
+            self.assertEqual(self.git(publisher, "branch", "--show-current"), "main")
+            self.git(source, "commit", "--quiet", "--allow-empty", "-m", "main advanced")
+            result = subprocess.run(["bash", "-eo", "pipefail", "-c", checkout], cwd=publisher,
+                                    env=env, capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("main advanced after validation", result.stdout)
+
+    def test_publishing_historical_target_does_not_resolve_a_moved_tag_again(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, commits = self.target_fixture(root)
+            checkout, publisher = self.checkout_validated_target(root, source, "v1.0", commits[0])
+            self.git(source, "tag", "--force", "v1.0", commits[-1])
+            result = subprocess.run(
+                ["bash", "-eo", "pipefail", "-c", checkout], cwd=publisher,
+                env={**os.environ, "RELEASE_TARGET_TAG": "v1.0", "RELEASE_TARGET_COMMIT": commits[0]},
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.git(publisher, "rev-parse", "HEAD"), commits[0])
+            self.assertEqual(self.git(publisher, "tag", "--list"), "")
+            self.assertEqual((publisher / "version").read_text(), "initial")
 
 
 if __name__ == "__main__":
