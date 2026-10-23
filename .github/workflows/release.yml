@@ -252,7 +252,7 @@ jobs:
         if: ${{ inputs.dry-run == false && inputs.target-tag == 'main' }}
         run: |
           git status && git log -3
-          git push origin --follow-tags -v
+          git push origin --follow-tags -v HEAD:refs/heads/main
 
       - name: Upload sanitized stdout
         if: always()

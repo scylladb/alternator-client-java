@@ -424,6 +424,38 @@ class ReleaseCommandTests(unittest.TestCase):
             self.assertEqual(self.git(publisher, "tag", "--list"), "")
             self.assertEqual((publisher / "version").read_text(), "initial")
 
+    def test_publishing_main_pushes_from_a_sha_checkout_without_an_upstream(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        push = next(script for script in guard.workflow_commands(workflow)
+                    if "git push origin --follow-tags" in script)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, commits = self.target_fixture(root)
+            remote = root / "remote.git"
+            self.git(root, "clone", "--quiet", "--bare", str(source), str(remote))
+            checkout, publisher = self.checkout_validated_target(root, source, "main", commits[-1])
+            self.git(publisher, "remote", "set-url", "origin", str(remote))
+            # A full-SHA checkout starts detached and creates no tracking branch.
+            self.git(publisher, "checkout", "--detach")
+            self.git(publisher, "branch", "-D", "main")
+            result = subprocess.run(
+                ["bash", "-eo", "pipefail", "-c", checkout], cwd=publisher,
+                env={**os.environ, "RELEASE_TARGET_TAG": "main",
+                     "RELEASE_TARGET_COMMIT": commits[-1]},
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.git(publisher, "commit", "--quiet", "--allow-empty", "-m", "prepared release")
+            self.git(publisher, "tag", "-a", "release-fixture", "-m", "prepared release")
+            prepared = self.git(publisher, "rev-parse", "HEAD")
+            result = subprocess.run(
+                ["bash", "-eo", "pipefail", "-c", push], cwd=publisher,
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.git(remote, "rev-parse", "refs/heads/main"), prepared)
+            self.assertEqual(self.git(remote, "rev-parse", "refs/tags/release-fixture^{}"), prepared)
+
 
 if __name__ == "__main__":
     unittest.main()
