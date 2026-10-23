@@ -8,9 +8,24 @@ The public certificate in `publisher.asc` is safe to commit and is registered on
 * Identity: `ScyllaDB Publisher (scylladb/alternator-client-java) <publish.code@scylladb.com>`
 * Expiration: `2028-10-19T15:45:32+00:00`
 
-The release job uses the GitHub deployment environment `release`. Before running
-it, a repository owner must create and protect that environment, configure its
-protection rules and allowed deployment refs, and store `GPG_PRIVATE_KEY`
+The workflow first runs a `validate` job on its own runner without production
+signing or package-publishing credentials. It checks the release tooling and
+target policy, then builds the release profile with signing disabled. Project
+tests run here unless `skip-tests` is selected; release helper tests always run.
+Validation records the exact target commit as a job output.
+
+The `release` job depends on successful validation and uses a fresh runner. Only
+this job uses the GitHub deployment environment `release`, so approval is requested
+after validation finishes. It checks out the validated commit, rejects `main` if
+it has advanced, and independently checks target policy before importing keys.
+It does not restore the validation workspace or Maven cache. Signed preparation,
+signature verification, and publication happen after approval; project tests are
+not repeated with production credentials. Historical tags are resolved only by
+validation, so moving a tag during the approval wait cannot change the source.
+
+Before running it, a repository owner must create and protect that environment,
+configure its protection rules and allowed deployment refs, and store
+`GPG_PRIVATE_KEY`
 (ASCII-armored protected signing-subkey export) and `GPG_PASSPHRASE` (single-line
 passphrase) as environment secrets. Migrate any repository-level copies to this
 environment and remove those copies after validating the migration. The workflow
@@ -71,11 +86,12 @@ boundary. Do not derive it from the release tag's parent or replace it after
 preparation. Do not change or replace existing release tags. A failed verification
 blocks publication.
 
-The workflow preserves the current Makefile, guard, signing helper, and public
-certificate before checking out a historical release target. Explicit recursive
-Makefile selection keeps every phase on those preserved recipes. Target POM and
-source files still come from the selected checkout and must pass credential safety
-checks before any signing key is imported.
+Both jobs check out the workflow's launch SHA and preserve its current Makefile,
+guard, signing helper, and public certificate before selecting the target source.
+The release job uses the validated commit SHA instead of resolving the input ref
+again. Explicit recursive Makefile selection keeps every phase on those preserved
+recipes. Target POM and source files still come from the selected checkout and
+must pass credential safety checks before any signing key is imported.
 
 Complex checks can run before preparation or against signed outputs after a session
 closes. Checks that need additional signatures can use their own scoped invocation:
