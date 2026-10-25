@@ -1,0 +1,48 @@
+# GitHub release notes
+
+The Release workflow creates a GitHub release after Maven publication and the
+signed tag push succeed. It reads Maven's prepared plain version tag (for example,
+`2.0.7`), verifies its signature with the pinned publisher key, and requires the
+same annotated tag object on GitHub. Dry runs do not create GitHub releases.
+Rerunning the notes helper preserves an existing published release and
+its assets; an existing draft keeps its curated text and adds generated notes
+when published. Existing signing, validation, environment approval, and release
+blocker checks still apply; see [release signing](scripts/release/SIGNING.md).
+If only GitHub release creation fails after package/tag publication, first verify
+that Maven Central has the intended package. Recover the notes step from a trusted
+checkout with the published signed tag fetched, rather than republishing Maven
+artifacts or changing the tag. Set `GH_TOKEN`, `GITHUB_REPOSITORY`,
+`RELEASE_NOTES_TAG`, and `RELEASE_NOTES_TAG_OBJECT` (the annotated tag object's
+`git rev-parse refs/tags/VERSION` value), then run
+`python3 scripts/release/notes.py release`. The helper rechecks the signature and
+remote object before creating a release. During normal workflow execution these
+public tag identifiers are captured after preparation, before Maven can clean its
+release descriptor.
+
+Generated notes use `.github/release.yml` and exclude PRs with
+`omit-from-release-notes`. The Classify release notes workflow manages that label
+for every PR, including forks and merged PRs. It omits a PR only if every changed
+path is known documentation, tests/fixtures, CI, or development-only formatting
+configuration. The allowlist in `scripts/release/notes.py` covers `src/test/`,
+`src/integration-test/`, `feature-specs/`, `.github/`, named root documentation,
+and specific development/release-note test files. Production code, `pom.xml`,
+`Makefile`, demos, signing helpers, unknown paths, and consumer packaging/build
+inputs remain visible. Renames must qualify at both paths. Mixed PRs remain
+visible regardless of author, title, or broad housekeeping/dependency labels.
+
+Classification fetches all changed paths and checks head SHA, base SHA, and file
+count again before applying the label. A changed or incomplete snapshot fails
+visibly and attempts to remove any stale omission label. Runs serialize per PR.
+Manual uses of this label are also reconciled against the same rules on the next
+classification; remove it to keep a PR in generated notes until reclassification.
+
+Before releasing, backfill relevant already merged PRs by dispatching the
+**Classify release notes** workflow on `main` with each PR number, and wait for
+successful runs. For example:
+
+```sh
+gh workflow run classify-release-notes.yml --ref main -f pr-number=123
+```
+
+Review any failed runs before generating notes. The workflow executes the trusted
+default-branch classifier with no PR checkout or PR code execution.

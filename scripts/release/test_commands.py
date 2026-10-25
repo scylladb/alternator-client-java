@@ -131,7 +131,7 @@ class ReleaseCommandTests(unittest.TestCase):
                     self.assertEqual(result.returncode == 0, accepted, result.stderr)
                     self.assertEqual((runner / "release-safety").exists(), accepted)
                     if accepted:
-                        for filename in ("signing.py", "publisher.asc"):
+                        for filename in ("signing.py", "publisher.asc", "notes.py"):
                             self.assertEqual(
                                 (runner / "release-safety" / filename).read_bytes(),
                                 (ROOT / "scripts/release" / filename).read_bytes(),
@@ -164,6 +164,8 @@ class ReleaseCommandTests(unittest.TestCase):
             (target / "scripts/release").mkdir(parents=True)
             (target / "scripts/release/signing.py").write_text(
                 f"from pathlib import Path\nPath({str(marker)!r}).touch()\nraise SystemExit(1)\n")
+            (target / "scripts/release/notes.py").write_text(
+                f"from pathlib import Path\nPath({str(marker)!r}).touch()\nraise SystemExit(1)\n")
             (target / "scripts/release/publisher.asc").write_text("unsafe-target-certificate\n")
             subprocess.run(["git", "init", "--quiet", str(target)], check=True, capture_output=True)
             subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
@@ -171,10 +173,17 @@ class ReleaseCommandTests(unittest.TestCase):
                            cwd=target, check=True, capture_output=True)
             baseline = subprocess.check_output(
                 ["git", "rev-parse", "HEAD"], cwd=target, text=True).strip()
+            subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                            "-c", "tag.gpgsign=false", "tag", "-a", "2.0.7", "-m", "Fixture release"],
+                           cwd=target, check=True, capture_output=True)
+            tag_object = subprocess.check_output(
+                ["git", "rev-parse", "refs/tags/2.0.7"], cwd=target, text=True).strip()
+            (target / "release.properties").write_text("scm.tag=2.0.7\n")
             preserved = root / "release-safety"
             preserved.mkdir()
             shutil.copy2(ROOT / "Makefile", preserved / "Makefile")
             shutil.copy2(ROOT / "scripts/release/guard.py", preserved / "guard.py")
+            shutil.copy2(ROOT / "scripts/release/notes.py", preserved / "notes.py")
             shutil.copy2(env.pop("RELEASE_SIGNING_HELPER"), preserved / "signing.py")
             shutil.copy2(ROOT / "scripts/release/publisher.asc", preserved / "publisher.asc")
             env["FAKE_PUBLISHER_CERT"] = (preserved / "publisher.asc").read_text()
@@ -190,8 +199,14 @@ class ReleaseCommandTests(unittest.TestCase):
                 self.assertFalse(marker.exists())
                 # Actions makes public GITHUB_ENV values available to later steps.
                 public_state = (root / "github-env").read_text()
-                self.assertEqual(public_state, f"RELEASE_BASE_COMMIT={baseline}\n")
-                env["RELEASE_BASE_COMMIT"] = public_state.strip().split("=", 1)[1]
+                public_values = dict(line.split("=", 1) for line in public_state.splitlines())
+                self.assertEqual(public_values["RELEASE_BASE_COMMIT"], baseline)
+                if "notes.py" in command or "RELEASE_NOTES_TAG" in env:
+                    self.assertEqual(public_values["RELEASE_NOTES_TAG"], "2.0.7")
+                    self.assertEqual(public_values["RELEASE_NOTES_TAG_OBJECT"], tag_object)
+                self.assertLessEqual(set(public_values),
+                                     {"RELEASE_BASE_COMMIT", "RELEASE_NOTES_TAG", "RELEASE_NOTES_TAG_OBJECT"})
+                env.update(public_values)
             calls = [json.loads(line) for line in (root / "trace.jsonl").read_text().splitlines()]
             self.assertEqual(len(calls), 3)
             self.assertTrue(all(call["cwd"] == str(target) for call in calls))
