@@ -21,20 +21,21 @@ release descriptor.
 
 Generated notes use `.github/release.yml` and exclude PRs with
 `omit-from-release-notes`. The Classify release notes workflow manages that label
-for every PR, including forks and merged PRs. It omits a PR only if every changed
-path is known documentation, tests/fixtures, CI, or development-only formatting
-configuration. The allowlist in `scripts/release/notes.py` covers `src/test/`,
+for every PR, including forks and merged PRs. It omits a PR only if every reported
+changed filename matches documentation, tests/fixtures, CI, or development-only
+formatting configuration. The rules in `.github/labeler.yml` cover `src/test/`,
 `src/integration-test/`, `feature-specs/`, `.github/`, named root documentation,
 and specific development/release-note test files. Production code, `pom.xml`,
 `Makefile`, demos, signing helpers, unknown paths, and consumer packaging/build
-inputs remain visible. Renames must qualify at both paths. Mixed PRs remain
-visible regardless of author, title, or broad housekeeping/dependency labels.
+inputs remain visible. Mixed PRs remain visible regardless of author, title, or
+broad housekeeping/dependency labels.
 
-Classification fetches all changed paths and checks head SHA, base SHA, and file
-count again before applying the label. A changed or incomplete snapshot fails
-visibly and attempts to remove any stale omission label. Runs serialize per PR.
-Manual uses of this label are also reconciled against the same rules on the next
-classification; remove it to keep a PR in generated notes until reclassification.
+The workflow uses the pinned `actions/labeler` action. Every reported changed
+filename must match the single union of support paths, so mixtures of docs,
+tests, and CI qualify together. `sync-labels: true` removes the label when the
+rules stop matching. Runs serialize per PR. Classification follows the stock
+action's reported filename behavior, including rename and API behavior. Manual
+uses of this label are also reconciled on the next run.
 
 Before releasing, backfill relevant already merged PRs by dispatching the
 **Classify release notes** workflow on `main` with each PR number, and wait for
@@ -44,5 +45,5 @@ successful runs. For example:
 gh workflow run classify-release-notes.yml --ref main -f pr-number=123
 ```
 
-Review any failed runs before generating notes. The workflow executes the trusted
-default-branch classifier with no PR checkout or PR code execution.
+Review any failed runs before generating notes. The action reads repository
+configuration through the GitHub API, with no PR checkout or PR code execution.

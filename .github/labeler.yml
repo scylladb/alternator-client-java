@@ -1,0 +1,5 @@
+omit-from-release-notes:
+  - changed-files:
+      - all-globs-to-all-files:
+          # One union matcher permits mixtures of documentation, tests, and CI.
+          - '{src/test/**,src/integration-test/**,feature-specs/**,.github/**,README.md,CONTRIBUTING.md,RELEASING.md,SECURITY.md,CHANGELOG.md,.gitignore,checkstyle.xml,scripts/release/SIGNING.md,scripts/release/notes.py,scripts/release/test_*.py}'

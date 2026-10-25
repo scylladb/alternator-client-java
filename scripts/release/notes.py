@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conservatively classify PRs and publish notes after the signed Maven release."""
+"""Publish GitHub notes after the signed Maven release."""
 
 import json
 import os
@@ -10,75 +10,6 @@ import sys
 from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
-
-
-OMISSION_LABEL = "omit-from-release-notes"
-
-
-def support_path(path):
-    """Unknown paths and consumer build/package inputs remain in release notes."""
-    if not isinstance(path, str) or any(part in ("", ".", "..") for part in path.split("/")):
-        return False
-    return bool(
-        re.match(r"^(?:src/test|src/integration-test|feature-specs|\.github)/", path)
-        or path in {"README.md", "CONTRIBUTING.md", "RELEASING.md", "SECURITY.md",
-                    "CHANGELOG.md", ".gitignore", "checkstyle.xml", "scripts/release/SIGNING.md"}
-        or re.fullmatch(r"scripts/release/(?:notes|test_[a-z_]+)\.py", path)
-    )
-
-
-def snapshot(pr):
-    head, base, count = pr["head"]["sha"], pr["base"]["sha"], pr["changed_files"]
-    if not head or not base or type(count) is not int or count < 1:
-        raise ValueError("Invalid PR snapshot")
-    return head, base, count
-
-
-def classify(api, number):
-    if type(number) is not int or number < 1:
-        raise ValueError("Invalid PR number")
-
-    def remove_label():
-        api("DELETE", f"/issues/{number}/labels/{OMISSION_LABEL}", allowed=(404,))
-
-    try:
-        before = snapshot(api("GET", f"/pulls/{number}"))
-        files = []
-        # GitHub returns at most 3,000 files. Count/snapshot checks detect truncation.
-        for page in range(1, 32):
-            batch = api("GET", f"/pulls/{number}/files?per_page=100&page={page}")
-            if not isinstance(batch, list):
-                raise ValueError("Invalid PR file list")
-            files.extend(batch)
-            if len(batch) < 100:
-                break
-        if len(files) != before[2] or len({file["filename"] for file in files}) != len(files):
-            raise ValueError("Incomplete or duplicate PR file list")
-        omit = all(
-            file.get("status") in {"added", "removed", "modified", "renamed", "copied", "changed", "unchanged"}
-            and support_path(file["filename"])
-            and (file["status"] != "renamed" or support_path(file.get("previous_filename")))
-            and ("previous_filename" not in file or support_path(file["previous_filename"]))
-            for file in files
-        )
-        if snapshot(api("GET", f"/pulls/{number}")) != before:
-            raise ValueError("PR changed during classification")
-        if omit:
-            if api("GET", f"/labels/{OMISSION_LABEL}", allowed=(404,)) is None:
-                api("POST", "/labels", {
-                    "name": OMISSION_LABEL, "color": "ededed",
-                    "description": "Support-only PR omitted from generated release notes",
-                }, allowed=(422,))  # Another PR may create it concurrently.
-            api("POST", f"/issues/{number}/labels", {"labels": [OMISSION_LABEL]})
-        else:
-            remove_label()
-        return omit
-    except Exception:
-        try:
-            remove_label()
-        except Exception:
-            print("Could not remove stale omission label; manual review required", file=sys.stderr)
-        raise
 
 
 def prepared_tag(path=Path("release.properties")):
@@ -157,15 +88,13 @@ def capture_prepared():
 def main():
     if sys.argv[1:] == ["prepare"]:
         capture_prepared()
-    elif sys.argv[1:] == ["classify"]:
-        classify(GitHub(), int(os.environ["PR_NUMBER"]))
     elif sys.argv[1:] == ["release"]:
         import signing
         tag = os.environ["RELEASE_NOTES_TAG"]
         signing.verify_tag(tag)
         publish_release(GitHub(), tag, os.environ["RELEASE_NOTES_TAG_OBJECT"])
     else:
-        raise ValueError("Expected prepare, classify, or release")
+        raise ValueError("Expected prepare or release")
 
 
 if __name__ == "__main__":
