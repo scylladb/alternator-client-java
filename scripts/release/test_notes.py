@@ -14,7 +14,9 @@ class ReleaseTests(unittest.TestCase):
             if endpoint.startswith("/git/ref/tags/"):
                 return {"object": {"type": remote_type, "sha": remote_sha}}
             if endpoint.startswith("/releases/tags/"):
-                return existing
+                return existing if existing and not existing["draft"] else None
+            if endpoint.startswith("/releases?per_page=100&page="):
+                return [dict(existing, tag_name="2.0.7")] if existing else []
             if endpoint == "/releases/generate-notes":
                 self.assertEqual(body["configuration_file_path"], ".github/release.yml")
                 return {"body": "Filtered generated notes"}
@@ -47,6 +49,34 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse(published["draft"])
         self.assertEqual(api.call_args.args[:2], ("PATCH", "/releases/42"))
 
+    def test_draft_discovery_paginates_when_tag_lookup_returns_not_found(self):
+        draft = {"id": 42, "tag_name": "2.0.7", "draft": True, "body": "Curated"}
+        first_page = [{"id": i, "tag_name": f"1.0.{i}", "draft": False}
+                      for i in range(100)]
+        normal = self.api()
+
+        def request(method, endpoint, body=None, allowed=()):
+            if endpoint == "/releases?per_page=100&page=1":
+                return first_page
+            if endpoint == "/releases?per_page=100&page=2":
+                return [draft]
+            return normal(method, endpoint, body, allowed)
+
+        api = Mock(side_effect=request)
+        published = notes.publish_release(api, "2.0.7", "signed-tag")
+        self.assertEqual(published["body"], "Curated\n\nFiltered generated notes")
+        self.assertEqual(api.call_args.args[:2], ("PATCH", "/releases/42"))
+        self.assertFalse(any(call.args[:2] == ("POST", "/releases")
+                             for call in api.call_args_list))
+
+    def test_draft_listing_failure_prevents_release_writes(self):
+        for listing in (RuntimeError("Listing unavailable"), None, {}):
+            api = Mock(side_effect=[{"object": {"type": "tag", "sha": "signed-tag"}},
+                                    None, listing])
+            with self.subTest(listing=listing), self.assertRaises((RuntimeError, ValueError)):
+                notes.publish_release(api, "2.0.7", "signed-tag")
+            self.assertTrue(all(call.args[0] == "GET" for call in api.call_args_list))
+
     def test_unpublished_different_and_lightweight_tags_block_release(self):
         for api in (self.api(remote_sha="different"), self.api(remote_type="commit")):
             with self.assertRaisesRegex(ValueError, "differs"):
@@ -62,7 +92,7 @@ class ReleaseTests(unittest.TestCase):
     def test_concurrent_create_is_rerun_safe(self):
         existing = {"id": 42, "draft": False}
         api = Mock(side_effect=[{"object": {"type": "tag", "sha": "signed-tag"}},
-                                None, {"body": "Generated"}, None, existing])
+                                None, [], {"body": "Generated"}, None, existing])
         self.assertEqual(notes.publish_release(api, "2.0.7", "signed-tag"), existing)
 
     def test_prepared_tag_is_authoritative_and_validated(self):
@@ -93,7 +123,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertGreater(release, workflow.index("- name: Perform release\n"))
         self.assertGreater(release, workflow.index("git push origin --follow-tags"))
         step = workflow[release:workflow.index("- name: Upload sanitized stdout", release)]
-        self.assertIn("if: inputs.dry-run == false", step)
+        self.assertIn("if: ${{ inputs.dry-run == false && inputs.target-tag == 'main' }}", step)
         self.assertIn('"$RUNNER_TEMP/release-safety/notes.py" release', step)
         self.assertIn("cp scripts/release/*.py", workflow)
         self.assertLess(workflow.index('notes.py" prepare'), workflow.index("- name: Perform release\n"))

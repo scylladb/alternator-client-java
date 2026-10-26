@@ -20,6 +20,24 @@ def prepared_tag(path=Path("release.properties")):
     return tags[0]
 
 
+def find_release(api, tag):
+    """Published tag lookup omits drafts; list releases to find curated drafts."""
+    existing = api("GET", f"/releases/tags/{quote(tag, safe='')}", allowed=(404,))
+    if existing:
+        return existing
+    page = 1
+    while True:
+        releases = api("GET", f"/releases?per_page=100&page={page}")
+        if not isinstance(releases, list):
+            raise ValueError("Missing release listing")
+        for release in releases:
+            if release["tag_name"] == tag:
+                return release
+        if len(releases) < 100:
+            return None
+        page += 1
+
+
 def publish_release(api, tag, tag_object):
     """Never create a tag; require the exact verified annotated tag on GitHub."""
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?", tag):
@@ -28,7 +46,7 @@ def publish_release(api, tag, tag_object):
     remote = api("GET", f"/git/ref/tags/{encoded}")
     if remote["object"]["type"] != "tag" or remote["object"]["sha"] != tag_object:
         raise ValueError("Published tag differs from the verified prepared tag")
-    existing = api("GET", f"/releases/tags/{encoded}", allowed=(404,))
+    existing = find_release(api, tag)
     if existing and not existing["draft"]:
         return existing  # Preserve published notes and assets on reruns.
     generated = api("POST", "/releases/generate-notes", {

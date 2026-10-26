@@ -257,7 +257,7 @@ jobs:
           git push origin --follow-tags -v HEAD:refs/heads/main
 
       - name: Create GitHub release from the published signed tag
-        if: inputs.dry-run == false
+        if: ${{ inputs.dry-run == false && inputs.target-tag == 'main' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 "$RUNNER_TEMP/release-safety/notes.py" release
