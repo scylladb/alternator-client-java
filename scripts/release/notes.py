@@ -12,12 +12,19 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 
+def checked_tag(tag):
+    """Maven owns the version spelling; Git owns valid tag ref syntax."""
+    subprocess.run(["git", "check-ref-format", "refs/tags/" + tag],
+                   check=True, capture_output=True)
+    return tag
+
+
 def prepared_tag(path=Path("release.properties")):
     tags = [line.removeprefix("scm.tag=") for line in path.read_text().splitlines()
             if line.startswith("scm.tag=")]
-    if len(tags) != 1 or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?", tags[0]):
+    if len(tags) != 1:
         raise ValueError("Expected one plain version tag from Maven release.properties")
-    return tags[0]
+    return checked_tag(tags[0])
 
 
 def find_release(api, tag):
@@ -40,8 +47,7 @@ def find_release(api, tag):
 
 def publish_release(api, tag, tag_object):
     """Never create a tag; require the exact verified annotated tag on GitHub."""
-    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?", tag):
-        raise ValueError("Invalid Maven release tag")
+    checked_tag(tag)
     encoded = quote(tag, safe="")
     remote = api("GET", f"/git/ref/tags/{encoded}")
     if remote["object"]["type"] != "tag" or remote["object"]["sha"] != tag_object:
@@ -54,7 +60,7 @@ def publish_release(api, tag, tag_object):
     })
     if not isinstance(generated.get("body"), str):
         raise ValueError("Missing generated release notes")
-    curated = (existing.get("body") or "").strip() if existing else ""
+    curated = (existing.get("body") or "") if existing else ""
     body = (curated + "\n\n" if curated else "") + generated["body"]
     payload = {"tag_name": tag, "name": tag, "body": body,
                "draft": False, "prerelease": "-" in tag}

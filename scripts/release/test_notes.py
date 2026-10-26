@@ -1,6 +1,7 @@
 """Offline tests for signed release-note publication and reruns."""
 
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -48,6 +49,12 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(published["body"], "Maintainer notes\n\nFiltered generated notes")
         self.assertFalse(published["draft"])
         self.assertEqual(api.call_args.args[:2], ("PATCH", "/releases/42"))
+
+    def test_draft_markdown_whitespace_is_preserved_exactly(self):
+        curated = "    indented code\n\n"
+        api = self.api({"id": 42, "draft": True, "body": curated})
+        published = notes.publish_release(api, "2.0.7", "signed-tag")
+        self.assertEqual(published["body"], curated + "\n\nFiltered generated notes")
 
     def test_draft_discovery_paginates_when_tag_lookup_returns_not_found(self):
         draft = {"id": 42, "tag_name": "2.0.7", "draft": True, "body": "Curated"}
@@ -100,11 +107,36 @@ class ReleaseTests(unittest.TestCase):
             path = Path(directory) / "release.properties"
             path.write_text("# Maven release\nscm.tag=2.0.7\n")
             self.assertEqual(notes.prepared_tag(path), "2.0.7")
-            for text in ("", "scm.tag=v2.0.7\n", "scm.tag=main\n",
-                         "scm.tag=2.0.7\nscm.tag=2.0.8\n"):
+            for text in ("", "scm.tag=2.0.7\nscm.tag=2.0.8\n"):
                 path.write_text(text)
                 with self.assertRaises(ValueError):
                     notes.prepared_tag(path)
+
+    def test_maven_version_spelling_is_preserved_in_capture_and_publication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "release.properties"
+            for version in ("2.0.8.1", "2.0", "1", "1.0alpha1", "1.0_final",
+                            "2.0.8+metadata", "v2.0.7"):
+                with self.subTest(version=version):
+                    path.write_text(f"scm.tag={version}\n")
+                    self.assertEqual(notes.prepared_tag(path), version)
+                    published = notes.publish_release(self.api(), version, "signed-tag")
+                    self.assertEqual(published["tag_name"], version)
+
+    def test_invalid_git_tags_are_rejected_before_capture_or_api_calls(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "release.properties"
+            for tag in ("", "../main", "2 0.7", "2.0.7^{commit}"):
+                with self.subTest(tag=tag):
+                    path.write_text(f"scm.tag={tag}\n")
+                    with self.assertRaises(subprocess.CalledProcessError):
+                        notes.prepared_tag(path)
+                    api = self.api()
+                    with self.assertRaises(subprocess.CalledProcessError):
+                        notes.publish_release(api, tag, "signed-tag")
+                    api.assert_not_called()
+            with self.assertRaises(subprocess.CalledProcessError):
+                notes.checked_tag("2.0.7\ninjected=value")
 
     def test_public_tag_identity_survives_maven_descriptor_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:
