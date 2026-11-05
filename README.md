@@ -29,6 +29,7 @@ The language-agnostic feature contracts are maintained in [`feature-specs`](feat
 - [Key-route affinity](feature-specs/key-route-affinity.md)
 - [Node health](feature-specs/node-health.md)
 - [Query plans](feature-specs/query-plan.md)
+- [Request timeout](feature-specs/request-timeout.md)
 
 ## Add `load-balancing` to your project
 
@@ -438,6 +439,48 @@ complete example. After building with `mvn package`, you can run this demo with:
 mvn exec:java -Dexec.mainClass=com.scylladb.alternator.demo.Demo5 -Dexec.classpathScope=test
 ```
 
+### Per-request server timeout
+
+The normative, language-agnostic behavior is defined in the
+[request-timeout feature specification](feature-specs/request-timeout.md).
+
+Every low-level DynamoDB operation can send the Alternator-specific `X-Scylla-Timeout` header. The
+typed helper accepts a non-negative `Duration` with exact millisecond precision and writes a CQL
+duration such as `1500ms`:
+
+```java
+import com.scylladb.alternator.AlternatorRequestOptions;
+import java.time.Duration;
+
+GetItemResponse response = client.getItem(request -> request
+    .tableName("users")
+    .key(key)
+    .overrideConfiguration(
+        AlternatorRequestOptions.serverTimeout(Duration.ofSeconds(5))));
+```
+
+The same request option works with `DynamoDbClient` and `DynamoDbAsyncClient`. It applies to the
+server work for that operation, including each retry attempt; it does not limit how long the client
+waits across retries. Use the AWS request override's `apiCallTimeout` or `apiCallAttemptTimeout` for
+client-side deadlines.
+
+Callers that need another valid CQL timeout spelling can set the header directly:
+
+```java
+GetItemRequest request = GetItemRequest.builder()
+    .tableName("users")
+    .key(key)
+    .overrideConfiguration(options ->
+        options.putHeader(AlternatorRequestOptions.SERVER_TIMEOUT_HEADER, "5s"))
+    .build();
+```
+
+The extension requires a compatible Alternator server. Server-side support is tracked by
+[scylladb/scylladb#31652](https://github.com/scylladb/scylladb/issues/31652); unsupported endpoints
+may ignore or reject the header. The DynamoDB Enhanced Client does not expose per-operation AWS
+request overrides, so use the low-level client when one Enhanced operation needs a distinct server
+timeout.
+
 ### HTTP Compression
 
 The normative, language-agnostic behavior is defined in the
@@ -588,6 +631,7 @@ the active configuration:
 - `X-Amz-Target` - Specifies the DynamoDB operation
 - `Content-Type` - MIME type for DynamoDB API
 - `Content-Length` - Required for request body
+- `X-Scylla-Timeout` - Per-request server timeout (when selected by an operation)
 - `Accept-Encoding` - For response compression negotiation (when enabled)
 - `Content-Encoding` - For request compression (when enabled)
 - `Authorization` - AWS SigV4 signature (when authentication is enabled)
@@ -621,6 +665,8 @@ authentication (`Authorization`, `X-Amz-Date`, and `X-Amz-Security-Token` for te
 credentials), operation (`Host`, `X-Amz-Target`,
 `Content-Type`, `Content-Length`), response compression when enabled (`Accept-Encoding`),
 connection reuse (`Connection`), and client reporting (`User-Agent`).
+The client adds `X-Scylla-Timeout` to the effective whitelist automatically so existing custom
+whitelists remain compatible when per-request timeout support is added.
 
 The computed default whitelist currently supports basic credentials only. Do not combine header
 optimization with temporary session credentials until `X-Amz-Security-Token` is included
