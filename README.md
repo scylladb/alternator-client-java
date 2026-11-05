@@ -1168,3 +1168,11 @@ table names and removes every table in its namespace when released. Private cont
 serialized with lease and pool shutdown, reject stale or foreign node handles, and never permit
 removal of the final live node. A command with an ambiguous result makes the private cluster dirty;
 further mutation is rejected and whole-cluster cleanup is required.
+
+
+## Releasing
+
+Maintainers use the separate **Release** and **Release dry run** workflows on
+`main`. Dry runs stage real unpublished Central deployments. See
+[release prerequisites and recovery](scripts/release/SIGNING.md) and
+[generated release notes](.github/RELEASE_NOTES.md) before dispatching either.

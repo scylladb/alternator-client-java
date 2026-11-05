@@ -6,9 +6,6 @@ console and log artifacts. Overflow and incomplete streams produce fixed diagnos
 Child Maven processes run normally; they are not intercepted.
 """
 
-import base64
-import heapq
-import html
 import json
 import os
 from pathlib import Path
@@ -19,8 +16,9 @@ import shlex
 import subprocess
 import sys
 import time
-import urllib.parse
 import xml.etree.ElementTree as ET
+
+from redaction import redact, secret_forms
 
 LIMIT = 64 * 1024 * 1024
 DRAIN_GRACE = 1
@@ -260,6 +258,16 @@ def check_maven_capture(command, require_capture=False, make_variables=False):
         # as a command substitution and must not be normalized away.
         command = re.sub(r"(?<!\$)\$\((\w+)\)", r"${\1}", command)
     command = command.replace("$$", "$")
+    # Only these launch-controlled runtime scripts may use a shell launcher.
+    if command.strip() in {
+        'bash scripts/release/check-blockers.sh',
+        'bash scripts/release/setup-maven.sh',
+        'bash scripts/release/preserve-tools.sh',
+        'bash "$RUNNER_TEMP/release-safety/check-blockers.sh"',
+        'bash "$RUNNER_TEMP/release-safety/setup-maven.sh"',
+    }:
+        return
+    command = command.replace('$(git rev-parse FETCH_HEAD)', 'FETCH_HEAD_SHA')
     # Allow only these fixed Git/blocker lookups, with fixed arguments and jq text.
     # Matching the whole assignment prevents nested shell commands hiding in it.
     for assignment in (
@@ -319,6 +327,10 @@ def check_maven_capture(command, require_capture=False, make_variables=False):
         raise Unsafe("unresolved release executables or command substitutions are unsupported")
     if grouping:
         raise Unsafe("shell grouping and process substitutions are unsupported")
+    # Boolean operators inside [[ ]] belong to one conditional expression.
+    # Substitutions and grouping have already been rejected above.
+    command = re.sub(r"\[\[[^\n]*?\]\]",
+                     lambda match: match[0].replace("&&", "AND").replace("||", "OR"), command)
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|\n")
         lexer.whitespace = " \t\r"
@@ -396,10 +408,10 @@ def workflow_commands(workflow):
         pending = None
         if line is None:
             return
-        match = re.match(r"^(\s*)(?:-\s+)?(?:run|\"run\"|'run')\s*:\s*(.*)$", line)
+        match = re.match(r"^(\s*)(-\s+)?(?:run|\"run\"|'run')\s*:\s*(.*)$", line)
         if not match:
             continue
-        value = match[2]
+        value = match[3]
         if value.startswith(("*", "&", "!")):
             raise Unsafe("aliased or tagged release scripts are unsupported")
         if not value.startswith(("|", ">")):
@@ -425,16 +437,45 @@ def workflow_commands(workflow):
             continue
         script = []
         for following in lines:
-            if following.strip() and len(following) - len(following.lstrip()) <= len(match[1]):
+            if following.strip() and len(following) - len(following.lstrip()) <= len(match[1]) + len(match[2] or ""):
                 pending = following
                 break
             script.append(following)
         yield (" " if value.startswith(">") else "\n").join(script)
 
 
+def check_ancestor_maven_config(root):
+    if (root / ".mvn").is_dir():
+        return
+    for parent in root.parents:
+        if (parent / ".mvn").is_dir():
+            if any((parent / ".mvn" / name).exists()
+                   for name in ("maven.config", "jvm.config")):
+                raise Unsafe("ancestor Maven configuration is not allowed")
+            return
+
+
 def check_policy(root):
+    check_ancestor_maven_config(root)
     ns = {"m": "http://maven.apache.org/POM/4.0.0"}
     pom = ET.parse(root / "pom.xml").getroot()
+    if pom.find("m:parent", ns) is not None:
+        raise Unsafe("parent Maven POMs are not verified for release")
+    root_plugins = pom.findall("m:build/m:plugins/m:plugin", ns)
+    release_plugins = [plugin for profile in pom.findall("m:profiles/m:profile", ns)
+                       if profile.findtext("m:id", namespaces=ns) == "release"
+                       for plugin in profile.findall("m:build/m:plugins/m:plugin", ns)]
+    for artifact, plugins, minimum, message in (
+        ("maven-gpg-plugin", release_plugins, (3, 2, 0), "GPG plugin"),
+        ("central-publishing-maven-plugin", root_plugins, (0, 11, 0), "Central publishing"),
+    ):
+        candidates = [p for p in plugins if p.findtext("m:artifactId", namespaces=ns) == artifact]
+        if len(candidates) != 1:
+            raise Unsafe("pin " + message + " before releasing this target")
+        version = candidates[0].findtext("m:version", namespaces=ns) or ""
+        if (not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version)
+                or tuple(map(int, version.split("."))) < minimum):
+            raise Unsafe("update " + message + " before releasing this target")
     if pom.findtext("m:properties/m:gpg.bestPractices", namespaces=ns) != "true":
         raise Unsafe("enable GPG best practices before releasing this target")
     for plugin in pom.findall(".//m:plugin", ns):
@@ -450,6 +491,9 @@ def check_policy(root):
             ):
                 raise Unsafe("update Central publishing before releasing this target")
     for element in pom.iter():
+        if (element.tag == "{" + ns["m"] + "}release.autopublish"
+                and (element.text or "").strip() not in ("true", "false")):
+            raise Unsafe("release.autopublish must be a Boolean")
         if (element.tag == "{" + ns["m"] + "}gpg.bestPractices"
                 and (element.text or "").strip().lower() != "true"):
             raise Unsafe("GPG best practices must not be disabled")
@@ -473,8 +517,17 @@ def check_policy(root):
     workflow = workflow_path.read_text()
     if "RELEASE_GUARD" not in workflow:
         raise Unsafe("release workflow requires the RELEASE_GUARD marker")
-    for command in workflow_commands(workflow):
-        check_maven_capture(command, require_capture=True)
+    sources = [workflow]
+    dry_run = root / ".github/workflows/release-dry-run.yml"
+    if dry_run.exists():
+        sources.append(dry_run.read_text())
+    for action in (root / ".github/actions").glob("release-*/action.yml"):
+        sources.append(action.read_text())
+    for source in sources:
+        # unittest's -s selects a test directory, not a Maven settings file.
+        check_text(source.replace("python3 -m unittest discover -s scripts/release -p 'test_*.py' -v", ""))
+        for command in workflow_commands(source):
+            check_maven_capture(command, require_capture=True)
     if not re.search(r"if:\s*(?:always\(\)|\$\{\{\s*always\(\)\s*\}\})", workflow):
         raise Unsafe("release workflow requires an always() artifact upload condition")
     makefile = root / "Makefile"
@@ -495,85 +548,11 @@ def check_policy(root):
                     for target in line.split(":", 1)[0].split()
                 )
                 prerequisites, separator, recipe = line.split(":", 1)[1].partition(";")
-                if release_target and prerequisites.strip() not in ("", "release-check-user"):
+                if release_target and prerequisites.strip() not in ("", "release-check-user", "release-check-user release-check-tokens"):
                     raise Unsafe("release target prerequisites are unsupported")
                 if separator:
                     check_maven_capture(recipe.lstrip().lstrip("@+-"),
                                         require_capture=release_target, make_variables=True)
-
-
-def secret_forms(env):
-    values = {
-        v
-        for k, v in env.items()
-        if v and re.search(r"PASSWORD|PASSPHRASE|TOKEN|SECRET|PRIVATE_KEY|AUTHORIZATION", k, re.I)
-    }
-    user, password = env.get("SONATYPE_TOKEN_USERNAME"), env.get("SONATYPE_TOKEN_PASSWORD")
-    if user and password:
-        values.add(user + ":" + password)
-    # Include multiline components, escaped newlines, URL and both Base64 alphabets.
-    values |= {line for value in values for line in value.splitlines() if line}
-    values |= {value.replace("\n", "\\n").replace("\r", "\\r") for value in values}
-    # JSON/logging serializers also escape quotes, backslashes and Unicode secrets.
-    values |= {json.dumps(value, ensure_ascii=ascii_only)[1:-1]
-               for value in tuple(values) for ascii_only in (True, False)}
-    # Maven XML serializers escape punctuation and may use named or numeric quotes.
-    for value in tuple(values):
-        escaped = html.escape(value, quote=False)
-        for apostrophe in ("'", "&apos;", "&#39;", "&#x27;"):
-            for quote in ('"', "&quot;", "&#34;", "&#x22;"):
-                values.add(escaped.replace("'", apostrophe).replace('"', quote))
-    forms = set(values)
-    for value in values:
-        raw = value.encode()
-        forms.update(
-            (
-                base64.b64encode(raw).decode(),
-                base64.urlsafe_b64encode(raw).decode(),
-                urllib.parse.quote(value, safe=""),
-                urllib.parse.quote(value),
-                urllib.parse.quote_plus(value, safe=""),
-            )
-        )
-    for value in tuple(forms):
-        forms.add(urllib.parse.quote(value, safe=""))
-        forms.add(urllib.parse.quote(value))
-        forms.add(value.rstrip("="))
-    return sorted((v.encode() for v in forms if v), key=len, reverse=True)
-
-
-def redact(data, forms):
-    # Match every source against the original bytes so replacements cannot hide secrets.
-    def spans(pattern, group, flags=0):
-        return (match.span(group) for match in re.finditer(pattern, data, flags))
-
-    matches = [
-        spans(
-            rb"(?i)([\"'])((?:-D\s*|--?define[=\s]+)[\w.-]*(?:passphrase|password|username|token|secret|authorization)[\w.-]*=)"
-            rb"((?:\\[\s\S]|(?!\1)[^\\])*)\1", 3,
-        ),
-        spans(
-            rb"(?i)((?:-D\s*|--?define[=\s]+)[\w.-]*(?:passphrase|password|username|token|secret|authorization)[\w.-]*=)"
-            rb"(\"(?:\\[\s\S]|[^\"\\])*\"|'(?:\\[\s\S]|[^'\\])*'|[^\s]+)", 2,
-        ),
-        spans(rb"(?im)((?:proxy-)?authorization[\"']?\s*[:=]\s*)([^\r\n]*)", 2),
-    ]
-    for value in forms:
-        # Lookahead includes overlapping occurrences; percent escapes ignore case.
-        matches.append(spans(b"(?=(" + re.escape(value) + b"))", 1, re.I if b"%" in value else 0))
-    output = bytearray()
-    start = end = 0
-    for left, right in heapq.merge(*matches):
-        if left > end:
-            if end > start:
-                output.extend(b"[REDACTED]")
-            output.extend(data[end:left])
-            start = left
-        end = max(end, right)
-    if end > start:
-        output.extend(b"[REDACTED]")
-    output.extend(data[end:])
-    return bytes(output)
 
 
 def write_logs(clean, logs):
@@ -596,11 +575,13 @@ def write_logs(clean, logs):
                 with open(os.devnull, "wb") as sink:
                     os.dup2(sink.fileno(), stream.fileno())
             except OSError:
+                # The console is already broken; keep the completed Maven status.
                 pass
     if output_failed:
         try:
             os.write(2, b"Sanitized release output could not be fully written; values withheld.\n")
         except OSError:
+            # Stderr is unavailable and there is no further safe reporting channel.
             pass
 
 
@@ -613,6 +594,45 @@ def capture(command, env, forms, logs):
     complete = [False, False]
     overflow = False
     logs_started = False
+
+    def stop_maven(signum):
+        pending = None
+
+        def record(signum, frame):
+            nonlocal pending
+            if pending is None:
+                pending = signum
+
+        signals = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+        previous = {number: signal.getsignal(number) for number in signals}
+        try:
+            # Cancellation cannot interrupt the owned group's grace or escalation.
+            for number in signals:
+                signal.signal(number, record)
+            try:
+                os.killpg(process.pid, signum)
+            except ProcessLookupError:
+                # The entire owned group has already exited.
+                pass
+            else:
+                deadline = time.monotonic() + DRAIN_GRACE
+                try:
+                    process.wait(timeout=DRAIN_GRACE)
+                except subprocess.TimeoutExpired:
+                    # Descendants receive the same grace period before escalation.
+                    pass
+                time.sleep(max(0, deadline - time.monotonic()))
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    # The process group exited during the grace period.
+                    pass
+                process.wait()
+        finally:
+            for number, handler in previous.items():
+                signal.signal(number, handler)
+        return pending
+
     try:
         with selectors.DefaultSelector() as selector:
             selector.register(process.stdout, selectors.EVENT_READ, 0)
@@ -636,6 +656,9 @@ def capture(command, env, forms, logs):
                             continue
                         buffers[key.data].extend(chunk)
         status = process.wait()
+        pending = stop_maven(signal.SIGTERM)
+        if pending is not None:
+            interrupted(pending, None)
         # Sanitize both streams completely before opening artifacts or emitting output.
         try:
             clean = [OVERFLOW_LOG, OVERFLOW_LOG] if overflow else [
@@ -649,38 +672,29 @@ def capture(command, env, forms, logs):
         logs_started = True
         write_logs(clean, logs)
         return status if status >= 0 else 128 - status
-    except BaseException as error:
+    except (Exception, SystemExit, KeyboardInterrupt) as error:
         completed_status = process.poll()
         signum = signal.SIGTERM
         if isinstance(error, SystemExit) and isinstance(error.code, int):
             signum = error.code - 128
         if signum not in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
             signum = signal.SIGTERM
-        try:
-            os.killpg(process.pid, signum)
-        except ProcessLookupError:
-            pass
-        try:
-            process.wait(timeout=DRAIN_GRACE)
-        except subprocess.TimeoutExpired:
-            pass
-        # The Maven parent may exit before a descendant responds to cancellation.
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait()
+        pending = stop_maven(signum)
         clean = [FAILED_LOG, FAILED_LOG]
-        if isinstance(error, (SystemExit, KeyboardInterrupt)):
-            try:
-                clean = [OVERFLOW_LOG, OVERFLOW_LOG] if overflow else [
-                    redact(bytes(buffer), forms) if ended else CANCELLED_LOG
-                    for buffer, ended in zip(buffers, complete)
-                ]
-            except Exception:
-                pass
+        cancelling = isinstance(error, (SystemExit, KeyboardInterrupt))
+        incomplete = CANCELLED_LOG if cancelling or pending is not None else INCOMPLETE_LOG
+        try:
+            clean = [OVERFLOW_LOG, OVERFLOW_LOG] if overflow else [
+                redact(bytes(buffer), forms) if ended else incomplete
+                for buffer, ended in zip(buffers, complete)
+            ]
+        except Exception:
+            # Keep the safe fallback without masking the original failure.
+            pass
         if not logs_started:
             write_logs(clean, logs)
+        if pending is not None and not cancelling:
+            interrupted(pending, None)
         if isinstance(error, Exception) and completed_status is not None:
             return completed_status if completed_status >= 0 else 128 - completed_status
         raise
@@ -689,15 +703,23 @@ def capture(command, env, forms, logs):
         process.stderr.close()
 
 
+
+def run_maven(command, env):
+    return capture(command, env, secret_forms(env),
+                   Path(env.get("RELEASE_LOG_DIR", "target/release-logs")))
+
+
 def interrupted(signum, frame):
     raise SystemExit(128 + signum)
 
 
 def check_runtime_options():
+    if os.environ.get("MAVEN_BASEDIR"):
+        raise Unsafe("alternate Maven base directories are not allowed")
     for name in ENV_OPTIONS:
         check_text(
             os.environ.get(name, ""),
-            maven_arguments=os.environ.get(name, "").split() if name == "MAVEN_ARGS" else (),
+            maven_arguments=os.environ.get(name, "").split() if name in ("MAVEN_ARGS", "MAVEN_CONFIG") else (),
             jvm_options=name not in ("MAVEN_ARGS", "MAVEN_CONFIG"),
         )
     for name in ("maven.config", "jvm.config"):
@@ -723,13 +745,14 @@ def main():
             raise Unsafe("Maven debug options are not allowed")
         check_text(" ".join(sys.argv[3:]), maven_arguments=sys.argv[3:])
         check_runtime_options()
+        check_ancestor_maven_config(Path.cwd())
         for signum in (signal.SIGTERM, signal.SIGHUP):
             signal.signal(signum, interrupted)
         return capture(
             sys.argv[2:],
-            os.environ,
+            dict(os.environ, MAVEN_SKIP_RC="1"),
             secret_forms(os.environ),
-            Path(os.environ.get("RELEASE_LOG_DIR", "/tmp/release-logs")),
+            Path(os.environ.get("RELEASE_LOG_DIR", "target/release-logs")),
         )
     except Unsafe as error:
         # Unsafe messages name only fixed policy checks, never their input values.

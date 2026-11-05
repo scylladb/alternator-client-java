@@ -1,5 +1,6 @@
 SHELL := bash
 RELEASE_GUARD ?= scripts/release/guard.py
+RELEASE_ASSETS_HELPER ?= $(dir $(RELEASE_GUARD))assets.py
 RELEASE_SIGNING_HELPER ?= $(dir $(RELEASE_GUARD))signing.py
 .ONESHELL:
 .SHELLFLAGS := -eo pipefail -c
@@ -33,8 +34,8 @@ RELEASE_SKIP_TESTS ?= false
 RELEASE_TARGET_TAG ?=
 RELEASE_VERSION ?=
 
-.PHONY: clean verify lint lint-specs lint-docs lint-fix compile compile-test compile-demo test-unit test-integration test-all ccm-install release-prepare release release-dry-run checkout-one-commit-before
-.PHONY: release-check-user test-release-signing _release-prepare _release _release-dry-run
+.PHONY: clean verify lint lint-specs lint-docs lint-fix compile compile-test compile-demo test-unit test-integration test-all ccm-install release-prepare release release-dry-run
+.PHONY: github-release release-check-user release-check-tokens test-release-signing _release-prepare _release _release-dry-run
 
 clean:
 	${mvn} clean
@@ -146,6 +147,12 @@ ccm-install:
 	mv -fT -- "$$temporary_marker" "$(SCYLLA_CCM_INSTALL_MARKER)"
 	echo "Using CCM executable: $(PINNED_SCYLLA_CCM_PATH)"
 
+github-release: release-check-user
+	python3 "$(RELEASE_ASSETS_HELPER)" publish
+
+release-check-tokens:
+	@python3 "$(RELEASE_ASSETS_HELPER)" check-tokens
+
 release-check-user:
 	@set -eu
 	if [ "$${GITHUB_ACTIONS:-}" = true ]; then
@@ -161,16 +168,16 @@ release-check-user:
 		exit 1
 	fi
 
-release-prepare: release-check-user
+release-prepare: release-check-user release-check-tokens
 	@python3 "$(RELEASE_GUARD)" check
 	+@python3 "$(RELEASE_SIGNING_HELPER)" exec $(MAKE) -f "$(RELEASE_MAKEFILE)" _release-prepare
 
-release: release-check-user
+release: release-check-user release-check-tokens
 	@python3 "$(RELEASE_GUARD)" check
 	@python3 "$(RELEASE_SIGNING_HELPER)" verify-prepared
 	+@python3 "$(RELEASE_SIGNING_HELPER)" exec $(MAKE) -f "$(RELEASE_MAKEFILE)" _release
 
-release-dry-run: release-check-user
+release-dry-run: release-check-user release-check-tokens
 	@python3 "$(RELEASE_GUARD)" check
 	@python3 "$(RELEASE_SIGNING_HELPER)" verify-prepared
 	+@python3 "$(RELEASE_SIGNING_HELPER)" exec $(MAKE) -f "$(RELEASE_MAKEFILE)" _release-dry-run
@@ -178,7 +185,7 @@ release-dry-run: release-check-user
 test-release-signing:
 	python3 -m unittest discover -s scripts/release -p 'test_signing.py' -v
 
-_release-prepare: release-check-user
+_release-prepare: release-check-user release-check-tokens
 	@if [[ -z "$${MAVEN_GPG_PASSPHRASE}" ]]; then
 		echo "MAVEN_GPG_PASSPHRASE is empty, can't continue"
 		exit 1
@@ -188,14 +195,18 @@ _release-prepare: release-check-user
 	fi
 	NEXT_RELEASE=()
 	if [[ -n "$${RELEASE_VERSION}" ]]; then
+		if [[ ! "$${RELEASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$$ ]]; then
+			echo "Release version must be X.Y.Z" >&2
+			exit 1
+		fi
 		NEXT_RELEASE=("-DreleaseVersion=$${RELEASE_VERSION}")
 	fi
 	export MAVEN_OPTS
 	baseline=$$(git rev-parse HEAD)
-	python3 "$(RELEASE_GUARD)" run ${mvn} -B release:prepare -DpushChanges=false "$${NEXT_RELEASE[@]}"
-	python3 "$(RELEASE_SIGNING_HELPER)" verify-prepared "$$baseline"
+	python3 "$(RELEASE_GUARD)" run ${mvn} -B --no-transfer-progress release:prepare -DpushChanges=false "$${NEXT_RELEASE[@]}"
+	python3 "$(RELEASE_SIGNING_HELPER)" save-prepared "$$baseline"
 
-_release: release-check-user
+_release: release-check-user release-check-tokens
 	@if [[ -z "$${MAVEN_GPG_PASSPHRASE}" ]]; then
 		echo "MAVEN_GPG_PASSPHRASE is empty, can't continue"
 		exit 1
@@ -203,9 +214,9 @@ _release: release-check-user
 	if [[ "$${RELEASE_SKIP_TESTS}" == "true" ]] || [[ "$${RELEASE_SKIP_TESTS}" == "1" ]]; then
 		export MAVEN_OPTS="$${MAVEN_OPTS} -DskipTests=true -DskipITs=true"
 	fi
-	python3 "$(RELEASE_GUARD)" run ${mvn} -B release:perform -Drelease.autopublish=true
+	python3 "$(RELEASE_GUARD)" run ${mvn} -B --no-transfer-progress release:perform -Drelease.autopublish=true
 
-_release-dry-run: release-check-user
+_release-dry-run: release-check-user release-check-tokens
 	@if [[ -z "$${MAVEN_GPG_PASSPHRASE}" ]]; then
 		echo "MAVEN_GPG_PASSPHRASE is empty, can't continue"
 		exit 1
@@ -213,14 +224,4 @@ _release-dry-run: release-check-user
 	if [[ "$${RELEASE_SKIP_TESTS}" == "true" ]] || [[ "$${RELEASE_SKIP_TESTS}" == "1" ]]; then
 		export MAVEN_OPTS="$${MAVEN_OPTS} -DskipTests=true -DskipITs=true"
 	fi
-	python3 "$(RELEASE_GUARD)" run ${mvn} -B release:perform
-
-checkout-one-commit-before: release-check-user
-	@if [[ "${RELEASE_TARGET_TAG}" == 3.* ]]; then
-		echo "Checking out one commit before ${RELEASE_TARGET_TAG}"
-		cp -f Makefile /tmp/tmp-Makefile
-		git fetch --prune --unshallow || git fetch --prune || true
-		git checkout ${RELEASE_TARGET_TAG}~1
-		git tag -d ${RELEASE_TARGET_TAG}
-		mv -f /tmp/tmp-Makefile ./Makefile
-	fi
+	python3 "$(RELEASE_GUARD)" run ${mvn} -B --no-transfer-progress release:perform -Drelease.autopublish=false

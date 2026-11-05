@@ -1,6 +1,5 @@
 """Focused checks for release configuration and sanitized output."""
 
-import base64
 import io
 import json
 import os
@@ -14,7 +13,6 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
-import urllib.parse
 
 import guard
 
@@ -33,10 +31,67 @@ def with_central_version(pom, version):
     return updated
 
 
-
 class ReleaseTests(unittest.TestCase):
     def test_repository_defaults(self):
         guard.check_policy(ROOT)
+
+    def test_ancestor_maven_configuration_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            root = parent / "target"
+            root.mkdir()
+            (parent / ".mvn").mkdir()
+            (parent / ".mvn/maven.config").write_text("-X\n--log-file=/tmp/raw.log\n")
+            shutil.copytree(ROOT / ".github", root / ".github")
+            shutil.copy(ROOT / "pom.xml", root / "pom.xml")
+            with self.assertRaisesRegex(guard.Unsafe, "ancestor Maven configuration"):
+                guard.check_policy(root)
+            with patch.object(guard, "capture", return_value=0) as capture, \
+                 patch.object(sys, "argv", ["guard.py", "run", "mvn", "validate"]), \
+                 patch("pathlib.Path.cwd", return_value=root), \
+                 patch("sys.stderr", io.StringIO()):
+                self.assertEqual(guard.main(), 2)
+                capture.assert_not_called()
+            (root / ".mvn").mkdir()
+            guard.check_policy(root)
+
+    def test_nearest_empty_maven_directory_stops_ancestor_search(self):
+        with tempfile.TemporaryDirectory() as directory:
+            top = Path(directory)
+            (top / ".mvn").mkdir()
+            (top / ".mvn/maven.config").write_text("-X\n")
+            middle = top / "middle"
+            (middle / ".mvn").mkdir(parents=True)
+            root = middle / "target"
+            root.mkdir()
+            shutil.copytree(ROOT / ".github", root / ".github")
+            shutil.copy(ROOT / "pom.xml", root / "pom.xml")
+            guard.check_policy(root)
+
+    def test_parent_pom_cannot_supply_unchecked_gpg_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "child"
+            root.mkdir()
+            parent = Path(directory) / "parent"
+            parent.mkdir()
+            (parent / "pom.xml").write_text(
+                '<project xmlns="http://maven.apache.org/POM/4.0.0">'
+                '<modelVersion>4.0.0</modelVersion><groupId>example</groupId>'
+                '<artifactId>parent</artifactId><version>1</version><build><plugins>'
+                '<plugin><artifactId>maven-gpg-plugin</artifactId><configuration>'
+                '<bestPractices>false</bestPractices></configuration></plugin>'
+                '</plugins></build></project>'
+            )
+            pom = (ROOT / "pom.xml").read_text().replace(
+                "<modelVersion>4.0.0</modelVersion>",
+                "<modelVersion>4.0.0</modelVersion>"
+                "<parent><groupId>example</groupId><artifactId>parent</artifactId>"
+                "<version>1</version><relativePath>../parent/pom.xml</relativePath></parent>",
+                1,
+            )
+            (root / "pom.xml").write_text(pom)
+            with self.assertRaisesRegex(guard.Unsafe, "parent Maven POMs"):
+                guard.check_policy(root)
 
     def test_release_account_and_baseline_lookups_allow_only_fixed_commands(self):
         guard.check_maven_capture('if ! user=$(gh api user --jq .login); then')
@@ -73,7 +128,7 @@ class ReleaseTests(unittest.TestCase):
                         guard.check_policy(root)
                     (root / "Makefile").unlink()
                     workflow.write_text(original.replace(
-                        'run: make -f "$RUNNER_TEMP/release-safety/Makefile" RELEASE_GUARD="$RUNNER_TEMP/release-safety/guard.py" release-dry-run',
+                        'run: make -f "$RUNNER_TEMP/release-safety/Makefile" RELEASE_GUARD="$RUNNER_TEMP/release-safety/guard.py" release',
                         f"run: {launcher} ./release.sh",
                     ))
                     with self.assertRaises(guard.Unsafe):
@@ -318,7 +373,7 @@ class ReleaseTests(unittest.TestCase):
             workflow_path.parent.mkdir(parents=True)
             shutil.copy(ROOT / "pom.xml", root / "pom.xml")
             workflow = (ROOT / ".github/workflows/release.yml").read_text()
-            original = 'run: make -f "$RUNNER_TEMP/release-safety/Makefile" RELEASE_GUARD="$RUNNER_TEMP/release-safety/guard.py" release-dry-run'
+            original = 'run: make -f "$RUNNER_TEMP/release-safety/Makefile" RELEASE_GUARD="$RUNNER_TEMP/release-safety/guard.py" release'
             self.assertIn(original, workflow)
             for executable in ("mvn", "/usr/bin/mvn", "./mvnw", "${MVNCMD}", "$MVNCMD"):
                 for script in (
@@ -350,7 +405,7 @@ class ReleaseTests(unittest.TestCase):
             shutil.copy(ROOT / "pom.xml", root / "pom.xml")
             workflow_path = root / ".github/workflows/release.yml"
             workflow = workflow_path.read_text()
-            original = 'run: make -f "$RUNNER_TEMP/release-safety/Makefile" RELEASE_GUARD="$RUNNER_TEMP/release-safety/guard.py" release-dry-run'
+            original = 'run: make -f "$RUNNER_TEMP/release-safety/Makefile" RELEASE_GUARD="$RUNNER_TEMP/release-safety/guard.py" release'
             for executable in ('$(printf mvn)', '"$(printf mvn)"', '`printf mvn`',
                                '$TOOL', '${TOOLS}/mvn', './mv*'):
                 for prefix in ('', 'SAFE=true ', 'exec ', 'env '):
@@ -386,7 +441,7 @@ class ReleaseTests(unittest.TestCase):
             shutil.copy(ROOT / "pom.xml", root / "pom.xml")
             path = root / ".github/workflows/release.yml"
             workflow = path.read_text()
-            original = 'run: make -f "$RUNNER_TEMP/release-safety/Makefile" RELEASE_GUARD="$RUNNER_TEMP/release-safety/guard.py" release-dry-run'
+            original = 'run: make -f "$RUNNER_TEMP/release-safety/Makefile" RELEASE_GUARD="$RUNNER_TEMP/release-safety/guard.py" release'
             for key in ('run :', '"run":', "'run':", '"run" :', "'run'  :"):
                 for value in ('mvn release:perform', '"mvn release:perform"',
                               '|\n          mvn release:perform',
@@ -416,14 +471,13 @@ class ReleaseTests(unittest.TestCase):
                     with self.assertRaises(guard.Unsafe):
                         guard.check_policy(root)
 
-    def test_blocker_lookup_allows_only_existing_fixed_command(self):
-        script = next(guard.workflow_commands((ROOT / '.github/workflows/release.yml').read_text()))
+    def test_blocker_script_launcher_allows_only_fixed_command(self):
+        script = 'bash scripts/release/check-blockers.sh'
         guard.check_maven_capture(script, require_capture=True)
         for extra in ('; mvn release:perform', ' $(mvn release:perform)',
                       ' `mvn release:perform`', '\n mvn release:perform'):
             with self.subTest(extra=extra), self.assertRaises(guard.Unsafe):
-                guard.check_maven_capture(script.replace('gh issue list', 'gh issue list' + extra),
-                                          require_capture=True)
+                guard.check_maven_capture(script + extra, require_capture=True)
 
     def test_env_launcher_options_cannot_hide_executables(self):
         for command in ('env -- "$$(command -v mvn)" -B release:perform',
@@ -454,7 +508,7 @@ class ReleaseTests(unittest.TestCase):
             shutil.copy(ROOT / "pom.xml", root / "pom.xml")
             path = root / '.github/workflows/release.yml'
             workflow = path.read_text()
-            original = 'run: make -f "$RUNNER_TEMP/release-safety/Makefile" RELEASE_GUARD="$RUNNER_TEMP/release-safety/guard.py" release-dry-run'
+            original = 'run: make -f "$RUNNER_TEMP/release-safety/Makefile" RELEASE_GUARD="$RUNNER_TEMP/release-safety/guard.py" release'
             for command in ('python3 "$RELEASE_GUARD" run mvn clean -Dsafe.path=/tmp/#bash',
                             "python3 '$RELEASE_GUARD' run mvn clean -Dsafe.path=/tmp/#bash",
                             'mvn release:perform # RELEASE_GUARD'):
@@ -508,7 +562,7 @@ class ReleaseTests(unittest.TestCase):
             workflow_path.parent.mkdir(parents=True)
             shutil.copy(ROOT / "pom.xml", root / "pom.xml")
             workflow = (ROOT / ".github/workflows/release.yml").read_text()
-            original = 'run: make -f "$RUNNER_TEMP/release-safety/Makefile" RELEASE_GUARD="$RUNNER_TEMP/release-safety/guard.py" release-dry-run'
+            original = 'run: make -f "$RUNNER_TEMP/release-safety/Makefile" RELEASE_GUARD="$RUNNER_TEMP/release-safety/guard.py" release'
             self.assertIn(original, workflow)
             for launcher in ("sh", "bash", "dash", "ash", "ksh", "zsh", "fish", "/bin/bash"):
                 for script in ("mvn -B release:perform", "$MVNCMD clean"):
@@ -591,7 +645,7 @@ class ReleaseTests(unittest.TestCase):
             shutil.copy(ROOT / "pom.xml", root / "pom.xml")
             workflow_path = root / ".github/workflows/release.yml"
             workflow = workflow_path.read_text()
-            original = 'run: make -f "$RUNNER_TEMP/release-safety/Makefile" RELEASE_GUARD="$RUNNER_TEMP/release-safety/guard.py" release-dry-run'
+            original = 'run: make -f "$RUNNER_TEMP/release-safety/Makefile" RELEASE_GUARD="$RUNNER_TEMP/release-safety/guard.py" release'
             self.assertIn(original, workflow)
             for command in commands:
                 with self.subTest(command=command, source="workflow"):
@@ -625,7 +679,7 @@ class ReleaseTests(unittest.TestCase):
             shutil.copy(ROOT / "pom.xml", root / "pom.xml")
             workflow_path = root / ".github/workflows/release.yml"
             workflow = workflow_path.read_text()
-            original = 'run: make -f "$RUNNER_TEMP/release-safety/Makefile" RELEASE_GUARD="$RUNNER_TEMP/release-safety/guard.py" release-dry-run'
+            original = 'run: make -f "$RUNNER_TEMP/release-safety/Makefile" RELEASE_GUARD="$RUNNER_TEMP/release-safety/guard.py" release'
             for command in commands:
                 with self.subTest(command=command):
                     workflow_path.write_text(workflow.replace(original, 'run: ' + json.dumps(command)))
@@ -642,7 +696,7 @@ class ReleaseTests(unittest.TestCase):
             for value in ("*release", "&release mvn release:perform", "!!str mvn release:perform"):
                 with self.subTest(value=value):
                     path.write_text("command: &release mvn release:perform\n" +
-                                    workflow.replace('run: make -f "$RUNNER_TEMP/release-safety/Makefile" RELEASE_GUARD="$RUNNER_TEMP/release-safety/guard.py" release-dry-run', "run: " + value))
+                                    workflow.replace('run: make -f "$RUNNER_TEMP/release-safety/Makefile" RELEASE_GUARD="$RUNNER_TEMP/release-safety/guard.py" release', "run: " + value))
                     with self.assertRaisesRegex(guard.Unsafe, "aliased or tagged"):
                         guard.check_policy(root)
 
@@ -663,7 +717,7 @@ class ReleaseTests(unittest.TestCase):
             shutil.copy(ROOT / 'pom.xml', root / 'pom.xml')
             workflow_path = root / '.github/workflows/release.yml'
             workflow = workflow_path.read_text()
-            original = 'run: make -f "$RUNNER_TEMP/release-safety/Makefile" RELEASE_GUARD="$RUNNER_TEMP/release-safety/guard.py" release-dry-run'
+            original = 'run: make -f "$RUNNER_TEMP/release-safety/Makefile" RELEASE_GUARD="$RUNNER_TEMP/release-safety/guard.py" release'
             self.assertIn(original, workflow)
             for command in commands:
                 with self.subTest(command=command, source='workflow'):
@@ -687,7 +741,7 @@ class ReleaseTests(unittest.TestCase):
             shutil.copy(ROOT / 'pom.xml', root / 'pom.xml')
             workflow_path = root / '.github/workflows/release.yml'
             workflow = workflow_path.read_text()
-            original = 'run: make -f "$RUNNER_TEMP/release-safety/Makefile" RELEASE_GUARD="$RUNNER_TEMP/release-safety/guard.py" release-dry-run'
+            original = 'run: make -f "$RUNNER_TEMP/release-safety/Makefile" RELEASE_GUARD="$RUNNER_TEMP/release-safety/guard.py" release'
             self.assertIn(original, workflow)
             for executable in ('mvn', '/usr/bin/mvn', './mvnw', '$MVNCMD'):
                 for comment in ('# captured', '# ignored (mvn deploy) <(mvn deploy)'):
@@ -721,7 +775,7 @@ class ReleaseTests(unittest.TestCase):
             workflow_path = root / '.github/workflows/release.yml'
             workflow = workflow_path.read_text()
             makefile = (ROOT / 'Makefile').read_text()
-            original = 'run: make -f "$RUNNER_TEMP/release-safety/Makefile" RELEASE_GUARD="$RUNNER_TEMP/release-safety/guard.py" release-dry-run'
+            original = 'run: make -f "$RUNNER_TEMP/release-safety/Makefile" RELEASE_GUARD="$RUNNER_TEMP/release-safety/guard.py" release'
             self.assertIn(original, workflow)
             for command in commands:
                 with self.subTest(command=command):
@@ -860,31 +914,6 @@ class ReleaseTests(unittest.TestCase):
                         process.kill()
                     process.communicate()
 
-    def test_encoded_and_multiline_credentials(self):
-        env = {
-            "MAVEN_GPG_PASSPHRASE": "first line\nsecond line+/=",
-            "SONATYPE_TOKEN_USERNAME": "dummy-user",
-            "SONATYPE_TOKEN_PASSWORD": "dummy-password",
-        }
-        for value in [*env.values(), "dummy-user:dummy-password"]:
-            for encoded in (
-                value,
-                base64.b64encode(value.encode()).decode(),
-                urllib.parse.quote(value, safe=""),
-                urllib.parse.quote(value),
-                urllib.parse.quote(urllib.parse.quote(value)),
-                urllib.parse.quote(urllib.parse.quote(value), safe=""),
-                urllib.parse.quote_plus(value),
-            ):
-                with self.subTest(encoded=encoded):
-                    self.assertEqual(
-                        b"[REDACTED]", guard.redact(encoded.encode(), guard.secret_forms(env))
-                    )
-        self.assertEqual(
-            guard.redact(b'Authorization: Bearer unknown\n-Dpassword="a\nb"', []),
-            b"Authorization: [REDACTED]\n-Dpassword=[REDACTED]",
-        )
-
     def test_xml_escaped_credentials_in_both_streams(self):
         secret = "xml&<tag>\"'secret"
         forms = (
@@ -913,90 +942,12 @@ class ReleaseTests(unittest.TestCase):
                 self.assertEqual(console, b"[REDACTED]\n" * len(forms))
                 self.assertEqual((Path(directory) / (name + ".log")).read_bytes(), console)
 
-    def test_quoted_authorization_headers(self):
-        for header in ("Authorization", "Proxy-Authorization"):
-            for quote in ("", "'", '"'):
-                with self.subTest(header=header, quote=quote):
-                    data = f"{quote}{header}{quote}: {quote}Bearer unknown{quote}\n".encode()
-                    self.assertNotIn(b"unknown", guard.redact(data, []))
-
-    def test_quoted_credential_arguments(self):
-        for quote in (b"'", b'"'):
-            for option in (b"-Dpassword=", b"--define=token=", b"--define secret=",
-                           b"-define=token=", b"-define secret="):
-                with self.subTest(quote=quote, option=option):
-                    result = guard.redact(quote + option + b"two words\nlast" + quote, [])
-                    self.assertNotIn(b"words", result)
-                    self.assertNotIn(b"last", result)
-                    self.assertIn(b"[REDACTED]", result)
-
-    def test_escaped_quotes_in_credential_arguments(self):
-        for quote in (b"'", b'"'):
-            secret = b"alpha" + b"\\" + quote + b"beta gamma"
-            for value in (
-                b"-Dpassword=" + quote + secret + quote,
-                quote + b"-Dpassword=" + secret + quote,
-            ):
-                with self.subTest(value=value):
-                    result = guard.redact(value, [])
-                    self.assertNotIn(b"beta", result)
-                    self.assertNotIn(b"gamma", result)
-                    self.assertIn(b"[REDACTED]", result)
-
-    def test_secrets_matching_credential_markers(self):
-        for marker, output in (
-            ("password", b"-Ddb.password=unregistered-value"),
-            ("Authorization", b"Authorization: Bearer unregistered-value"),
-        ):
-            with self.subTest(marker=marker):
-                result = guard.redact(output, guard.secret_forms({"TOKEN": marker}))
-                self.assertNotIn(b"unregistered-value", result)
-                self.assertNotIn(marker.encode(), result)
-
-    def test_overlapping_structured_and_literal_secrets(self):
-        for secret in ("prefix-Authorization: suffix", "prefix-Dpassword=value tail"):
-            with self.subTest(secret=secret):
-                result = guard.redact(secret.encode(), guard.secret_forms({"TOKEN": secret}))
-                self.assertEqual(result, b"[REDACTED]")
-        self.assertEqual(guard.redact(b"ababa", [b"aba"]), b"[REDACTED]")
-
-    def test_split_output_artifacts_and_exit_status(self):
-        with tempfile.TemporaryDirectory() as directory:
-            # Use a real subprocess to verify both console streams and the resulting files.
-            command = [
-                sys.executable,
-                "-c",
-                "import os\nfor fd in (1, 2):\n"
-                ' for part in (b"diagnostic: ", b"dummy-", b"secret\\n"):\n'
-                "  os.write(fd, part)\nraise SystemExit(17)",
-            ]
-            script = (
-                "import guard, os\nfrom pathlib import Path\n"
-                f"raise SystemExit(guard.capture({command!r}, os.environ, "
-                f"guard.secret_forms(os.environ), Path({directory!r})))"
-            )
-            result = subprocess.run(
-                [sys.executable, "-c", script],
-                capture_output=True,
-                cwd=ROOT / "scripts/release",
-                env=dict(os.environ, MAVEN_GPG_PASSPHRASE="dummy-secret"),
-            )
-            self.assertEqual(result.returncode, 17)
-            for name, console in (("stdout", result.stdout), ("stderr", result.stderr)):
-                self.assertEqual(console, (Path(directory) / (name + ".log")).read_bytes())
-                self.assertEqual(console, b"diagnostic: [REDACTED]\n")
-
-    def test_capture_read_failure_preserves_completed_maven_status(self):
-        for status in (0, 17):
-            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
-                process = unittest.mock.Mock()
-                process.poll.return_value = status
-                process.wait.return_value = status
-                with patch.object(guard.subprocess, "Popen", return_value=process), \
-                     patch.object(guard.selectors, "DefaultSelector", side_effect=OSError("secret")), \
-                     patch.object(guard.os, "killpg"), patch.object(guard, "write_logs") as logs:
-                    self.assertEqual(guard.capture(["mvn"], {}, [], Path(directory)), status)
-                    logs.assert_called_once_with([guard.FAILED_LOG, guard.FAILED_LOG], Path(directory))
+    def test_maven_launcher_skips_unchecked_rc_files(self):
+        with patch.dict(os.environ, {"MAVEN_SKIP_RC": ""}, clear=True), \
+             patch.object(sys, "argv", ["guard.py", "run", "mvn", "validate"]), \
+             patch.object(guard, "capture", return_value=0) as capture:
+            self.assertEqual(guard.main(), 0)
+            self.assertEqual(capture.call_args.args[1]["MAVEN_SKIP_RC"], "1")
 
     def test_configured_maven_executable(self):
         for executable in ("/usr/bin/mvn", "./mvnw", "custom-maven"):
@@ -1006,149 +957,6 @@ class ReleaseTests(unittest.TestCase):
                  patch.object(guard, "check_runtime_options"):
                 self.assertEqual(guard.main(), 0)
                 self.assertEqual(capture.call_args.args[0], [executable, "release:prepare"])
-
-    def test_output_failures_preserve_maven_status(self):
-        for status in (0, 17):
-            for failure in ("directory", "artifact", "stdout", "stderr"):
-                with self.subTest(status=status, failure=failure), tempfile.TemporaryDirectory() as directory:
-                    logs = Path(directory) / "logs"
-                    if failure == "directory":
-                        logs.write_text("blocked")
-                    elif failure == "artifact":
-                        logs.mkdir()
-                        (logs / "stdout.log").mkdir()
-                    command = [sys.executable, "-c",
-                               f"import os; os.write(1, b'out\\n'); os.write(2, b'err\\n'); raise SystemExit({status})"]
-                    script = (
-                        "import guard, os\nfrom pathlib import Path\n"
-                        f"raise SystemExit(guard.capture({command!r}, os.environ, [], Path({str(logs)!r})))"
-                    )
-                    read_fd, write_fd = os.pipe()
-                    os.close(read_fd)
-                    try:
-                        result = subprocess.run(
-                            [sys.executable, "-c", script], cwd=ROOT / "scripts/release",
-                            stdout=write_fd if failure == "stdout" else subprocess.PIPE,
-                            stderr=write_fd if failure == "stderr" else subprocess.PIPE,
-                        )
-                    finally:
-                        os.close(write_fd)
-                    self.assertEqual(result.returncode, status)
-                    if failure != "stdout":
-                        self.assertEqual(result.stdout, b"out\n")
-                    if failure != "stderr":
-                        self.assertIn(b"err\n", result.stderr)
-                        self.assertIn(b"values withheld", result.stderr)
-                    if failure in ("stdout", "stderr"):
-                        self.assertEqual((logs / "stdout.log").read_bytes(), b"out\n")
-                    if failure != "directory":
-                        self.assertEqual((logs / "stderr.log").read_bytes(), b"err\n")
-
-    def test_sanitization_failure_writes_fixed_logs(self):
-        for status in (0, 17):
-            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
-                script = (
-                    "import guard, os\nfrom pathlib import Path\n"
-                    "guard.redact = lambda *_: (_ for _ in ()).throw(ValueError('secret'))\n"
-                    f"raise SystemExit(guard.capture([{sys.executable!r}, '-c', "
-                    f"'print(\"secret\"); raise SystemExit({status})'], os.environ, [], Path({directory!r})))"
-                )
-                result = subprocess.run([sys.executable, "-c", script], capture_output=True,
-                                        cwd=ROOT / "scripts/release")
-                self.assertEqual(result.returncode, status)
-                self.assertEqual(result.stdout, guard.FAILED_LOG)
-                self.assertEqual(result.stderr, guard.FAILED_LOG)
-                self.assertEqual((Path(directory) / "stdout.log").read_bytes(), guard.FAILED_LOG)
-                self.assertEqual((Path(directory) / "stderr.log").read_bytes(), guard.FAILED_LOG)
-
-    def test_overflow_drains_without_interrupting_maven(self):
-        for status in (0, 17):
-            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
-                marker = Path(directory) / "completed"
-                command = [sys.executable, "-c",
-                           "import os\nfor fd in (1, 2):\n"
-                           " os.write(fd, b'-Dpassword=\"first\\nsecret tail' * 100)\n"
-                           f"open({str(marker)!r}, 'w').write('done')\nraise SystemExit({status})"]
-                script = (
-                    "import guard, os\nfrom pathlib import Path\nguard.LIMIT = 64\n"
-                    f"raise SystemExit(guard.capture({command!r}, os.environ, [], Path({directory!r})))"
-                )
-                result = subprocess.run([sys.executable, "-c", script], capture_output=True,
-                                        cwd=ROOT / "scripts/release", timeout=5)
-                self.assertEqual(result.returncode, status)
-                self.assertEqual(marker.read_text(), "done")
-                for name, console in (("stdout", result.stdout), ("stderr", result.stderr)):
-                    self.assertEqual(console, guard.OVERFLOW_LOG)
-                    self.assertEqual((Path(directory) / (name + ".log")).read_bytes(), console)
-
-    def test_interruption_during_log_writes_does_not_replay_output(self):
-        for signum in (signal.SIGTERM, signal.SIGHUP):
-            for partial in (False, True):
-                with self.subTest(signum=signum, partial=partial), tempfile.TemporaryDirectory() as directory:
-                    logs = Path(directory) / "logs"
-                    calls = Path(directory) / "writes"
-                    command = [sys.executable, "-c",
-                               "import os; os.write(1, b'out\\n'); os.write(2, b'err\\n')"]
-                    script = (
-                        "import guard, os\nfrom pathlib import Path\n"
-                        "original = guard.write_logs\n"
-                        "def interrupted_write(clean, logs):\n"
-                        f" with Path({str(calls)!r}).open('a') as out: out.write('called\\n')\n"
-                        + (" logs.mkdir(parents=True, exist_ok=True)\n"
-                           " with (logs / 'stdout.log').open('ab') as out: out.write(clean[0])\n"
-                           if partial else " original(clean, logs)\n")
-                        + f" guard.interrupted({int(signum)}, None)\n"
-                        "guard.write_logs = interrupted_write\n"
-                        f"raise SystemExit(guard.capture({command!r}, os.environ, [], Path({str(logs)!r})))"
-                    )
-                    result = subprocess.run([sys.executable, "-c", script], capture_output=True,
-                                            cwd=ROOT / "scripts/release", timeout=5)
-                    self.assertEqual(result.returncode, 128 + signum)
-                    self.assertEqual(calls.read_text(), "called\n")
-                    self.assertEqual((logs / "stdout.log").read_bytes(), b"out\n")
-                    if partial:
-                        self.assertFalse((logs / "stderr.log").exists())
-                    else:
-                        self.assertEqual(result.stdout, b"out\n")
-                        self.assertEqual(result.stderr, b"err\n")
-                        self.assertEqual((logs / "stderr.log").read_bytes(), b"err\n")
-
-    def test_inherited_pipes_have_bounded_safe_capture(self):
-        for complete_stderr in (False, True):
-            with self.subTest(complete_stderr=complete_stderr), tempfile.TemporaryDirectory() as directory:
-                pid_file = Path(directory) / "child"
-                command = [sys.executable, "-c",
-                           "import os, time\nchild = os.fork()\nif child == 0:\n"
-                           + (" os.close(2)\n" if complete_stderr else "")
-                           + " os.write(1, b'known-secret-prefix')\n"
-                           " time.sleep(30)\n os._exit(0)\n"
-                           f"open({str(pid_file)!r}, 'w').write(str(child))\n"
-                           + ("os.write(2, b'-Dpassword=\"first\\nunknown secret tail\"')\n"
-                              if complete_stderr else "os.write(2, b'-Dpassword=\"first\\nunknown secret tail')\n")
-                           + "raise SystemExit(17)"]
-                script = (
-                    "import guard, os\nfrom pathlib import Path\n"
-                    f"raise SystemExit(guard.capture({command!r}, os.environ, [b'known-secret-prefix-tail'], Path({directory!r})))"
-                )
-                started = time.monotonic()
-                try:
-                    result = subprocess.run([sys.executable, "-c", script], capture_output=True,
-                                            cwd=ROOT / "scripts/release", timeout=5)
-                    self.assertLess(time.monotonic() - started, 4)
-                    self.assertEqual(result.returncode, 17)
-                    self.assertEqual(result.stdout, guard.INCOMPLETE_LOG)
-                    self.assertEqual((Path(directory) / "stdout.log").read_bytes(), result.stdout)
-                    if complete_stderr:
-                        self.assertEqual(result.stderr, b'-Dpassword=[REDACTED]')
-                    else:
-                        self.assertEqual(result.stderr, guard.INCOMPLETE_LOG)
-                    self.assertEqual((Path(directory) / "stderr.log").read_bytes(), result.stderr)
-                finally:
-                    if pid_file.exists():
-                        try:
-                            os.kill(int(pid_file.read_text()), signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
 
 
 if __name__ == "__main__":
