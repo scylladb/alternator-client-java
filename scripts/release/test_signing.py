@@ -19,6 +19,15 @@ import signing
 ROOT = Path(__file__).resolve().parents[2]
 REPOSITORY_PRIMARY = signing.PRIMARY
 REPOSITORY_SIGNING = signing.SIGNING
+# Public synthetic phrase, used only with the disposable keys made by this suite.
+FIXTURE_PHRASE = "test-only-release-passphrase"
+
+
+def running(pid):
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except (FileNotFoundError, ProcessLookupError):
+        return False
 
 
 @unittest.skipUnless(shutil.which("gpg") and shutil.which("git"), "GnuPG and Git required")
@@ -26,10 +35,14 @@ class SigningTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.fixture = tempfile.TemporaryDirectory(prefix="repo-signing-fixture-")
+        cls.addClassCleanup(cls.fixture.cleanup)
         cls.directory = Path(cls.fixture.name)
         cls.keyring = cls.directory / "gnupg"
         cls.keyring.mkdir(mode=0o700)
-        cls.password = "test-only-release-passphrase"
+        cls.addClassCleanup(subprocess.run,
+                            ["gpgconf", "--homedir", str(cls.keyring), "--kill", "gpg-agent"],
+                            capture_output=True, check=True, timeout=60)
+        cls.password = FIXTURE_PHRASE
         def gpg(*args):
             result = subprocess.run(
                 ["gpg", "--no-options", "--homedir", str(cls.keyring), "--batch",
@@ -49,12 +62,6 @@ class SigningTests(unittest.TestCase):
         cls.private.write_text(gpg("--armor", "--export-secret-subkeys", cls.primary))
         cls.full = cls.directory / "full.asc"
         cls.full.write_text(gpg("--armor", "--export-secret-keys", cls.primary))
-
-    @classmethod
-    def tearDownClass(cls):
-        subprocess.run(["gpgconf", "--homedir", str(cls.keyring), "--kill", "gpg-agent"],
-                       capture_output=True, check=True, timeout=60)
-        cls.fixture.cleanup()
 
     @contextmanager
     def repository(self, full=False, password=None):
@@ -92,7 +99,7 @@ class SigningTests(unittest.TestCase):
 
     def release(self):
         signing.run(["git", "commit", "--quiet", "--allow-empty", "-m", "Release"])
-        signing.run(["git", "tag", "-s", "-m", "Release 1.0", "v1.0.0"])
+        signing.run(["git", "tag", "-s", "-m", "Release 1.0", "1.0.0"])
 
     def test_repository_setup_failure_restores_working_directory(self):
         original = Path.cwd()
@@ -117,7 +124,7 @@ class SigningTests(unittest.TestCase):
             with self.session():
                 self.release()
             signing.verify_commit("HEAD")
-            signing.verify_tag("v1.0.0", signing.run(["git", "rev-parse", "HEAD"]).strip())
+            signing.verify_tag("1.0.0", signing.run(["git", "rev-parse", "HEAD"]).strip())
             self.assertEqual(Path(".git/config").read_bytes(), config)
             self.assertFalse(list(directory.glob("release-signing-*")))
             self.assertFalse(Path(os.environ["GITHUB_ENV"]).exists())
@@ -176,11 +183,11 @@ class SigningTests(unittest.TestCase):
                 signing.run(["git", "-c", "commit.gpgsign=false", "commit", "--quiet",
                              "--allow-empty", "-m", "Unsigned"])
                 signing.run(["git", "-c", "tag.gpgSign=false", "tag", "-a", "-m",
-                             "Unsigned", "v1.0.0"])
+                             "Unsigned", "1.0.0"])
             with self.assertRaises(signing.SigningError):
                 signing.verify_commit("HEAD")
             with self.assertRaises(signing.SigningError):
-                signing.verify_tag("v1.0.0")
+                signing.verify_tag("1.0.0")
 
     def test_tag_at_unexpected_commit_rejected(self):
         with self.repository():
@@ -188,7 +195,7 @@ class SigningTests(unittest.TestCase):
                 self.release()
                 signing.run(["git", "commit", "--quiet", "--allow-empty", "-m", "Later"])
             with self.assertRaisesRegex(signing.SigningError, "unexpected commit"):
-                signing.verify_tag("v1.0.0", signing.run(["git", "rev-parse", "HEAD"]).strip())
+                signing.verify_tag("1.0.0", signing.run(["git", "rev-parse", "HEAD"]).strip())
 
     def test_batch_signing_reuse_and_tamper_rejection(self):
         with self.repository(), self.session():
@@ -251,11 +258,6 @@ class SigningTests(unittest.TestCase):
         self.check_exec_termination("teardown")
 
     def check_exec_termination(self, window):
-        def running(pid):
-            try:
-                return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
-            except FileNotFoundError:
-                return False
         for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
             with self.subTest(signum=signum), self.make_repository() as directory:
                 ready, stopped = directory / "ready", directory / "stopped"
@@ -369,6 +371,7 @@ class SigningTests(unittest.TestCase):
                         try:
                             os.killpg(group, signal.SIGKILL)
                         except ProcessLookupError:
+                            # The fixture process group has already exited.
                             pass
                     pids = ([child_pid] if child_pid else []) + (
                         [int(descendant_ready.read_text())] if descendant_ready.exists() else [])
@@ -376,6 +379,7 @@ class SigningTests(unittest.TestCase):
                         try:
                             os.kill(pid, signal.SIGKILL)
                         except ProcessLookupError:
+                            # The fixture process has already exited.
                             pass
                     for home in directory.glob("release-signing-*/keyring"):
                         subprocess.run(["gpgconf", "--homedir", str(home), "--kill", "gpg-agent"],
@@ -392,10 +396,82 @@ class SigningTests(unittest.TestCase):
             self.assertEqual(Path(".git/config").read_bytes(), config)
             self.assertFalse(list(directory.glob("release-signing-*")))
 
+    @unittest.skipUnless(Path("/proc/self/stat").exists(), "Linux process observation required")
+    def test_completed_commands_stop_owned_descendants_before_session_cleanup(self):
+        for status in (0, 17):
+            with self.subTest(status=status), self.repository() as directory:
+                marker = directory / "descendant"
+                child = ("import os,signal,time\nfrom pathlib import Path\n"
+                         "signal.signal(signal.SIGTERM,signal.SIG_IGN)\n"
+                         f"Path({str(marker)!r}).write_text(str(os.getpid()))\n"
+                         "os.close(1)\nos.close(2)\ntime.sleep(60)\n")
+                command = ("import subprocess,sys,time\nfrom pathlib import Path\n"
+                           f"subprocess.Popen([sys.executable,'-c',{child!r}])\n"
+                           "deadline=time.monotonic()+3\n"
+                           f"while not Path({str(marker)!r}).exists() and time.monotonic()<deadline: time.sleep(0.01)\n"
+                           f"if not Path({str(marker)!r}).exists(): raise RuntimeError('Descendant did not become ready')\n"
+                           f"raise SystemExit({status})\n")
+                try:
+                    with self.session() as env:
+                        self.assertEqual(signing.execute([sys.executable, "-c", command], env), status)
+                        pid = int(marker.read_text())
+                        deadline = time.monotonic() + 1
+                        while running(pid) and time.monotonic() < deadline:
+                            time.sleep(0.01)
+                        self.assertFalse(running(pid), "Completed command left an owned descendant alive")
+                        self.assertTrue(Path(env["GNUPGHOME"]).is_dir())
+                    self.assertFalse(list(directory.glob("release-signing-*")))
+                finally:
+                    if marker.exists() and running(int(marker.read_text())):
+                        os.kill(int(marker.read_text()), signal.SIGKILL)
+
+    def test_standalone_public_verification_cancellation_removes_keyring(self):
+        with self.make_repository() as directory:
+            with self.session():
+                self.release()
+            for signum in (signal.SIGTERM, signal.SIGHUP):
+                with self.subTest(signum=signum):
+                    ready, resume = directory / "verify-ready", directory / "verify-resume"
+                    ready.unlink(missing_ok=True)
+                    resume.unlink(missing_ok=True)
+                    script = (
+                        "import os,sys,time\nfrom pathlib import Path\n"
+                        "sys.path.insert(0,'scripts/release')\nimport signing\n"
+                        "original=signing.run\n"
+                        "def paused(command,env=None,**kwargs):\n"
+                        " if command[0]=='git' and 'verify-commit' in command:\n"
+                        f"  marker=Path({str(ready)!r}).with_suffix('.tmp')\n"
+                        "  marker.write_text(env['GNUPGHOME'])\n"
+                        f"  marker.replace({str(ready)!r})\n"
+                        f"  while not Path({str(resume)!r}).exists(): time.sleep(0.01)\n"
+                        " return original(command,env,**kwargs)\n"
+                        "signing.run=paused\nsigning.verify_commit('HEAD')\n"
+                    )
+                    process = subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.PIPE,
+                                               stderr=subprocess.PIPE, env=dict(os.environ, TMPDIR=str(directory)))
+                    try:
+                        deadline = time.monotonic() + 5
+                        while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
+                            time.sleep(0.01)
+                        self.assertTrue(ready.exists(), "Public verification did not open its keyring")
+                        home = Path(ready.read_text())
+                        self.assertTrue(home.is_dir())
+                        process.send_signal(signum)
+                        resume.touch()
+                        stdout, stderr = process.communicate(timeout=5)
+                        self.assertEqual(process.returncode, 128 + signum, stderr)
+                        self.assertFalse(home.exists())
+                        self.assertNotIn(self.password.encode(), stdout + stderr)
+                    finally:
+                        if process.poll() is None:
+                            process.kill()
+                        process.communicate()
+
     def test_exec_accepts_passphrase_file(self):
         with self.repository() as directory:
             password = directory / "passphrase"
-            password.write_text(self.password + "\n")
+            # This file exercises the file interface with the public fixture phrase.
+            password.write_text(FIXTURE_PHRASE + "\n")
             os.environ["RELEASE_GPG_PASSPHRASE_FILE"] = str(password)
             del os.environ["RELEASE_GPG_PASSPHRASE"]
             with patch("sys.argv", ["signing.py", "exec", "git", "commit", "--quiet",
@@ -518,7 +594,7 @@ class SigningTests(unittest.TestCase):
                              "-qm", "Unsigned preparation commit"])
                 self.release()
                 signing.run(["git", "commit", "--allow-empty", "-qm", "Next development"])
-            Path("release.properties").write_text("scm.tag=v1.0.0\n")
+            Path("release.properties").write_text("scm.tag=1.0.0\n")
             with self.assertRaisesRegex(signing.SigningError, "pre-prepare RELEASE_BASE_COMMIT"):
                 signing.verify_prepared()
             with patch.dict(os.environ, RELEASE_BASE_COMMIT=baseline), self.assertRaises(signing.SigningError):
@@ -541,9 +617,9 @@ class SigningTests(unittest.TestCase):
             with self.session():
                 signing.run(["git", "tag", "-s", "-m", "Old commit", "old"])
                 self.release()
-                signing.run(["git", "-c", "tag.gpgSign=false", "tag", "-a", "-m", "Unsigned", "1.0.0"])
+                signing.run(["git", "-c", "tag.gpgSign=false", "tag", "-a", "-m", "Unsigned", "2.0.0"])
             with self.assertRaises(signing.SigningError):
-                signing.verify_release("1.0.0", baseline)
+                signing.verify_release("2.0.0", baseline)
             with self.assertRaisesRegex(signing.SigningError, "newly signed"):
                 signing.verify_release("old", baseline)
             with self.assertRaisesRegex(signing.SigningError, "No release commits"):
@@ -553,7 +629,8 @@ class SigningTests(unittest.TestCase):
     def make_repository(self):
         with self.repository() as directory:
             for name in ["Makefile", "pom.xml", ".github/workflows/release.yml",
-                         "scripts/release/signing.py", "scripts/release/guard.py"]:
+                         "scripts/release/signing.py", "scripts/release/guard.py",
+                         "scripts/release/redaction.py", "scripts/release/assets.py"]:
                 target = Path(name)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(ROOT / name, target)
@@ -589,6 +666,7 @@ class SigningTests(unittest.TestCase):
             os.environ.update(PATH=str(tools) + os.pathsep + os.environ["PATH"],
                               GITHUB_ACTIONS="true", GITHUB_ACTOR="release-operator",
                               GITHUB_TRIGGERING_ACTOR="rerun-operator",
+                              SONATYPE_TOKEN_USERNAME="synthetic-user", SONATYPE_TOKEN_PASSWORD="synthetic-password",
                               TEST_SIGNING_KEY=self.subkey, RELEASE_LOG_DIR=str(directory / "logs"))
             signing.run(["git", "add", "."])
             signing.run(["git", "-c", "user.name=Initial", "-c", "user.email=initial@example.invalid",
@@ -638,6 +716,56 @@ class SigningTests(unittest.TestCase):
             self.assertFalse(list(directory.glob("release-signing-*")))
 
     @unittest.skipUnless(shutil.which("mvn"), "Maven required")
+    def test_real_maven_release_forks_inherit_signing_session(self):
+        with self.repository(), self.session():
+            # Use the library's exact release/SCM/GPG pins and settings, without
+            # a deploy goal or publishing extension. No credentials leave the host.
+            import xml.etree.ElementTree as ET
+            ns = {"m": "http://maven.apache.org/POM/4.0.0"}
+            source = ET.parse(ROOT / "pom.xml").getroot()
+            plugins = source.findall(".//m:plugin", ns)
+            release = next(p for p in plugins if p.findtext("m:artifactId", namespaces=ns)
+                           == "maven-release-plugin")
+            gpg_plugin = next(p for p in plugins if p.findtext("m:artifactId", namespaces=ns)
+                              == "maven-gpg-plugin")
+            ET.SubElement(release.find("m:configuration", ns), "preparationGoals").text = "verify"
+            for element in release.iter():
+                element.tag = element.tag.rsplit("}", 1)[-1]
+            # Avoid pulling the library's dependency graph into the fixture.
+            pom = ('<project><modelVersion>4.0.0</modelVersion><groupId>test</groupId>'
+                   '<artifactId>release-fork-test</artifactId><version>1.0.0-SNAPSHOT</version>'
+                   '<packaging>pom</packaging><properties><release.autopublish>false</release.autopublish>'
+                   '<gpg.bestPractices>true</gpg.bestPractices></properties><scm>'
+                   '<connection>scm:git:file://' + str(Path.cwd()) + '</connection>'
+                   '<developerConnection>scm:git:file://' + str(Path.cwd()) + '</developerConnection>'
+                   '<tag>HEAD</tag></scm><build><plugins>' + ET.tostring(release, encoding="unicode")
+                   + '</plugins></build><profiles><profile><id>release</id><build><plugins>'
+                   '<plugin><groupId>org.apache.maven.plugins</groupId>'
+                   '<artifactId>maven-gpg-plugin</artifactId><version>'
+                   + gpg_plugin.findtext("m:version", namespaces=ns)
+                   + '</version><executions><execution><id>sign</id><phase>verify</phase>'
+                   '<goals><goal>sign</goal></goals><configuration><gpgArguments>'
+                   '<arg>--pinentry-mode</arg><arg>loopback</arg></gpgArguments></configuration>'
+                   '</execution></executions></plugin></plugins></build></profile></profiles></project>')
+            Path("pom.xml").write_text(pom)
+            signing.run(["git", "add", "pom.xml"])
+            signing.run(["git", "commit", "-qm", "Fixture"])
+            baseline = signing.run(["git", "rev-parse", "HEAD"]).strip()
+            for command in (["mvn", "-B", "-ntp", "release:prepare", "-DreleaseVersion=1.0.0",
+                             "-DdevelopmentVersion=1.0.1-SNAPSHOT"],
+                            ["mvn", "-B", "-ntp", "release:perform", "-Dgoals=verify"]):
+                result = subprocess.run(command, capture_output=True, text=True, timeout=180)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                signing.verify_prepared(baseline)
+                if "release:prepare" in command:
+                    signing.save_prepared(baseline)
+            signatures = list(Path("target/checkout/target").glob("*.asc"))
+            self.assertEqual(len(signatures), 1)
+            with signing.public_environment() as public:
+                signing.verify_status(signing.gpg("--status-fd", "1", "--verify", signatures[0],
+                                                  "target/checkout/pom.xml", env=public))
+
+    @unittest.skipUnless(shutil.which("mvn"), "Maven required")
     def test_maven_plugin_signs_without_cached_passphrase(self):
         with self.repository(), self.session():
             Path("pom.xml").write_text(
@@ -647,7 +775,7 @@ class SigningTests(unittest.TestCase):
             # Maven must supply its environment passphrase after agent expiry.
             signing.run(["gpgconf", "--homedir", os.environ["GNUPGHOME"], "--kill", "gpg-agent"])
             result = subprocess.run(
-                ["mvn", "-B", "-ntp", "org.apache.maven.plugins:maven-gpg-plugin:3.2.4:sign",
+                ["mvn", "-B", "-ntp", "org.apache.maven.plugins:maven-gpg-plugin:3.2.8:sign",
                  "-Dgpg.bestPractices=true"], capture_output=True, text=True, timeout=180)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             signatures = list(Path("target").rglob("*.asc"))
@@ -658,6 +786,42 @@ class SigningTests(unittest.TestCase):
 
 
 class DiagnosticTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("gpg") and Path("/proc/self/stat").exists(), "GnuPG and Linux required")
+    def test_class_fixture_cleanup_survives_partial_setup_and_shutdown_failure(self):
+        for shutdown_failure in (False, True):
+            with self.subTest(shutdown_failure=shutdown_failure), tempfile.TemporaryDirectory() as directory:
+                script = (
+                    "import io,subprocess,time,unittest\nfrom pathlib import Path\n"
+                    "from unittest.mock import patch\nimport test_signing\n"
+                    "original=subprocess.run\nagent=None\n"
+                    "def controlled(command,*args,**kwargs):\n"
+                    " global agent\n"
+                    " if '--quick-add-key' in command:\n"
+                    "  home=command[command.index('--homedir')+1]\n"
+                    "  output=original(['gpg-connect-agent','--no-autostart','--homedir',home,'GETINFO pid','/bye'],"
+                    "capture_output=True,text=True,check=True).stdout\n"
+                    "  agent=int(next(line[2:] for line in output.splitlines() if line.startswith('D ')))\n"
+                    "  raise subprocess.CalledProcessError(17,command)\n"
+                    " result=original(command,*args,**kwargs)\n"
+                    + (" if command[0]=='gpgconf': raise subprocess.CalledProcessError(19,command)\n"
+                       if shutdown_failure else "")
+                    + " return result\n"
+                    "class FixtureCase(unittest.TestCase):\n"
+                    " setUpClass=classmethod(test_signing.SigningTests.setUpClass.__func__)\n"
+                    " def test_body(self): self.fail('Partial setup unexpectedly succeeded')\n"
+                    "with patch('subprocess.run',side_effect=controlled):\n"
+                    " result=unittest.TextTestRunner(stream=io.StringIO()).run(unittest.TestSuite([FixtureCase('test_body')]))\n"
+                    f"assert len(result.errors)=={2 if shutdown_failure else 1}, result.errors\n"
+                    "assert not FixtureCase.directory.exists()\n"
+                    "assert agent is not None\n"
+                    "deadline=time.monotonic()+3\n"
+                    "while test_signing.running(agent) and time.monotonic()<deadline: time.sleep(0.01)\n"
+                    "assert not test_signing.running(agent)\n"
+                )
+                result = subprocess.run([sys.executable, "-c", script], cwd=ROOT / "scripts/release",
+                                        capture_output=True, env=dict(os.environ, TMPDIR=directory), timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_pending_interruption_does_not_launch_command(self):
         for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
             with self.subTest(signum=signum), patch.object(signing.subprocess, "Popen") as spawn:
@@ -701,6 +865,33 @@ class DiagnosticTests(unittest.TestCase):
                                        env={"RELEASE_GPG_PASSPHRASE": sentinel})
             self.assertNotIn(sentinel, str(error.exception))
 
+    def test_command_timeout_defaults_and_override_reach_subprocess(self):
+        result = subprocess.CompletedProcess([], 0, "output", "")
+        for options, expected in [({}, 60), ({"timeout": 1800}, 1800)]:
+            with self.subTest(options=options), patch.object(subprocess, "run", return_value=result) as invoke:
+                self.assertEqual(signing.run(["test-command"], **options), "output")
+                self.assertEqual(invoke.call_args.kwargs["timeout"], expected)
+
+    def test_github_command_failures_retain_sanitized_diagnostics(self):
+        secret = "dummy-gh-token-42"
+        result = subprocess.CompletedProcess([], 17, f"upload attempted with {secret}\n",
+                                             "HTTP 403: resource not accessible\n")
+        with patch.object(subprocess, "run", return_value=result):
+            with self.assertRaises(signing.SigningError) as error:
+                signing.run(["gh", "release", "create", "1.2.3"], env={"GH_TOKEN": secret})
+        self.assertIn("upload attempted with [REDACTED]", str(error.exception))
+        self.assertIn("HTTP 403: resource not accessible", str(error.exception))
+        self.assertNotIn(secret, str(error.exception))
+
+    def test_github_error_sanitization_failure_withholds_output(self):
+        sentinel = "DO-NOT-DISCLOSE"
+        result = subprocess.CompletedProcess([], 17, sentinel, sentinel)
+        with patch.object(subprocess, "run", return_value=result), \
+                patch.object(signing.guard, "redact", side_effect=ValueError(sentinel)):
+            with self.assertRaises(signing.SigningError) as error:
+                signing.run(["gh", "release", "create", "1.2.3"])
+        self.assertEqual(str(error.exception), "command failed (exit status 17).")
+
     def test_command_start_and_timeout_errors_withhold_payloads(self):
         for failure, category in [(OSError("DO-NOT-DISCLOSE"), "OS error"),
                                   (subprocess.TimeoutExpired("DO-NOT-DISCLOSE", 60,
@@ -711,6 +902,12 @@ class DiagnosticTests(unittest.TestCase):
                 self.assertIn("GPG signature verification", str(error.exception))
                 self.assertIn(category, str(error.exception))
                 self.assertNotIn("DO-NOT-DISCLOSE", str(error.exception))
+
+        failure = subprocess.TimeoutExpired(["gh", "release", "create", "DO-NOT-DISCLOSE"], 1800,
+                                             output="DO-NOT-DISCLOSE", stderr="DO-NOT-DISCLOSE")
+        with patch.object(subprocess, "run", side_effect=failure):
+            with self.assertRaisesRegex(signing.SigningError, r"^command timed out\.$"):
+                signing.run(failure.cmd, timeout=1800)
 
     def test_unexpected_failure_identifies_operation_and_safe_category(self):
         for failure, category in [(OSError("DO-NOT-DISCLOSE"), "OS error"),
@@ -746,7 +943,7 @@ class ReleaseUserTests(unittest.TestCase):
             gh = Path(temp) / "gh"
             gh.write_text("#!/bin/sh\nprintf '%s\\n' someone-else\n")
             gh.chmod(0o700)
-            for target in ["release-prepare", "release", "release-dry-run", "checkout-one-commit-before",
+            for target in ["release-prepare", "release", "release-dry-run",
                            "_release-prepare", "_release", "_release-dry-run"]:
                 with self.subTest(target=target):
                     result = subprocess.run(

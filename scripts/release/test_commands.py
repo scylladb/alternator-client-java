@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -11,11 +12,70 @@ import unittest
 from unittest.mock import patch
 
 import guard
+from workflow_helpers import workflow_source
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def workflow_commands(workflow):
+    """Read inline and indented run scripts without executing workflow content."""
+    lines = iter(workflow.splitlines())
+    pending = None
+    while True:
+        line = pending if pending is not None else next(lines, None)
+        pending = None
+        if line is None:
+            return
+        match = re.match(r"^(\s*)(-\s+)?(?:run|\"run\"|'run')\s*:\s*(.*)$", line)
+        if not match:
+            continue
+        value = match[3]
+        if value.startswith(("*", "&", "!")):
+            raise AssertionError("aliased or tagged release scripts are unsupported")
+        if not value.startswith(("|", ">")):
+            if value.startswith(('"', "'")):
+                # Find the closing YAML quote before accepting a trailing comment.
+                quoted = re.match(
+                    r'''^("(?:\\.|[^"\\])*"|'(?:''|[^'])*')(?:[ \t]+#.*)?[ \t]*$''',
+                    value,
+                )
+                if not quoted:
+                    raise AssertionError("unsupported quoted release script")
+                value = quoted[1]
+            if value.startswith('"'):
+                try:
+                    value = json.loads(value)
+                except ValueError as error:
+                    raise AssertionError("unsupported quoted release script") from error
+            elif value.startswith("'"):
+                if not value.endswith("'"):
+                    raise AssertionError("unsupported quoted release script")
+                value = value[1:-1].replace("''", "'")
+            yield value
+            continue
+        script = []
+        key_indent = len(match[1]) + len(match[2] or "")
+        for following in lines:
+            if following.strip() and len(following) - len(following.lstrip()) <= key_indent:
+                pending = following
+                break
+            script.append(following)
+        yield (" " if value.startswith(">") else "\n").join(script)
+
+
 class ReleaseCommandTests(unittest.TestCase):
+    def test_dash_prefixed_run_block_stops_before_sibling_environment_and_next_run(self):
+        workflow = """\
+      - run: |
+          printf first
+        env:
+          VALUE: sibling
+      - 'run': 'printf ''next'''
+      - "run": "printf final"
+"""
+        self.assertEqual([script.strip() for script in workflow_commands(workflow)],
+                         ["printf first", "printf 'next'", "printf final"])
+
     def fake_environment(self, directory):
         root = Path(directory)
         binary = root / "mvn"
@@ -108,16 +168,16 @@ class ReleaseCommandTests(unittest.TestCase):
             self.assertFalse(marker.exists())
 
     def test_main_release_rejects_other_dispatch_refs_before_preserving_guard(self):
-        workflow = (ROOT / ".github/workflows/release.yml").read_text()
-        command = next(script for script in guard.workflow_commands(workflow)
-                       if 'Releases targeting main' in script)
+        workflow = workflow_source()
+        command = next(script for script in workflow_commands(workflow)
+                       if "preserve-tools.sh" in script)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for target, ref, accepted in (
                 ("main", "refs/heads/main", True),
                 ("main", "refs/heads/feature", False),
                 ("main", "refs/tags/main", False),
-                ("v1.0", "refs/heads/main", True),
+                ("1.0.0", "refs/heads/main", True),
             ):
                 with self.subTest(target=target, ref=ref):
                     runner = root / str(len(list(root.iterdir())))
@@ -130,19 +190,86 @@ class ReleaseCommandTests(unittest.TestCase):
                     )
                     self.assertEqual(result.returncode == 0, accepted, result.stderr)
                     self.assertEqual((runner / "release-safety").exists(), accepted)
+                    if not accepted:
+                        self.assertIn("::error::", result.stdout)
                     if accepted:
-                        for filename in ("signing.py", "publisher.asc"):
+                        runtime_files = {
+                            "guard.py", "redaction.py", "signing.py", "assets.py", "publisher.asc",
+                            "check-blockers.sh", "setup-maven.sh", "Makefile",
+                        }
+                        self.assertEqual(
+                            {path.name for path in (runner / "release-safety").iterdir()},
+                            runtime_files,
+                        )
+                        for filename in runtime_files - {"Makefile"}:
                             self.assertEqual(
                                 (runner / "release-safety" / filename).read_bytes(),
                                 (ROOT / "scripts/release" / filename).read_bytes(),
                             )
 
+    def test_blocker_checks_use_launch_tools_and_fail_closed(self):
+        """All release gates use launch tooling and reject blockers or query errors."""
+        workflow = workflow_source()
+        commands = [script for script in workflow_commands(workflow) if "check-blockers.sh" in script]
+        self.assertEqual(len(commands), 4)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            preserved = root / "release-safety"
+            preserved.mkdir()
+            shutil.copy2(ROOT / "scripts/release/check-blockers.sh", preserved / "check-blockers.sh")
+            target = root / "historical-target"
+            (target / "scripts/release").mkdir(parents=True)
+            (target / "scripts/release/check-blockers.sh").write_text("exit 99\n")
+            gh = root / "gh"
+            gh.write_text(
+                f"#!{sys.executable}\n"
+                "import os, sys\n"
+                "assert sys.argv[1:] == ['api', '--paginate', '--slurp', "
+                "'repos/fixture/library/issues?state=open&labels=release-blocker&per_page=100']\n"
+                "print(os.environ['BLOCKER_RESULT'])\n"
+                "sys.exit(int(os.environ['BLOCKER_STATUS']))\n"
+            )
+            gh.chmod(0o700)
+            issue = {"html_url": "https://example.invalid/issues/1"}
+            pull_request = {"html_url": "https://example.invalid/pull/2", "pull_request": {}}
+            for command in commands:
+                for output, status, expected in (
+                    ("[[]]", 0, 0),
+                    (json.dumps([[issue]]), 0, 1),
+                    (json.dumps([[pull_request]]), 0, 1),
+                    (json.dumps([[issue] * 100, [pull_request]]), 0, 1),
+                    ("", 7, 7),
+                    ("invalid JSON", 0, {4, 5}),
+                ):
+                    with self.subTest(command=command, status=status, output=output):
+                        result = subprocess.run(
+                            ["bash", "-eo", "pipefail", "-c", command],
+                            cwd=ROOT if "bash scripts/" in command else target,
+                            env={**os.environ, "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                                 "RUNNER_TEMP": str(root), "GITHUB_REPOSITORY": "fixture/library",
+                                 "BLOCKER_RESULT": output, "BLOCKER_STATUS": str(status)},
+                            capture_output=True, text=True, timeout=10,
+                        )
+                        allowed = expected if isinstance(expected, set) else {expected}
+                        self.assertIn(result.returncode, allowed, result.stderr)
+                        if expected == 1:
+                            self.assertIn("::error title=Release blocked::", result.stdout)
+                            for page in json.loads(output):
+                                for item in page:
+                                    self.assertIn(item["html_url"], result.stdout)
+                        elif expected == 0:
+                            self.assertIn("No open release blockers found.", result.stdout)
+                        else:
+                            self.assertNotIn("No open release blockers found.", result.stdout)
+
     def test_workflow_uses_preserved_recipes_in_target_checkout(self):
-        workflow = (ROOT / ".github/workflows/release.yml").read_text()
-        commands = [script.strip() for script in guard.workflow_commands(workflow)
-                    if 'make -f "$RUNNER_TEMP/release-safety/Makefile"' in script
+        workflow = workflow_source()
+        commands = [script.strip() for script in workflow_commands(workflow)
+                    if ('make -f "$RUNNER_TEMP/release-safety/Makefile"' in script and 'github-release' not in script)
                     or script.strip().startswith(
                         'python3 "$RUNNER_TEMP/release-safety/signing.py" verify-prepared')]
+        commands.append(next(script.strip() for script in workflow_commands(
+            workflow_source("release-dry-run")) if script.strip().endswith(' release-dry-run')))
         self.assertEqual(len(commands), 4)
         with tempfile.TemporaryDirectory() as directory:
             root, env = self.fake_environment(directory)
@@ -175,6 +302,8 @@ class ReleaseCommandTests(unittest.TestCase):
             preserved.mkdir()
             shutil.copy2(ROOT / "Makefile", preserved / "Makefile")
             shutil.copy2(ROOT / "scripts/release/guard.py", preserved / "guard.py")
+            shutil.copy2(ROOT / "scripts/release/redaction.py", preserved / "redaction.py")
+            shutil.copy2(ROOT / "scripts/release/assets.py", preserved / "assets.py")
             shutil.copy2(env.pop("RELEASE_SIGNING_HELPER"), preserved / "signing.py")
             shutil.copy2(ROOT / "scripts/release/publisher.asc", preserved / "publisher.asc")
             env["FAKE_PUBLISHER_CERT"] = (preserved / "publisher.asc").read_text()
@@ -201,6 +330,53 @@ class ReleaseCommandTests(unittest.TestCase):
                 output = (root / f"logs/{name}.log").read_text()
                 self.assertNotIn(env["MAVEN_GPG_PASSPHRASE"], output)
                 self.assertEqual(output.count("[REDACTED]"), 3)
+
+    def test_asset_and_maven_setup_steps_use_launch_tools_in_target_checkout(self):
+        release = workflow_source().split("\n  release:\n", 1)[1]
+        commands = [script for script in workflow_commands(release)
+                    if any(name in script for name in ("assets.py", "setup-maven.sh", "github-release"))]
+        self.assertEqual(len(commands), 4)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            preserved = root / "release-safety"
+            preserved.mkdir()
+            shutil.copy2(ROOT / "Makefile", preserved / "Makefile")
+            (preserved / "assets.py").write_text(
+                "import os,sys\n"
+                "with open(os.environ['CALL_TRACE'],'a') as trace:\n"
+                "    trace.write('assets '+sys.argv[1]+'\\n')\n"
+                "if sys.argv[1]=='identity': print('RELEASE_TAG=1.2.3\\nRELEASE_VERSION=1.2.3')\n")
+            (preserved / "setup-maven.sh").write_text('echo setup-maven >> "$CALL_TRACE"\n')
+            target = root / "target-checkout"
+            (target / "scripts/release").mkdir(parents=True)
+            marker = target / "unsafe-target-executed"
+            (target / "scripts/release/assets.py").write_text(
+                f"from pathlib import Path\nPath({str(marker)!r}).touch()\nraise SystemExit(99)\n")
+            (target / "scripts/release/setup-maven.sh").write_text(f'touch "{marker}"\nexit 99\n')
+            for name in ("Makefile", "GNUmakefile"):
+                (target / name).write_text(f"$(shell touch {marker})\n")
+            env = {**os.environ, "RUNNER_TEMP": str(root), "GITHUB_ENV": str(root / "env"),
+                   "GITHUB_ACTIONS": "true", "CALL_TRACE": str(root / "trace"),
+                   "RELEASE_GUARD": str(target / "unsafe-guard.py")}
+            for command in commands:
+                result = subprocess.run(["bash", "-eo", "pipefail", "-c", command],
+                                        cwd=target, env=env, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse(marker.exists())
+            self.assertEqual((root / "trace").read_text().splitlines(),
+                             ["assets check-tokens", "setup-maven", "assets sign",
+                              "assets publish"])
+
+    def test_invalid_validation_target_has_an_error_annotation(self):
+        workflow = workflow_source()
+        command = next(script for script in workflow_commands(workflow)
+                       if "Unsupported target tag" in script)
+        result = subprocess.run(["bash", "-eo", "pipefail", "-c", command], cwd=ROOT,
+                                env={**os.environ, "GITHUB_REF": "refs/heads/main",
+                                     "RELEASE_TARGET_TAG": "unsupported", "RELEASE_VERSION": ""},
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("::error::Unsupported target tag", result.stdout)
 
     def test_passphrase_quotes_and_shell_syntax_never_become_shell_code(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -234,6 +410,37 @@ class ReleaseCommandTests(unittest.TestCase):
             call = json.loads((root / "trace.jsonl").read_text())
             self.assertIn("-DreleaseVersion=2.0.8", call["args"])
 
+    def test_placeholder_tokens_stop_upload_commands_before_maven(self):
+        for target in ("release-prepare", "_release-prepare", "release", "release-dry-run", "_release", "_release-dry-run"):
+            for name in ("SONATYPE_TOKEN_USERNAME", "SONATYPE_TOKEN_PASSWORD"):
+                for value in ("", "PLACEHOLDER_NOT_CONFIGURED"):
+                    with self.subTest(target=target, name=name, value=value), \
+                         tempfile.TemporaryDirectory() as directory:
+                        root, env = self.fake_environment(directory)
+                        env[name] = value
+                        result = self.run_make(target, env)
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn("Configure real Sonatype tokens", result.stderr)
+                        self.assertFalse((root / "trace.jsonl").exists())
+
+    def test_invalid_target_rejected_before_source_selection(self):
+        workflow = workflow_source()
+        commands = list(workflow_commands(workflow))
+        validate = next(script for script in commands if "Unsupported target tag" in script)
+        resolve = next(script for script in commands if "sed 's/^/sha=/'" in script)
+        self.assertLess(commands.index(validate), commands.index(resolve))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            for tag in ("feature", "1.0", "--help", "1.0.0; echo unsafe"):
+                result = subprocess.run(
+                    ["bash", "-eo", "pipefail", "-c", validate + "\n" + resolve], cwd=ROOT,
+                    env={**os.environ, "GITHUB_REF": "refs/heads/main", "RELEASE_VERSION": "",
+                         "RELEASE_TARGET_TAG": tag, "GITHUB_OUTPUT": str(output)},
+                    capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Unsupported target tag", result.stdout)
+                self.assertFalse(output.exists())
+
     def test_maven_failure_keeps_sanitized_artifacts_and_fails_make(self):
         with tempfile.TemporaryDirectory() as directory:
             root, env = self.fake_environment(directory)
@@ -261,8 +468,7 @@ class ReleaseCommandTests(unittest.TestCase):
             self.assertEqual(guard.main(), 2)
             policy.assert_not_called()
 
-    def test_guard_covers_lowercase_release_commands_but_allows_shell_executable_test(self):
-        guard.check_text('[[ -x "$executable" ]]', maven_options=False)
+    def test_guard_covers_lowercase_release_commands(self):
         for command in ("${mvn}", "$(mvn)", "$(MVNCMD)"):
             with self.subTest(command=command), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -282,19 +488,61 @@ class ReleaseCommandTests(unittest.TestCase):
                 self.assertEqual(cleaned, b'"[REDACTED]"')
 
     def test_workflow_preserves_helper_and_checks_target_before_credentials(self):
-        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        workflow = workflow_source()
         self.assertLess(workflow.index("Preserve release guard"), workflow.index("Checkout release target"))
         self.assertLess(workflow.index("Checkout release target"), workflow.index("Check release credential safety"))
         self.assertLess(workflow.index("Check release credential safety"), workflow.index("RELEASE_GPG_PRIVATE_KEY:"))
         self.assertNotIn("gpg-private-key:", workflow)
         self.assertLess(workflow.index("Push changes to SCM"), workflow.index("Upload sanitized stdout"))
-        self.assertIn('git checkout "refs/tags/$RELEASE_TARGET_TAG~1"', workflow)
+        self.assertIn('git checkout --detach "refs/tags/$RELEASE_TARGET_TAG~1" --', workflow)
         self.assertIn("default: main", workflow)
         self.assertEqual(workflow.count("if: always()"), 4)
         self.assertRegex(workflow, r"(?m)^    environment: release$")
 
+    def test_asset_signing_failure_leaves_prepared_objects_on_remote(self):
+        workflow = workflow_source()
+        names = ("Perform release", "Push changes to SCM", "Sign and verify GitHub assets")
+        steps = [step for step in re.split(r"^      - name: ", workflow, flags=re.M)[1:]
+                 if step.splitlines()[0] in names]
+        with tempfile.TemporaryDirectory() as directory:
+            root, env = self.fake_environment(directory)
+            preserved = root / "release-safety"
+            preserved.mkdir()
+            for source in (ROOT / "Makefile", ROOT / "scripts/release/guard.py",
+                           ROOT / "scripts/release/redaction.py"):
+                shutil.copy2(source, preserved / source.name)
+            # Central perform uses fake Maven; only Git pushes to a local bare repo.
+            (preserved / "assets.py").write_text(
+                "import sys\nraise SystemExit(7 if sys.argv[1] == 'sign' else 0)\n")
+            shutil.copy2(ROOT / "pom.xml", root / "pom.xml")
+            shutil.copytree(ROOT / ".github", root / ".github")
+            env.update(RUNNER_TEMP=str(root), GIT_CONFIG_NOSYSTEM="1",
+                       GIT_CONFIG_GLOBAL=os.devnull)
+            remote = root / "remote.git"
+            for args in (["init", "--quiet", "--initial-branch=main"],
+                         ["init", "--quiet", "--bare", str(remote)],
+                         ["remote", "add", "origin", str(remote)],
+                         ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                          "-c", "commit.gpgsign=false", "commit", "--quiet", "--allow-empty", "-m", "Prepared"],
+                         ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                          "-c", "tag.gpgSign=false", "tag", "-a", "1.0.0", "-m", "Prepared"]):
+                subprocess.run(["git", *args], cwd=root, env=env, check=True, capture_output=True)
+            results = []
+            for step in steps:
+                command = next(workflow_commands("      - name: " + step))
+                result = subprocess.run(["bash", "-eo", "pipefail", "-c", command],
+                                        cwd=root, env=env, capture_output=True, timeout=10)
+                results.append(result.returncode)
+                if result.returncode:
+                    break
+            self.assertEqual(results, [0, 0, 7], result.stderr)
+            for ref in ("refs/heads/main", "refs/tags/1.0.0"):
+                local = subprocess.check_output(["git", "rev-parse", ref], cwd=root, env=env)
+                pushed = subprocess.check_output(["git", "--git-dir", str(remote), "rev-parse", ref], env=env)
+                self.assertEqual(pushed, local)
+
     def test_validation_precedes_approval_on_a_separate_runner_without_release_secrets(self):
-        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        workflow = workflow_source()
         validation, release = workflow.split("\n  release:\n", 1)
         release_header = release.split("    steps:", 1)[0]
         self.assertIn("\n  validate:\n", validation)
@@ -307,14 +555,16 @@ class ReleaseCommandTests(unittest.TestCase):
         self.assertIn("    runs-on: ubuntu-latest\n", release_header)
         self.assertIn("    environment: release\n", release_header)
         self.assertNotRegex(release_header, r"(?m)^    if:")
-        self.assertIn("RELEASE_TARGET_COMMIT: ${{ needs.validate.outputs.target-sha }}", release)
+        self.assertIn("RELEASE_TARGET_COMMIT: ${{ inputs.target-sha }}", release)
+        self.assertIn("target-sha: ${{ needs.validate.outputs.target-sha }}",
+                      (ROOT / ".github/workflows/release.yml").read_text())
         self.assertNotIn("cache: maven", release)
-        self.assertEqual(release.count("RELEASE_SKIP_TESTS: 'true'"), 3)
+        self.assertEqual(release.count("RELEASE_SKIP_TESTS: 'true'"), 2)
         self.assertIn("python3 -m unittest discover", validation)
 
     def test_validation_builds_unsigned_release_artifacts_without_deployment(self):
-        workflow = (ROOT / ".github/workflows/release.yml").read_text()
-        command = next(script for script in guard.workflow_commands(workflow)
+        workflow = workflow_source()
+        command = next(script for script in workflow_commands(workflow)
                        if "-Dgpg.skip=true verify" in script)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -361,7 +611,7 @@ class ReleaseCommandTests(unittest.TestCase):
             self.git(source, "commit", "--quiet", "-m", version)
             commits.append(self.git(source, "rev-parse", "HEAD"))
             if version == "release":
-                self.git(source, "tag", "v1.0")
+                self.git(source, "tag", "1.0.0")
         return source, commits
 
     def git(self, directory, *args):
@@ -372,10 +622,10 @@ class ReleaseCommandTests(unittest.TestCase):
         ).strip()
 
     def checkout_validated_target(self, root, source, tag, expected):
-        workflow = (ROOT / ".github/workflows/release.yml").read_text()
-        resolve = next(script for script in guard.workflow_commands(workflow)
+        workflow = workflow_source()
+        resolve = next(script for script in workflow_commands(workflow)
                        if "sed 's/^/sha=/'" in script)
-        checkout = next(script for script in guard.workflow_commands(workflow)
+        checkout = next(script for script in workflow_commands(workflow)
                         if 'git fetch --no-tags origin "$RELEASE_TARGET_COMMIT"' in script)
         validation = root / "validation"
         self.git(root, "clone", "--quiet", str(source), str(validation))
@@ -408,15 +658,53 @@ class ReleaseCommandTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("main advanced after validation", result.stdout)
 
+    def test_main_recheck_uses_original_baseline_and_blocks_late_advance_before_publication(self):
+        workflow = workflow_source()
+        recheck = next(script for script in workflow_commands(workflow)
+                       if "main advanced after release preparation" in script)
+        for advance in (False, True):
+            with self.subTest(advance=advance), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source, commits = self.target_fixture(root)
+                remote = root / "remote.git"
+                self.git(root, "clone", "--quiet", "--bare", str(source), str(remote))
+                baseline = commits[-1]
+                checkout, publisher = self.checkout_validated_target(root, remote, "main", baseline)
+                env = {**os.environ, "RELEASE_TARGET_TAG": "main",
+                       "RELEASE_TARGET_COMMIT": baseline, "RELEASE_BASE_COMMIT": baseline,
+                       "PUBLICATION_SENTINEL": str(root / "published")}
+                result = subprocess.run(
+                    ["bash", "-eo", "pipefail", "-c", checkout], cwd=publisher, env=env,
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                # The recheck step has only the original baseline, not the checkout target.
+                env.pop("RELEASE_TARGET_COMMIT")
+                self.git(publisher, "commit", "--quiet", "--allow-empty", "-m", "prepared release")
+                self.assertNotEqual(self.git(publisher, "rev-parse", "HEAD"), baseline)
+                if advance:
+                    self.git(source, "commit", "--quiet", "--allow-empty", "-m", "main advanced")
+                    self.git(source, "push", "--quiet", str(remote), "main")
+                # The sentinel stands in for publication after the workflow's final guard.
+                result = subprocess.run(
+                    ["bash", "-eo", "pipefail", "-c",
+                     recheck + '\nprintf published > "$PUBLICATION_SENTINEL"'],
+                    cwd=publisher, env=env, capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode == 0, not advance, result.stderr)
+                self.assertEqual((root / "published").exists(), not advance)
+                if advance:
+                    self.assertIn("main advanced after release preparation", result.stdout)
+
     def test_publishing_historical_target_does_not_resolve_a_moved_tag_again(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source, commits = self.target_fixture(root)
-            checkout, publisher = self.checkout_validated_target(root, source, "v1.0", commits[0])
-            self.git(source, "tag", "--force", "v1.0", commits[-1])
+            checkout, publisher = self.checkout_validated_target(root, source, "1.0.0", commits[0])
+            self.git(source, "tag", "--force", "1.0.0", commits[-1])
             result = subprocess.run(
                 ["bash", "-eo", "pipefail", "-c", checkout], cwd=publisher,
-                env={**os.environ, "RELEASE_TARGET_TAG": "v1.0", "RELEASE_TARGET_COMMIT": commits[0]},
+                env={**os.environ, "RELEASE_TARGET_TAG": "1.0.0", "RELEASE_TARGET_COMMIT": commits[0]},
                 capture_output=True, text=True, timeout=10,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -425,8 +713,8 @@ class ReleaseCommandTests(unittest.TestCase):
             self.assertEqual((publisher / "version").read_text(), "initial")
 
     def test_publishing_main_pushes_from_a_sha_checkout_without_an_upstream(self):
-        workflow = (ROOT / ".github/workflows/release.yml").read_text()
-        push = next(script for script in guard.workflow_commands(workflow)
+        workflow = workflow_source()
+        push = next(script for script in workflow_commands(workflow)
                     if "git push origin --follow-tags" in script)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

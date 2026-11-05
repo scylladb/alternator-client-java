@@ -5,15 +5,19 @@ from contextlib import contextmanager
 import os
 from pathlib import Path
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import time
 
+import guard
+
 PRIMARY = "827BC62286108FB70C8B8BAFCF05F6EF40B90F46"
 SIGNING = "8E43CBBEA11FDF577B6E37A743FE35C54462CC17"
 PUBLIC_KEY = Path(__file__).with_name("publisher.asc")
+PREPARED_METADATA = Path("target/release-prepared.properties")
 TERMINATION_GRACE = 2
 
 
@@ -22,7 +26,7 @@ class SigningError(ValueError):
 
 
 def command_operation(command):
-    # Only fixed labels enter diagnostics; argv and child output may contain secrets.
+    # Use fixed operation labels; argv and child output may contain secrets.
     if command[0] == "gpg":
         for flag, label in [("--import", "key import"), ("--detach-sign", "signature creation"),
                             ("--verify", "signature verification"),
@@ -50,10 +54,21 @@ def invoke(command, **kwargs):
         raise SigningError(operation + " could not start (OS error).") from None
 
 
-def run(command, env=None, **kwargs):
-    result = invoke(command, env=env, capture_output=True, text=True, timeout=60, **kwargs)
+def run(command, env=None, timeout=60, **kwargs):
+    result = invoke(command, env=env, capture_output=True, text=True, timeout=timeout, **kwargs)
     if result.returncode:
-        raise SigningError(f"{command_operation(command)} failed (exit status {result.returncode}).")
+        message = f"{command_operation(command)} failed (exit status {result.returncode})."
+        if command[0] == "gh":
+            try:
+                diagnostics = guard.redact((result.stdout + result.stderr).encode(),
+                                           guard.secret_forms(os.environ if env is None else env))
+                diagnostics = diagnostics.decode(errors="replace").strip()
+            except Exception:
+                # A failed sanitizer must not expose the original command output.
+                diagnostics = ""
+            if diagnostics:
+                message += "\n" + diagnostics
+        raise SigningError(message)
     # Git writes --raw verification status to stderr; ordinary callers parse stdout.
     if command[0] == "git" and "--raw" in command and any(
             operation in command for operation in ("verify-commit", "verify-tag")):
@@ -103,11 +118,13 @@ def write_private(path, text, executable=False):
 
 @contextmanager
 def public_environment():
-    with tempfile.TemporaryDirectory(prefix="release-public-") as temp:
+    with session_signals() as interrupted, tempfile.TemporaryDirectory(prefix="release-public-") as temp:
         env = {**os.environ, "GNUPGHOME": temp}
         try:
             gpg("--import", PUBLIC_KEY, env=env)
+            interrupted.check()
             yield env
+            interrupted.check()
         finally:
             run(["gpgconf", "--homedir", temp, "--kill", "gpg-agent"])
 
@@ -177,6 +194,7 @@ def session_signals():
 def execute(command, env):
     with session_signals() as interrupted:
         process = None
+        signum = signal.SIGTERM
         try:
             interrupted.check()
             try:
@@ -191,30 +209,34 @@ def execute(command, env):
                     continue
                 interrupted.check()
                 return status if status >= 0 else 128 - status
-        except BaseException as error:
-            if process is None:
-                raise
+        except (Exception, SystemExit, KeyboardInterrupt) as error:
             signum = error.code - 128 if isinstance(error, SystemExit) and isinstance(error.code, int) else signal.SIGTERM
             if signum not in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
                 signum = signal.SIGTERM
-            try:
-                os.killpg(process.pid, signum)
-            except ProcessLookupError:
-                process.wait()
-                raise error
-            deadline = time.monotonic() + TERMINATION_GRACE
-            try:
-                process.wait(timeout=TERMINATION_GRACE)
-            except subprocess.TimeoutExpired:
-                pass
-            # Make may exit before guard finishes stopping its separate Maven group.
-            time.sleep(max(0, deadline - time.monotonic()))
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait()
             raise
+        finally:
+            if process is not None:
+                try:
+                    os.killpg(process.pid, signum)
+                except ProcessLookupError:
+                    # No owned descendants remain after the parent exits.
+                    process.wait()
+                else:
+                    deadline = time.monotonic() + TERMINATION_GRACE
+                    try:
+                        process.wait(timeout=TERMINATION_GRACE)
+                    except subprocess.TimeoutExpired:
+                        # Escalate after giving the owned group its grace period.
+                        pass
+                    # Guard needs time to stop its separate Maven group, even if
+                    # Make has already exited successfully or with a failure.
+                    time.sleep(max(0, deadline - time.monotonic()))
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        # The process group exited during the grace period.
+                        pass
+                    process.wait()
 
 
 @contextmanager
@@ -303,11 +325,22 @@ def verify_release(tag, baseline=None):
 
 
 def verify_prepared(baseline=None):
-    properties = Path("release.properties").read_text().splitlines()
+    metadata = Path("release.properties")
+    if not metadata.exists():
+        metadata = PREPARED_METADATA
+    properties = metadata.read_text().splitlines()
     tags = [line.removeprefix("scm.tag=") for line in properties if line.startswith("scm.tag=")]
     if len(tags) != 1:
         raise SigningError("Expected exactly one prepared Maven release tag.")
     verify_release(tags[0], baseline)
+
+
+def save_prepared(baseline=None):
+    verify_prepared(baseline)
+    # release:perform deletes release.properties on success. Retain its public
+    # prepared identity before publication for GitHub assets.
+    PREPARED_METADATA.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile("release.properties", PREPARED_METADATA)
 
 
 def verify_commit(commit):
@@ -331,7 +364,8 @@ def sign_files(files, signing_env=None):
             and (os.environ.get("RELEASE_GPG_PRIVATE_KEY") or "RELEASE_GPG_PRIVATE_KEY_FILE" in os.environ)
             and any(not Path(str(Path(filename).resolve()) + ".asc").exists() for filename in files)):
         with signing_session() as session:
-            return sign_files(files, session)
+            sign_files(files, session)
+            return
     with session_signals() as interrupted, public_environment() as env:
         for filename in files:
             interrupted.check()
@@ -354,6 +388,8 @@ def main():
             return credential_gpg(sys.argv[2:], capture=False)
         if len(sys.argv) in (2, 3) and sys.argv[1] == "verify-prepared":
             verify_prepared(*sys.argv[2:])
+        elif len(sys.argv) in (2, 3) and sys.argv[1] == "save-prepared":
+            save_prepared(*sys.argv[2:])
         elif len(sys.argv) in (3, 4) and sys.argv[1] == "verify-release":
             verify_release(*sys.argv[2:])
         elif len(sys.argv) == 3 and sys.argv[1] == "verify-commit":
@@ -366,7 +402,7 @@ def main():
             with signing_session() as env:
                 return execute(sys.argv[2:], env)
         else:
-            raise SigningError("Expected verify-prepared [BASELINE], verify-release TAG [BASELINE], verify-commit COMMIT, verify-tag TAG [COMMIT], sign-files FILE..., or exec COMMAND...")
+            raise SigningError("Expected verify-prepared [BASELINE], save-prepared [BASELINE], verify-release TAG [BASELINE], verify-commit COMMIT, verify-tag TAG [COMMIT], sign-files FILE..., or exec COMMAND...")
         print("Release signing " + sys.argv[1] + " passed.")
         return 0
     except SigningError as error:
@@ -375,7 +411,7 @@ def main():
         category = ("OS error" if isinstance(error, OSError) else
                     "invalid value" if isinstance(error, ValueError) else "internal error")
         operation = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] in (
-            "gpg-program", "verify-prepared", "verify-release", "verify-commit", "verify-tag", "sign-files", "exec") else "command"
+            "gpg-program", "verify-prepared", "save-prepared", "verify-release", "verify-commit", "verify-tag", "sign-files", "exec") else "command"
         print(f"Release signing {operation} failed ({category}); values withheld.", file=sys.stderr)
     return 1
 
