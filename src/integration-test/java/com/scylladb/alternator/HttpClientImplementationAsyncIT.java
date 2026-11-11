@@ -1,3 +1,18 @@
+/*
+ * Copyright ScyllaDB, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package com.scylladb.alternator;
 
 import static org.junit.Assert.*;
@@ -25,12 +40,12 @@ import software.amazon.awssdk.services.dynamodb.model.*;
  * Alternator load balancer, including headers optimization, compression, connection pool config, and
  * TLS.
  *
- * <p>Tests cover Netty and CRT async clients. Requires a running ScyllaDB cluster with Alternator
- * enabled. Set environment variables:
+ * <p>Tests cover Netty and CRT async clients against a CCM-provisioned ScyllaDB cluster. Set
+ * environment variables:
  *
  * <ul>
  *   <li>INTEGRATION_TESTS=true
- *   <li>ALTERNATOR_HOST, ALTERNATOR_PORT, ALTERNATOR_HTTPS_PORT
+ *   <li>SCYLLA_VERSION selects the CCM Scylla package
  * </ul>
  */
 public class HttpClientImplementationAsyncIT {
@@ -115,7 +130,7 @@ public class HttpClientImplementationAsyncIT {
   public void testNettyClientHttpsWithCustomCa() throws Exception {
     Path caCertPath = IntegrationTestConfig.CA_CERT_PATH;
     assumeTrue(
-        "Custom CA certificate path not set. Set ALTERNATOR_CA_CERT_PATH to enable this test.",
+        "CCM cluster did not provide a custom CA certificate.",
         caCertPath != null && Files.exists(caCertPath));
 
     TlsConfig tlsConfig =
@@ -142,7 +157,7 @@ public class HttpClientImplementationAsyncIT {
   public void testNettyClientHttpsWithCustomCaCrud() throws Exception {
     Path caCertPath = IntegrationTestConfig.CA_CERT_PATH;
     assumeTrue(
-        "Custom CA certificate path not set. Set ALTERNATOR_CA_CERT_PATH to enable this test.",
+        "CCM cluster did not provide a custom CA certificate.",
         caCertPath != null && Files.exists(caCertPath));
 
     TlsConfig tlsConfig =
@@ -269,7 +284,7 @@ public class HttpClientImplementationAsyncIT {
   public void testCrtAsyncClientHttpsWithCustomCaFailsOnInit() throws Exception {
     Path caCertPath = IntegrationTestConfig.CA_CERT_PATH;
     assumeTrue(
-        "Custom CA certificate path not set. Set ALTERNATOR_CA_CERT_PATH to enable this test.",
+        "CCM cluster did not provide a custom CA certificate.",
         caCertPath != null && Files.exists(caCertPath));
 
     TlsConfig tlsConfig =

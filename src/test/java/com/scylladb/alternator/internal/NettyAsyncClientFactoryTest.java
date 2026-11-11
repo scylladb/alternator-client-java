@@ -1,9 +1,25 @@
+/*
+ * Copyright ScyllaDB, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package com.scylladb.alternator.internal;
 
 import static org.junit.Assert.*;
 
 import com.scylladb.alternator.AlternatorConfig;
 import com.scylladb.alternator.TlsConfig;
+import com.scylladb.alternator.TlsSessionCacheConfig;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -40,6 +56,8 @@ public class NettyAsyncClientFactoryTest {
             .withMaxConnections(100)
             .withConnectionMaxIdleTimeMs(30000)
             .withConnectionTimeToLiveMs(60000)
+            .withConnectionAcquisitionTimeoutMs(5000)
+            .withConnectionTimeoutMs(5000)
             .build();
     SdkAsyncHttpClient client = NettyAsyncClientFactory.create(null, config, null);
     assertNotNull("Should create client with custom pool settings", client);
@@ -95,6 +113,19 @@ public class NettyAsyncClientFactoryTest {
     client.close();
   }
 
+  @Test(expected = UnsupportedOperationException.class)
+  public void testCreateWithHostnameVerificationDisabledThrows() {
+    TlsConfig tlsConfig = TlsConfig.builder().withVerifyHostname(false).build();
+    NettyAsyncClientFactory.create(null, null, tlsConfig);
+  }
+
+  @Test(expected = UnsupportedOperationException.class)
+  public void testCreateWithCustomSessionCacheThrows() {
+    TlsConfig tlsConfig =
+        TlsConfig.builder().withSessionCacheConfig(TlsSessionCacheConfig.disabled()).build();
+    NettyAsyncClientFactory.create(null, null, tlsConfig);
+  }
+
   @Test
   public void testCreateWithConfigAndTls() {
     AlternatorConfig config =
@@ -126,6 +157,17 @@ public class NettyAsyncClientFactoryTest {
         TlsConfig.builder()
             .withCaCertPath(Path.of("/non/existent/ca.pem"))
             .withTrustSystemCaCerts(false)
+            .build();
+    NettyAsyncClientFactory.create(null, null, tlsConfig);
+  }
+
+  @Test(expected = RuntimeException.class)
+  public void testCreateWithInvalidClientCertificatePathThrows() {
+    TlsConfig tlsConfig =
+        TlsConfig.builder()
+            .withTrustAllCertificates(true)
+            .withClientCertificate(
+                Path.of("/non/existent/client.crt"), Path.of("/non/existent/client.key"))
             .build();
     NettyAsyncClientFactory.create(null, null, tlsConfig);
   }

@@ -1,3 +1,18 @@
+/*
+ * Copyright ScyllaDB, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package com.scylladb.alternator;
 
 import static org.junit.Assert.*;
@@ -97,13 +112,25 @@ public class DynamoDbEnhancedClientTest {
         new URI("http://127.0.0.3:" + port));
   }
 
+  private static AlternatorLiveNodes liveNodesWithHealthDisabled(List<URI> nodes) {
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withSeedHosts(
+                Arrays.asList(
+                    nodes.get(0).getHost(), nodes.get(1).getHost(), nodes.get(2).getHost()))
+            .withScheme(nodes.get(0).getScheme())
+            .withPort(nodes.get(0).getPort())
+            .withNodeHealthConfig(NodeHealthConfig.disabled())
+            .build();
+    return new AlternatorLiveNodes(config);
+  }
+
   @Test
   public void testEnhancedClientCanBeBuiltFromAlternatorClient()
       throws URISyntaxException, IOException {
     List<URI> nodes = createLocalNodes();
 
-    AlternatorLiveNodes liveNodes =
-        new AlternatorLiveNodes(nodes, "http", nodes.get(0).getPort(), "", "");
+    AlternatorLiveNodes liveNodes = liveNodesWithHealthDisabled(nodes);
     BasicQueryPlanInterceptor interceptor = new BasicQueryPlanInterceptor(liveNodes);
 
     ClientOverrideConfiguration overrideConfig =
@@ -136,8 +163,7 @@ public class DynamoDbEnhancedClientTest {
       throws URISyntaxException, IOException {
     List<URI> nodes = createLocalNodes();
 
-    AlternatorLiveNodes liveNodes =
-        new AlternatorLiveNodes(nodes, "http", nodes.get(0).getPort(), "", "");
+    AlternatorLiveNodes liveNodes = liveNodesWithHealthDisabled(nodes);
     BasicQueryPlanInterceptor interceptor = new BasicQueryPlanInterceptor(liveNodes);
 
     ClientOverrideConfiguration overrideConfig =
@@ -164,8 +190,7 @@ public class DynamoDbEnhancedClientTest {
   public void testLoadBalancingWorksWithEnhancedClient() throws URISyntaxException, IOException {
     List<URI> nodes = createLocalNodes();
 
-    AlternatorLiveNodes liveNodes =
-        new AlternatorLiveNodes(nodes, "http", nodes.get(0).getPort(), "", "");
+    AlternatorLiveNodes liveNodes = liveNodesWithHealthDisabled(nodes);
     BasicQueryPlanInterceptor interceptor = new BasicQueryPlanInterceptor(liveNodes);
 
     // Track which hosts are being targeted

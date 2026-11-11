@@ -1,3 +1,18 @@
+/*
+ * Copyright ScyllaDB, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package com.scylladb.alternator.internal;
 
 import static org.junit.Assert.*;
@@ -13,19 +28,27 @@ public class AsyncClientDetectorTest {
 
   @Test
   public void testDetectFindsImplementation() {
-    // Both Netty and CRT are on the test classpath, so detection should succeed
     AsyncClientDetector.AsyncClientType type = AsyncClientDetector.detect();
     assertNotNull("Should detect an async client type", type);
   }
 
   @Test
   public void testDetectPrefersNettyOverCrt() {
-    // Both are on classpath; Netty should win by priority
     AsyncClientDetector.AsyncClientType type = AsyncClientDetector.detect();
     assertEquals(
         "Netty should be preferred when both are available",
         AsyncClientDetector.AsyncClientType.NETTY,
         type);
+  }
+
+  @Test
+  public void testRequireAvailableHttpClientNetty() {
+    AsyncClientDetector.requireAvailableHttpClient(AsyncClientDetector.AsyncClientType.NETTY);
+  }
+
+  @Test
+  public void testRequireAvailableHttpClientCrt() {
+    AsyncClientDetector.requireAvailableHttpClient(AsyncClientDetector.AsyncClientType.CRT);
   }
 
   @Test

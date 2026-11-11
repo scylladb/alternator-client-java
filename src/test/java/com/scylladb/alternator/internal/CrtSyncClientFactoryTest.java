@@ -1,12 +1,33 @@
+/*
+ * Copyright ScyllaDB, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package com.scylladb.alternator.internal;
 
 import static org.junit.Assert.*;
 
 import com.scylladb.alternator.AlternatorConfig;
 import com.scylladb.alternator.TlsConfig;
+import com.scylladb.alternator.TlsSessionCacheConfig;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.logging.Handler;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 import org.junit.Test;
 import software.amazon.awssdk.http.SdkHttpClient;
 
@@ -39,6 +60,9 @@ public class CrtSyncClientFactoryTest {
         AlternatorConfig.builder()
             .withMaxConnections(100)
             .withConnectionMaxIdleTimeMs(30000)
+            .withConnectionTimeToLiveMs(60000)
+            .withConnectionAcquisitionTimeoutMs(5000)
+            .withConnectionTimeoutMs(5000)
             .build();
     SdkHttpClient client = CrtSyncClientFactory.create(null, config, null);
     assertNotNull("Should create client with custom pool settings", client);
@@ -94,6 +118,19 @@ public class CrtSyncClientFactoryTest {
     client.close();
   }
 
+  @Test(expected = UnsupportedOperationException.class)
+  public void testCreateWithHostnameVerificationDisabledThrows() {
+    TlsConfig tlsConfig = TlsConfig.builder().withVerifyHostname(false).build();
+    CrtSyncClientFactory.create(null, null, tlsConfig);
+  }
+
+  @Test(expected = UnsupportedOperationException.class)
+  public void testCreateWithCustomSessionCacheThrows() {
+    TlsConfig tlsConfig =
+        TlsConfig.builder().withSessionCacheConfig(TlsSessionCacheConfig.disabled()).build();
+    CrtSyncClientFactory.create(null, null, tlsConfig);
+  }
+
   @Test
   public void testCreateWithConfigAndTls() {
     AlternatorConfig config =
@@ -140,13 +177,52 @@ public class CrtSyncClientFactoryTest {
     client.close();
   }
 
+  @Test(expected = UnsupportedOperationException.class)
+  public void testCreatePollingClientWithHostnameVerificationDisabledThrows() {
+    TlsConfig tlsConfig = TlsConfig.builder().withVerifyHostname(false).build();
+    CrtSyncClientFactory.createPollingClient(tlsConfig);
+  }
+
+  @Test(expected = UnsupportedOperationException.class)
+  public void testCreatePollingClientWithCustomSessionCacheThrows() {
+    TlsConfig tlsConfig =
+        TlsConfig.builder().withSessionCacheConfig(TlsSessionCacheConfig.disabled()).build();
+    CrtSyncClientFactory.createPollingClient(tlsConfig);
+  }
+
   @Test
   public void testConnectionTimeToLiveNotSupported() {
-    // CRT doesn't support connectionTimeToLive, verify it doesn't cause errors
-    AlternatorConfig config = AlternatorConfig.builder().withConnectionTimeToLiveMs(60000).build();
-    SdkHttpClient client = CrtSyncClientFactory.create(null, config, null);
-    assertNotNull("CRT should handle config with TTL gracefully", client);
-    client.close();
+    // CRT doesn't support connectionTimeToLive — verify it logs a warning and still works
+    Logger logger = Logger.getLogger(CrtSyncClientFactory.class.getName());
+    List<LogRecord> records = new ArrayList<>();
+    Handler handler =
+        new Handler() {
+          @Override
+          public void publish(LogRecord record) {
+            records.add(record);
+          }
+
+          @Override
+          public void flush() {}
+
+          @Override
+          public void close() {}
+        };
+    logger.addHandler(handler);
+    try {
+      AlternatorConfig config =
+          AlternatorConfig.builder().withConnectionTimeToLiveMs(60000).build();
+      SdkHttpClient client = CrtSyncClientFactory.create(null, config, null);
+      assertNotNull("CRT should handle config with TTL gracefully", client);
+      client.close();
+
+      assertTrue("Should have logged a warning about unsupported TTL", records.size() >= 1);
+      assertTrue(
+          "Warning should mention connectionTimeToLiveMs",
+          records.get(0).getMessage().contains("connectionTimeToLiveMs"));
+    } finally {
+      logger.removeHandler(handler);
+    }
   }
 
   @Test(expected = RuntimeException.class)
@@ -155,6 +231,16 @@ public class CrtSyncClientFactoryTest {
         TlsConfig.builder()
             .withCaCertPath(Path.of("/non/existent/ca.pem"))
             .withTrustSystemCaCerts(false)
+            .build();
+    CrtSyncClientFactory.create(null, null, tlsConfig);
+  }
+
+  @Test(expected = UnsupportedOperationException.class)
+  public void testCreateWithClientCertificateThrows() {
+    TlsConfig tlsConfig =
+        TlsConfig.builder()
+            .withTrustAllCertificates(true)
+            .withClientCertificate(Path.of("/client.crt"), Path.of("/client.key"))
             .build();
     CrtSyncClientFactory.create(null, null, tlsConfig);
   }
@@ -178,6 +264,16 @@ public class CrtSyncClientFactoryTest {
         TlsConfig.builder()
             .withCaCertPath(Path.of("/non/existent/ca.pem"))
             .withTrustSystemCaCerts(false)
+            .build();
+    CrtSyncClientFactory.createPollingClient(tlsConfig);
+  }
+
+  @Test(expected = UnsupportedOperationException.class)
+  public void testCreatePollingClientWithClientCertificateThrows() {
+    TlsConfig tlsConfig =
+        TlsConfig.builder()
+            .withTrustAllCertificates(true)
+            .withClientCertificate(Path.of("/client.crt"), Path.of("/client.key"))
             .build();
     CrtSyncClientFactory.createPollingClient(tlsConfig);
   }

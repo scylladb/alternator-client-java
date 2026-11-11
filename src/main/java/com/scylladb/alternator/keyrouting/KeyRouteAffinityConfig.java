@@ -1,3 +1,18 @@
+/*
+ * Copyright ScyllaDB, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package com.scylladb.alternator.keyrouting;
 
 import java.util.Collections;
@@ -11,10 +26,10 @@ import java.util.Map;
  * table. If partition key info is not provided for a table, it will be discovered automatically via
  * DescribeTable.
  *
- * <p><strong>Important:</strong> Key route affinity only works reliably with synchronous DynamoDB
- * clients ({@link software.amazon.awssdk.services.dynamodb.DynamoDbClient}). With async clients,
- * the ThreadLocal-based context passing mechanism may fail due to cross-thread execution. Do not
- * use key route affinity with {@link software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient}.
+ * <p><strong>Important:</strong> Automatic partition-key discovery uses a synchronous {@link
+ * software.amazon.awssdk.services.dynamodb.DynamoDbClient}. Synchronous Alternator clients wire
+ * discovery automatically. Async clients can use key route affinity when partition-key names are
+ * pre-configured via {@link Builder#withPkInfo(String, String)}.
  *
  * <p>Example usage:
  *

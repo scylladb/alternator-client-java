@@ -1,3 +1,18 @@
+/*
+ * Copyright ScyllaDB, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package com.scylladb.alternator.keyrouting;
 
 import java.util.Map;
@@ -15,6 +30,7 @@ import software.amazon.awssdk.services.dynamodb.model.DynamoDbException;
 import software.amazon.awssdk.services.dynamodb.model.KeySchemaElement;
 import software.amazon.awssdk.services.dynamodb.model.KeyType;
 import software.amazon.awssdk.services.dynamodb.model.ResourceNotFoundException;
+import software.amazon.awssdk.utils.builder.ToCopyableBuilder;
 
 /**
  * Resolves partition key attribute names for DynamoDB tables.
@@ -45,17 +61,37 @@ public class PartitionKeyResolver implements AutoCloseable {
 
   private static final Logger logger = Logger.getLogger(PartitionKeyResolver.class.getName());
 
-  /** Maximum number of retry attempts for transient failures. */
+  /**
+   * Maximum number of retry attempts for transient failures.
+   *
+   * @see com.scylladb.alternator.AlternatorConfig#RECOMMENDED_PARTITION_KEY_DISCOVERY_MAX_RETRIES
+   */
   static final int MAX_RETRIES = 3;
 
-  /** Initial delay between retries in milliseconds. */
+  /**
+   * Initial delay between retries in milliseconds.
+   *
+   * @see
+   *     com.scylladb.alternator.AlternatorConfig#RECOMMENDED_PARTITION_KEY_DISCOVERY_INITIAL_DELAY_MS
+   */
   static final long INITIAL_RETRY_DELAY_MS = 100;
 
-  /** Maximum delay between retries in milliseconds. */
+  /**
+   * Maximum delay between retries in milliseconds.
+   *
+   * @see com.scylladb.alternator.AlternatorConfig#RECOMMENDED_PARTITION_KEY_DISCOVERY_MAX_DELAY_MS
+   */
   static final long MAX_RETRY_DELAY_MS = 2000;
 
-  /** Cooldown period after permanent failure before allowing another discovery attempt (5 min). */
+  /**
+   * Cooldown period after permanent failure before allowing another discovery attempt (5 min).
+   *
+   * @see com.scylladb.alternator.AlternatorConfig#RECOMMENDED_PARTITION_KEY_DISCOVERY_COOLDOWN_MS
+   */
   static final long PERMANENT_FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
+
+  /** Maximum jitter as a percentage of the base delay (20%). */
+  static final double MAX_JITTER_PERCENT = 0.2;
 
   private final ConcurrentHashMap<String, String> cache;
   private final Set<String> discoveryInProgress;
@@ -218,12 +254,13 @@ public class PartitionKeyResolver implements AutoCloseable {
             return;
           }
 
+          long jitteredDelay = calculateJitteredDelay(delay);
           logger.log(
               Level.FINE,
               "Transient error discovering partition key for table {0}, retry {1}/{2} after {3}ms: {4}",
-              new Object[] {tableName, attempt, MAX_RETRIES, delay, e.getMessage()});
+              new Object[] {tableName, attempt, MAX_RETRIES, jitteredDelay, e.getMessage()});
 
-          sleep(delay);
+          sleep(jitteredDelay);
           delay = Math.min(delay * 2, MAX_RETRY_DELAY_MS);
 
         } catch (Exception e) {
@@ -242,6 +279,7 @@ public class PartitionKeyResolver implements AutoCloseable {
             return;
           }
 
+          long jitteredDelay = calculateJitteredDelay(delay);
           if (logger.isLoggable(Level.FINE)) {
             logger.log(
                 Level.FINE,
@@ -252,12 +290,12 @@ public class PartitionKeyResolver implements AutoCloseable {
                     + "/"
                     + MAX_RETRIES
                     + " after "
-                    + delay
+                    + jitteredDelay
                     + "ms",
                 e);
           }
 
-          sleep(delay);
+          sleep(jitteredDelay);
           delay = Math.min(delay * 2, MAX_RETRY_DELAY_MS);
         }
       }
@@ -279,11 +317,42 @@ public class PartitionKeyResolver implements AutoCloseable {
     }
     if (e.awsErrorDetails() != null) {
       String errorCode = e.awsErrorDetails().errorCode();
-      // AccessDeniedException and ValidationException are permanent
-      return "AccessDeniedException".equals(errorCode) || "ValidationException".equals(errorCode);
+      if (isPermanentErrorCode(errorCode)) {
+        return true;
+      }
+      if (errorCode != null && !errorCode.isEmpty()) {
+        return false;
+      }
+    }
+    // SDK-modeled exceptions still carry structured error classification when AwsErrorDetails is
+    // absent. Custom subclasses do not, so let them fall through to HTTP status classification.
+    if (e instanceof ToCopyableBuilder<?, ?>) {
+      String errorCode = e.getClass().getSimpleName();
+      return isPermanentErrorCode(errorCode);
     }
     // 4xx errors (except 429 throttling) are generally permanent
     return e.statusCode() >= 400 && e.statusCode() < 500 && e.statusCode() != 429;
+  }
+
+  private static boolean isPermanentErrorCode(String errorCode) {
+    return "AccessDeniedException".equals(errorCode)
+        || "ValidationException".equals(errorCode)
+        || "ResourceNotFoundException".equals(errorCode)
+        || "TableNotFoundException".equals(errorCode);
+  }
+
+  /**
+   * Calculates a jittered delay to prevent thundering herd.
+   *
+   * @param baseDelay the base delay in milliseconds
+   * @return the jittered delay in milliseconds
+   */
+  private long calculateJitteredDelay(long baseDelay) {
+    // Add random jitter: base delay ± up to MAX_JITTER_PERCENT
+    double jitterRange = baseDelay * MAX_JITTER_PERCENT;
+    double jitter =
+        (Math.random() * 2 - 1) * jitterRange; // Random value in [-jitterRange, +jitterRange]
+    return Math.max(1, Math.round(baseDelay + jitter)); // Ensure minimum 1ms delay
   }
 
   /**

@@ -1,9 +1,25 @@
+/*
+ * Copyright ScyllaDB, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package com.scylladb.alternator;
 
 import static org.junit.Assert.*;
 import static org.junit.Assume.*;
 
 import com.scylladb.alternator.internal.AlternatorLiveNodes;
+import com.scylladb.alternator.internal.LazyQueryPlan;
 import com.scylladb.alternator.routing.ClusterScope;
 import com.scylladb.alternator.routing.DatacenterScope;
 import com.scylladb.alternator.routing.RackScope;
@@ -14,6 +30,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -30,14 +47,12 @@ import software.amazon.awssdk.services.dynamodb.model.*;
  * Integration tests for AlternatorDynamoDbClient. These tests require a running ScyllaDB cluster
  * with Alternator enabled.
  *
- * <p>Tests run against both HTTP and HTTPS endpoints. Set environment variables to configure:
+ * <p>Tests run against both HTTP and HTTPS endpoints provisioned by the CCM harness. Set
+ * environment variables to configure:
  *
  * <ul>
- *   <li>ALTERNATOR_HOST: Host address (default: 172.39.0.2)
- *   <li>ALTERNATOR_PORT: HTTP port number (default: 9998)
- *   <li>ALTERNATOR_HTTPS_PORT: HTTPS port number (default: 9999)
- *   <li>ALTERNATOR_DATACENTER: Datacenter name (default: datacenter1)
- *   <li>ALTERNATOR_RACK: Rack name (default: rack1)
+ *   <li>INTEGRATION_TESTS: Set to "true" to enable these tests
+ *   <li>SCYLLA_VERSION: CCM Scylla package selector
  * </ul>
  */
 @RunWith(Parameterized.class)
@@ -174,21 +189,22 @@ public class AlternatorDynamoDbClientIT {
   }
 
   @Test
-  public void testNodeDiscoveryWithRoundRobin() throws Exception {
+  public void testNodeDiscoveryWithRandomQueryPlan() throws Exception {
     AlternatorDynamoDbClientWrapper client = buildClient(IntegrationTestConfig.DATACENTER, "");
 
     // Wait for node discovery
     Thread.sleep(1000);
 
-    Set<URI> meetNodes = new HashSet<>();
     List<URI> allNodes = client.getLiveNodes();
+    assertFalse("Should have at least one live node", allNodes.isEmpty());
 
-    // Call nextAsURI more times than there are nodes to verify round-robin
-    for (int i = 0; i < allNodes.size() * 2; i++) {
-      meetNodes.add(client.nextAsURI());
+    Set<URI> metNodes = new HashSet<>();
+    LazyQueryPlan queryPlan = new LazyQueryPlan(client.getAlternatorLiveNodes());
+    while (queryPlan.hasNext()) {
+      metNodes.add(queryPlan.next());
     }
 
-    assertEquals("Should visit all nodes via round-robin", allNodes.size(), meetNodes.size());
+    assertEquals("Should visit all live nodes via random query plan", new HashSet<>(allNodes), metNodes);
 
     client.close();
   }
@@ -412,6 +428,117 @@ public class AlternatorDynamoDbClientIT {
   }
 
   @Test
+  public void testResponseCompressionDisabledByDefaultDoesNotSetAcceptEncoding() throws Exception {
+    AtomicReference<String> acceptEncoding = new AtomicReference<>();
+
+    ExecutionInterceptor responseCompressionVerifier =
+        new ExecutionInterceptor() {
+          @Override
+          public void beforeTransmission(
+              Context.BeforeTransmission context, ExecutionAttributes executionAttributes) {
+            context
+                .httpRequest()
+                .firstMatchingHeader("Accept-Encoding")
+                .ifPresent(acceptEncoding::set);
+          }
+        };
+
+    ClientOverrideConfiguration overrideConfig =
+        ClientOverrideConfiguration.builder()
+            .addExecutionInterceptor(responseCompressionVerifier)
+            .build();
+
+    DynamoDbClient client =
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(seedUri)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
+            .overrideConfiguration(overrideConfig)
+            .build();
+
+    try {
+      client.listTables(ListTablesRequest.builder().limit(1).build());
+      assertNull(acceptEncoding.get());
+    } finally {
+      client.close();
+    }
+  }
+
+  @Test
+  public void testResponseCompressionNegotiatesAcceptEncoding() throws Exception {
+    AtomicReference<String> acceptEncoding = new AtomicReference<>();
+
+    ExecutionInterceptor responseCompressionVerifier =
+        new ExecutionInterceptor() {
+          @Override
+          public void beforeTransmission(
+              Context.BeforeTransmission context, ExecutionAttributes executionAttributes) {
+            context
+                .httpRequest()
+                .firstMatchingHeader("Accept-Encoding")
+                .ifPresent(acceptEncoding::set);
+          }
+        };
+
+    ClientOverrideConfiguration overrideConfig =
+        ClientOverrideConfiguration.builder()
+            .addExecutionInterceptor(responseCompressionVerifier)
+            .build();
+
+    DynamoDbClient client =
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(seedUri)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
+            .overrideConfiguration(overrideConfig)
+            .withResponseCompression(
+                ResponseCompressionAlgorithm.GZIP, ResponseCompressionAlgorithm.DEFLATE)
+            .build();
+
+    try {
+      client.listTables(ListTablesRequest.builder().limit(1).build());
+      assertEquals(ResponseCompressionInterceptor.ACCEPT_ENCODING, acceptEncoding.get());
+    } finally {
+      client.close();
+    }
+  }
+
+  @Test
+  public void testResponseCompressionNegotiatesCustomAcceptEncoding() throws Exception {
+    AtomicReference<String> acceptEncoding = new AtomicReference<>();
+
+    ExecutionInterceptor responseCompressionVerifier =
+        new ExecutionInterceptor() {
+          @Override
+          public void beforeTransmission(
+              Context.BeforeTransmission context, ExecutionAttributes executionAttributes) {
+            context
+                .httpRequest()
+                .firstMatchingHeader("Accept-Encoding")
+                .ifPresent(acceptEncoding::set);
+          }
+        };
+
+    ClientOverrideConfiguration overrideConfig =
+        ClientOverrideConfiguration.builder()
+            .addExecutionInterceptor(responseCompressionVerifier)
+            .build();
+
+    DynamoDbClient client =
+        AlternatorDynamoDbClient.builder()
+            .endpointOverride(seedUri)
+            .credentialsProvider(IntegrationTestConfig.CREDENTIALS)
+            .overrideConfiguration(overrideConfig)
+            .withResponseCompression(ResponseCompressionAlgorithm.DEFLATE)
+            .build();
+
+    try {
+      client.listTables(ListTablesRequest.builder().limit(1).build());
+      assertEquals("deflate", acceptEncoding.get());
+    } finally {
+      client.close();
+    }
+  }
+
+  @Test
   public void testHeadersOptimizationFiltersHeaders() throws Exception {
     // Track which headers are seen in the request
     Set<String> seenHeaders = new HashSet<>();
@@ -472,7 +599,7 @@ public class AlternatorDynamoDbClientIT {
           }
         };
 
-    // Custom whitelist that includes User-Agent but excludes some default headers
+    // Custom whitelist that keeps User-Agent while filtering non-required SDK metadata
     Set<String> customWhitelist =
         new HashSet<>(
             java.util.Arrays.asList(
@@ -480,7 +607,6 @@ public class AlternatorDynamoDbClientIT {
                 "X-Amz-Target",
                 "Content-Type",
                 "Content-Length",
-                "Accept-Encoding", // Required header
                 "Authorization",
                 "X-Amz-Date",
                 "Connection",
@@ -628,4 +754,5 @@ public class AlternatorDynamoDbClientIT {
 
     client.close();
   }
+
 }

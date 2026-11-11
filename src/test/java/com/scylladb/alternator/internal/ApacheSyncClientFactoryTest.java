@@ -1,14 +1,35 @@
+/*
+ * Copyright ScyllaDB, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package com.scylladb.alternator.internal;
 
 import static org.junit.Assert.*;
 
 import com.scylladb.alternator.AlternatorConfig;
 import com.scylladb.alternator.TlsConfig;
+import com.scylladb.alternator.TlsSessionCacheConfig;
+import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import org.apache.http.conn.socket.ConnectionSocketFactory;
+import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
 import org.junit.Test;
 import software.amazon.awssdk.http.SdkHttpClient;
+import software.amazon.awssdk.http.apache.ApacheHttpClient;
 
 /**
  * Unit tests for {@link ApacheSyncClientFactory}.
@@ -40,6 +61,8 @@ public class ApacheSyncClientFactoryTest {
             .withMaxConnections(100)
             .withConnectionMaxIdleTimeMs(30000)
             .withConnectionTimeToLiveMs(60000)
+            .withConnectionAcquisitionTimeoutMs(5000)
+            .withConnectionTimeoutMs(5000)
             .build();
     SdkHttpClient client = ApacheSyncClientFactory.create(null, config, null);
     assertNotNull("Should create client with custom pool settings", client);
@@ -97,6 +120,41 @@ public class ApacheSyncClientFactoryTest {
   }
 
   @Test
+  public void testCreateWithHostnameVerificationDisabledUsesCustomSocketFactory() {
+    TlsConfig tlsConfig = TlsConfig.builder().withVerifyHostname(false).build();
+    AtomicReference<ConnectionSocketFactory> socketFactory = new AtomicReference<>();
+    SdkHttpClient client =
+        ApacheSyncClientFactory.create(
+            builder -> socketFactory.set(readSocketFactory(builder)), null, tlsConfig);
+
+    assertTrue(
+        "Should use a custom SSL socket factory when hostname verification is disabled",
+        socketFactory.get() instanceof SSLConnectionSocketFactory);
+    client.close();
+  }
+
+  @Test
+  public void testCreateWithCustomSessionCacheUsesCustomSocketFactory() {
+    TlsConfig tlsConfig =
+        TlsConfig.builder()
+            .withSessionCacheConfig(
+                TlsSessionCacheConfig.builder()
+                    .withSessionCacheSize(64)
+                    .withSessionTimeoutSeconds(300)
+                    .build())
+            .build();
+    AtomicReference<ConnectionSocketFactory> socketFactory = new AtomicReference<>();
+    SdkHttpClient client =
+        ApacheSyncClientFactory.create(
+            builder -> socketFactory.set(readSocketFactory(builder)), null, tlsConfig);
+
+    assertTrue(
+        "Should use a custom SSL socket factory for custom TLS session cache config",
+        socketFactory.get() instanceof SSLConnectionSocketFactory);
+    client.close();
+  }
+
+  @Test
   public void testCreateWithConfigAndTls() {
     AlternatorConfig config =
         AlternatorConfig.builder()
@@ -142,12 +200,40 @@ public class ApacheSyncClientFactoryTest {
     client.close();
   }
 
+  @Test
+  public void testCreatePollingClientWithHostnameVerificationDisabled() {
+    TlsConfig tlsConfig = TlsConfig.builder().withVerifyHostname(false).build();
+    SdkHttpClient client = ApacheSyncClientFactory.createPollingClient(tlsConfig);
+    assertNotNull("Should create polling client with hostname verification disabled", client);
+    client.close();
+  }
+
+  @Test
+  public void testCreatePollingClientWithCustomSessionCache() {
+    TlsConfig tlsConfig =
+        TlsConfig.builder().withSessionCacheConfig(TlsSessionCacheConfig.disabled()).build();
+    SdkHttpClient client = ApacheSyncClientFactory.createPollingClient(tlsConfig);
+    assertNotNull("Should create polling client with custom TLS session cache config", client);
+    client.close();
+  }
+
   @Test(expected = RuntimeException.class)
   public void testCreateWithInvalidCaCertPathThrows() {
     TlsConfig tlsConfig =
         TlsConfig.builder()
             .withCaCertPath(Path.of("/non/existent/ca.pem"))
             .withTrustSystemCaCerts(false)
+            .build();
+    ApacheSyncClientFactory.create(null, null, tlsConfig);
+  }
+
+  @Test(expected = RuntimeException.class)
+  public void testCreateWithInvalidClientCertificatePathThrows() {
+    TlsConfig tlsConfig =
+        TlsConfig.builder()
+            .withTrustAllCertificates(true)
+            .withClientCertificate(
+                Path.of("/non/existent/client.crt"), Path.of("/non/existent/client.key"))
             .build();
     ApacheSyncClientFactory.create(null, null, tlsConfig);
   }
@@ -175,6 +261,17 @@ public class ApacheSyncClientFactoryTest {
     ApacheSyncClientFactory.createPollingClient(tlsConfig);
   }
 
+  @Test(expected = RuntimeException.class)
+  public void testCreatePollingClientWithInvalidClientCertificatePathThrows() {
+    TlsConfig tlsConfig =
+        TlsConfig.builder()
+            .withTrustAllCertificates(true)
+            .withClientCertificate(
+                Path.of("/non/existent/client.crt"), Path.of("/non/existent/client.key"))
+            .build();
+    ApacheSyncClientFactory.createPollingClient(tlsConfig);
+  }
+
   @Test
   public void testCreateWithCustomCaCertAndSystemCAs() throws Exception {
     // With only system CAs (no custom cert path), should create successfully
@@ -182,5 +279,15 @@ public class ApacheSyncClientFactoryTest {
     SdkHttpClient client = ApacheSyncClientFactory.create(null, null, tlsConfig);
     assertNotNull("Should create client with system CAs", client);
     client.close();
+  }
+
+  private static ConnectionSocketFactory readSocketFactory(ApacheHttpClient.Builder builder) {
+    try {
+      Field socketFactoryField = builder.getClass().getDeclaredField("socketFactory");
+      socketFactoryField.setAccessible(true);
+      return (ConnectionSocketFactory) socketFactoryField.get(builder);
+    } catch (ReflectiveOperationException e) {
+      throw new AssertionError(e);
+    }
   }
 }

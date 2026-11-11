@@ -1,8 +1,25 @@
+/*
+ * Copyright ScyllaDB, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package com.scylladb.alternator;
 
 import static org.junit.Assert.*;
 
 import com.scylladb.alternator.internal.AlternatorLiveNodes;
+import com.scylladb.alternator.internal.LazyQueryPlan;
+import com.scylladb.alternator.keyrouting.AttributeValueHasher;
 import com.scylladb.alternator.keyrouting.KeyRouteAffinity;
 import com.scylladb.alternator.keyrouting.KeyRouteAffinityConfig;
 import com.scylladb.alternator.queryplan.AffinityQueryPlanInterceptor;
@@ -52,7 +69,7 @@ import software.amazon.awssdk.services.dynamodb.model.WriteRequest;
  * 30+ operation variants to match Go's WithKeyRouteAffinity test coverage.
  *
  * <p>For each operation variant, the test checks whether affinity routing (same key always goes to
- * the same node) or round-robin routing (requests spread across nodes) is used, depending on the
+ * the same node) or random routing (requests spread across nodes) is used, depending on the
  * affinity mode.
  *
  * @author dmitry.kropachev
@@ -84,6 +101,11 @@ public class AffinityQueryPlanInterceptorTest {
 
   private DynamoDbClient createClient(KeyRouteAffinityConfig keyAffinity) {
     AlternatorLiveNodes liveNodes = new MockAlternatorLiveNodes(testNodeUris);
+    return createClient(keyAffinity, liveNodes);
+  }
+
+  private DynamoDbClient createClient(
+      KeyRouteAffinityConfig keyAffinity, AlternatorLiveNodes liveNodes) {
     ClientOverrideConfiguration.Builder overrideBuilder = ClientOverrideConfiguration.builder();
     if (keyAffinity != null && keyAffinity.isEnabled()) {
       overrideBuilder.addExecutionInterceptor(
@@ -120,8 +142,10 @@ public class AffinityQueryPlanInterceptorTest {
     }
   }
 
-  /** Verify that an operation routes to different nodes (round-robin, no affinity). */
-  private void assertRoundRobinRouting(Runnable operation) {
+  /**
+   * Verify that an operation routes to different nodes (random query-plan routing, no affinity).
+   */
+  private void assertRandomRouting(Runnable operation) {
     Set<URI> nodesUsed = new HashSet<>();
     for (int i = 0; i < 20; i++) {
       mockHttpClient.clearCapturedRequests();
@@ -140,10 +164,64 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   private Map<String, AttributeValue> makeItem() {
+    return makeItem(PK_VALUE);
+  }
+
+  private Map<String, AttributeValue> makeItem(String pkValue) {
     Map<String, AttributeValue> item = new HashMap<>();
-    item.put(PK_NAME, AttributeValue.builder().s(PK_VALUE).build());
+    item.put(PK_NAME, AttributeValue.builder().s(pkValue).build());
     item.put("data", AttributeValue.builder().s("value").build());
     return item;
+  }
+
+  private URI firstAffinityRouteForPk(String pkValue) {
+    long hash = AttributeValueHasher.hash(AttributeValue.builder().s(pkValue).build());
+    LazyQueryPlan plan = new LazyQueryPlan(new MockAlternatorLiveNodes(testNodeUris), hash);
+    return plan.next();
+  }
+
+  private String findPkValueWithDifferentRoute(String prefix, String otherPkValue) {
+    URI otherRoute = firstAffinityRouteForPk(otherPkValue);
+    for (int i = 0; i < 100; i++) {
+      String candidate = prefix + i;
+      if (!firstAffinityRouteForPk(candidate).equals(otherRoute)) {
+        return candidate;
+      }
+    }
+    fail("Could not find test partition key with a different affinity route");
+    return null;
+  }
+
+  private String findPkValueWithPreferredRoute(String prefix, List<URI> candidates, URI expected) {
+    for (int i = 0; i < 1000; i++) {
+      String candidate = prefix + i;
+      long hash = AttributeValueHasher.hash(AttributeValue.builder().s(candidate).build());
+      if (expected.equals(firstNodeForSeed(candidates, hash))) {
+        return candidate;
+      }
+    }
+    fail("Could not find test partition key with expected route " + expected);
+    return null;
+  }
+
+  private URI firstNodeForSeed(List<URI> candidates, long seed) {
+    LazyQueryPlan plan = new LazyQueryPlan(new MockAlternatorLiveNodes(candidates), seed);
+    return plan.hasNext() ? plan.next() : null;
+  }
+
+  private List<URI> collectNodes(LazyQueryPlan plan) {
+    List<URI> collected = new ArrayList<>();
+    while (plan.hasNext()) {
+      collected.add(plan.next());
+    }
+    return collected;
+  }
+
+  private void assertSameRoute(String message, URI expected, URI actual) {
+    assertNotNull(message + ": actual route should not be null", actual);
+    assertEquals(message + ": scheme", expected.getScheme(), actual.getScheme());
+    assertEquals(message + ": host", expected.getHost(), actual.getHost());
+    assertEquals(message + ": port", expected.getPort(), actual.getPort());
   }
 
   // ========== PutItem variants ==========
@@ -151,6 +229,7 @@ public class AffinityQueryPlanInterceptorTest {
   // --- Simple PutItem (no conditions) ---
 
   @Test
+  @CoversRequirements("AFF-REQ-004")
   public void testPutItemSimple_AnyWrite_Affinity() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.ANY_WRITE));
     try {
@@ -164,10 +243,10 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testPutItemSimple_Rmw_RoundRobin() {
+  public void testPutItemSimple_Rmw_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.RMW));
     try {
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.putItem(
                   PutItemRequest.builder().tableName(TABLE_NAME).item(makeItem()).build()));
@@ -177,10 +256,10 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testPutItemSimple_None_RoundRobin() {
+  public void testPutItemSimple_None_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.NONE));
     try {
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.putItem(
                   PutItemRequest.builder().tableName(TABLE_NAME).item(makeItem()).build()));
@@ -226,10 +305,10 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testPutItemWithConditionExpression_None_RoundRobin() {
+  public void testPutItemWithConditionExpression_None_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.NONE));
     try {
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.putItem(
                   PutItemRequest.builder()
@@ -291,7 +370,7 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testPutItemWithExpected_None_RoundRobin() {
+  public void testPutItemWithExpected_None_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.NONE));
     try {
       Map<String, ExpectedAttributeValue> expected = new HashMap<>();
@@ -300,7 +379,7 @@ public class AffinityQueryPlanInterceptorTest {
           ExpectedAttributeValue.builder()
               .value(AttributeValue.builder().s("old").build())
               .build());
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.putItem(
                   PutItemRequest.builder()
@@ -350,10 +429,10 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testPutItemReturnValuesAllOld_None_RoundRobin() {
+  public void testPutItemReturnValuesAllOld_None_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.NONE));
     try {
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.putItem(
                   PutItemRequest.builder()
@@ -386,10 +465,10 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testPutItemReturnValuesNone_Rmw_RoundRobin() {
+  public void testPutItemReturnValuesNone_Rmw_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.RMW));
     try {
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.putItem(
                   PutItemRequest.builder()
@@ -403,10 +482,10 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testPutItemReturnValuesNone_None_RoundRobin() {
+  public void testPutItemReturnValuesNone_None_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.NONE));
     try {
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.putItem(
                   PutItemRequest.builder()
@@ -437,10 +516,10 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testUpdateItemSimple_Rmw_RoundRobin() {
+  public void testUpdateItemSimple_Rmw_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.RMW));
     try {
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.updateItem(
                   UpdateItemRequest.builder().tableName(TABLE_NAME).key(makeKey()).build()));
@@ -450,10 +529,10 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testUpdateItemSimple_None_RoundRobin() {
+  public void testUpdateItemSimple_None_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.NONE));
     try {
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.updateItem(
                   UpdateItemRequest.builder().tableName(TABLE_NAME).key(makeKey()).build()));
@@ -505,10 +584,10 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testUpdateItemWithUpdateExpression_None_RoundRobin() {
+  public void testUpdateItemWithUpdateExpression_None_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.NONE));
     try {
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.updateItem(
                   UpdateItemRequest.builder()
@@ -561,10 +640,10 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testUpdateItemWithConditionExpression_None_RoundRobin() {
+  public void testUpdateItemWithConditionExpression_None_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.NONE));
     try {
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.updateItem(
                   UpdateItemRequest.builder()
@@ -626,7 +705,7 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testUpdateItemWithExpected_None_RoundRobin() {
+  public void testUpdateItemWithExpected_None_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.NONE));
     try {
       Map<String, ExpectedAttributeValue> expected = new HashMap<>();
@@ -635,7 +714,7 @@ public class AffinityQueryPlanInterceptorTest {
           ExpectedAttributeValue.builder()
               .value(AttributeValue.builder().s("old").build())
               .build());
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.updateItem(
                   UpdateItemRequest.builder()
@@ -685,10 +764,10 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testUpdateItemReturnValuesAllOld_None_RoundRobin() {
+  public void testUpdateItemReturnValuesAllOld_None_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.NONE));
     try {
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.updateItem(
                   UpdateItemRequest.builder()
@@ -738,10 +817,10 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testUpdateItemReturnValuesUpdatedOld_None_RoundRobin() {
+  public void testUpdateItemReturnValuesUpdatedOld_None_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.NONE));
     try {
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.updateItem(
                   UpdateItemRequest.builder()
@@ -791,10 +870,10 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testUpdateItemReturnValuesAllNew_None_RoundRobin() {
+  public void testUpdateItemReturnValuesAllNew_None_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.NONE));
     try {
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.updateItem(
                   UpdateItemRequest.builder()
@@ -827,11 +906,11 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testUpdateItemReturnValuesUpdatedNew_Rmw_RoundRobin() {
+  public void testUpdateItemReturnValuesUpdatedNew_Rmw_RandomRouting() {
     // UPDATED_NEW does NOT trigger RMW - can be computed from update alone
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.RMW));
     try {
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.updateItem(
                   UpdateItemRequest.builder()
@@ -845,10 +924,10 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testUpdateItemReturnValuesUpdatedNew_None_RoundRobin() {
+  public void testUpdateItemReturnValuesUpdatedNew_None_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.NONE));
     try {
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.updateItem(
                   UpdateItemRequest.builder()
@@ -913,7 +992,7 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testUpdateItemAddAction_None_RoundRobin() {
+  public void testUpdateItemAddAction_None_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.NONE));
     try {
       Map<String, AttributeValueUpdate> updates = new HashMap<>();
@@ -923,7 +1002,7 @@ public class AffinityQueryPlanInterceptorTest {
               .action(AttributeAction.ADD)
               .value(AttributeValue.builder().n("1").build())
               .build());
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.updateItem(
                   UpdateItemRequest.builder()
@@ -988,7 +1067,7 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testUpdateItemDeleteActionWithValue_None_RoundRobin() {
+  public void testUpdateItemDeleteActionWithValue_None_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.NONE));
     try {
       Map<String, AttributeValueUpdate> updates = new HashMap<>();
@@ -998,7 +1077,7 @@ public class AffinityQueryPlanInterceptorTest {
               .action(AttributeAction.DELETE)
               .value(AttributeValue.builder().ss("old-tag").build())
               .build());
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.updateItem(
                   UpdateItemRequest.builder()
@@ -1034,14 +1113,14 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testUpdateItemDeleteActionWithoutValue_Rmw_RoundRobin() {
+  public void testUpdateItemDeleteActionWithoutValue_Rmw_RandomRouting() {
     // DELETE without value just removes the attribute - no read needed
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.RMW));
     try {
       Map<String, AttributeValueUpdate> updates = new HashMap<>();
       updates.put(
           "obsolete_field", AttributeValueUpdate.builder().action(AttributeAction.DELETE).build());
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.updateItem(
                   UpdateItemRequest.builder()
@@ -1055,13 +1134,13 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testUpdateItemDeleteActionWithoutValue_None_RoundRobin() {
+  public void testUpdateItemDeleteActionWithoutValue_None_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.NONE));
     try {
       Map<String, AttributeValueUpdate> updates = new HashMap<>();
       updates.put(
           "obsolete_field", AttributeValueUpdate.builder().action(AttributeAction.DELETE).build());
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.updateItem(
                   UpdateItemRequest.builder()
@@ -1101,7 +1180,7 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testUpdateItemPutAction_Rmw_RoundRobin() {
+  public void testUpdateItemPutAction_Rmw_RandomRouting() {
     // PUT action is a simple overwrite - no read needed
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.RMW));
     try {
@@ -1112,7 +1191,7 @@ public class AffinityQueryPlanInterceptorTest {
               .action(AttributeAction.PUT)
               .value(AttributeValue.builder().s("new-value").build())
               .build());
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.updateItem(
                   UpdateItemRequest.builder()
@@ -1126,7 +1205,7 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testUpdateItemPutAction_None_RoundRobin() {
+  public void testUpdateItemPutAction_None_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.NONE));
     try {
       Map<String, AttributeValueUpdate> updates = new HashMap<>();
@@ -1136,7 +1215,7 @@ public class AffinityQueryPlanInterceptorTest {
               .action(AttributeAction.PUT)
               .value(AttributeValue.builder().s("new-value").build())
               .build());
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.updateItem(
                   UpdateItemRequest.builder()
@@ -1167,10 +1246,10 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testDeleteItemSimple_Rmw_RoundRobin() {
+  public void testDeleteItemSimple_Rmw_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.RMW));
     try {
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.deleteItem(
                   DeleteItemRequest.builder().tableName(TABLE_NAME).key(makeKey()).build()));
@@ -1180,10 +1259,10 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testDeleteItemSimple_None_RoundRobin() {
+  public void testDeleteItemSimple_None_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.NONE));
     try {
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.deleteItem(
                   DeleteItemRequest.builder().tableName(TABLE_NAME).key(makeKey()).build()));
@@ -1229,10 +1308,10 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testDeleteItemWithConditionExpression_None_RoundRobin() {
+  public void testDeleteItemWithConditionExpression_None_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.NONE));
     try {
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.deleteItem(
                   DeleteItemRequest.builder()
@@ -1294,7 +1373,7 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testDeleteItemWithExpected_None_RoundRobin() {
+  public void testDeleteItemWithExpected_None_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.NONE));
     try {
       Map<String, ExpectedAttributeValue> expected = new HashMap<>();
@@ -1303,7 +1382,7 @@ public class AffinityQueryPlanInterceptorTest {
           ExpectedAttributeValue.builder()
               .value(AttributeValue.builder().s("old").build())
               .build());
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.deleteItem(
                   DeleteItemRequest.builder()
@@ -1353,10 +1432,10 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testDeleteItemReturnValuesAllOld_None_RoundRobin() {
+  public void testDeleteItemReturnValuesAllOld_None_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.NONE));
     try {
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.deleteItem(
                   DeleteItemRequest.builder()
@@ -1374,10 +1453,10 @@ public class AffinityQueryPlanInterceptorTest {
   // --- GetItem ---
 
   @Test
-  public void testGetItem_AnyWrite_RoundRobin() {
+  public void testGetItem_AnyWrite_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.ANY_WRITE));
     try {
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.getItem(
                   GetItemRequest.builder().tableName(TABLE_NAME).key(makeKey()).build()));
@@ -1387,10 +1466,10 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testGetItem_Rmw_RoundRobin() {
+  public void testGetItem_Rmw_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.RMW));
     try {
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.getItem(
                   GetItemRequest.builder().tableName(TABLE_NAME).key(makeKey()).build()));
@@ -1400,10 +1479,10 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testGetItem_None_RoundRobin() {
+  public void testGetItem_None_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.NONE));
     try {
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.getItem(
                   GetItemRequest.builder().tableName(TABLE_NAME).key(makeKey()).build()));
@@ -1415,10 +1494,10 @@ public class AffinityQueryPlanInterceptorTest {
   // --- Query ---
 
   @Test
-  public void testQuery_AnyWrite_RoundRobin() {
+  public void testQuery_AnyWrite_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.ANY_WRITE));
     try {
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.query(
                   QueryRequest.builder()
@@ -1434,10 +1513,10 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testQuery_Rmw_RoundRobin() {
+  public void testQuery_Rmw_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.RMW));
     try {
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.query(
                   QueryRequest.builder()
@@ -1453,10 +1532,10 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testQuery_None_RoundRobin() {
+  public void testQuery_None_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.NONE));
     try {
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.query(
                   QueryRequest.builder()
@@ -1474,33 +1553,30 @@ public class AffinityQueryPlanInterceptorTest {
   // --- Scan ---
 
   @Test
-  public void testScan_AnyWrite_RoundRobin() {
+  public void testScan_AnyWrite_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.ANY_WRITE));
     try {
-      assertRoundRobinRouting(
-          () -> client.scan(ScanRequest.builder().tableName(TABLE_NAME).build()));
+      assertRandomRouting(() -> client.scan(ScanRequest.builder().tableName(TABLE_NAME).build()));
     } finally {
       client.close();
     }
   }
 
   @Test
-  public void testScan_Rmw_RoundRobin() {
+  public void testScan_Rmw_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.RMW));
     try {
-      assertRoundRobinRouting(
-          () -> client.scan(ScanRequest.builder().tableName(TABLE_NAME).build()));
+      assertRandomRouting(() -> client.scan(ScanRequest.builder().tableName(TABLE_NAME).build()));
     } finally {
       client.close();
     }
   }
 
   @Test
-  public void testScan_None_RoundRobin() {
+  public void testScan_None_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.NONE));
     try {
-      assertRoundRobinRouting(
-          () -> client.scan(ScanRequest.builder().tableName(TABLE_NAME).build()));
+      assertRandomRouting(() -> client.scan(ScanRequest.builder().tableName(TABLE_NAME).build()));
     } finally {
       client.close();
     }
@@ -1509,7 +1585,7 @@ public class AffinityQueryPlanInterceptorTest {
   // --- BatchWriteItem ---
 
   @Test
-  public void testBatchWriteItem_AnyWrite_RoundRobin() {
+  public void testBatchWriteItem_AnyWrite_Affinity() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.ANY_WRITE));
     try {
       Map<String, List<WriteRequest>> requestItems = new HashMap<>();
@@ -1518,7 +1594,7 @@ public class AffinityQueryPlanInterceptorTest {
           WriteRequest.builder().putRequest(PutRequest.builder().item(makeItem()).build()).build());
       requestItems.put(TABLE_NAME, writes);
 
-      assertRoundRobinRouting(
+      assertAffinityRouting(
           () ->
               client.batchWriteItem(
                   BatchWriteItemRequest.builder().requestItems(requestItems).build()));
@@ -1528,7 +1604,7 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testBatchWriteItem_Rmw_RoundRobin() {
+  public void testBatchWriteItem_Rmw_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.RMW));
     try {
       Map<String, List<WriteRequest>> requestItems = new HashMap<>();
@@ -1537,7 +1613,7 @@ public class AffinityQueryPlanInterceptorTest {
           WriteRequest.builder().putRequest(PutRequest.builder().item(makeItem()).build()).build());
       requestItems.put(TABLE_NAME, writes);
 
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.batchWriteItem(
                   BatchWriteItemRequest.builder().requestItems(requestItems).build()));
@@ -1547,7 +1623,7 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testBatchWriteItem_None_RoundRobin() {
+  public void testBatchWriteItem_None_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.NONE));
     try {
       Map<String, List<WriteRequest>> requestItems = new HashMap<>();
@@ -1556,7 +1632,7 @@ public class AffinityQueryPlanInterceptorTest {
           WriteRequest.builder().putRequest(PutRequest.builder().item(makeItem()).build()).build());
       requestItems.put(TABLE_NAME, writes);
 
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.batchWriteItem(
                   BatchWriteItemRequest.builder().requestItems(requestItems).build()));
@@ -1568,7 +1644,7 @@ public class AffinityQueryPlanInterceptorTest {
   // --- BatchWriteItem with DeleteRequest ---
 
   @Test
-  public void testBatchWriteItemDelete_AnyWrite_RoundRobin() {
+  public void testBatchWriteItemDelete_AnyWrite_Affinity() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.ANY_WRITE));
     try {
       Map<String, List<WriteRequest>> requestItems = new HashMap<>();
@@ -1579,7 +1655,7 @@ public class AffinityQueryPlanInterceptorTest {
               .build());
       requestItems.put(TABLE_NAME, writes);
 
-      assertRoundRobinRouting(
+      assertAffinityRouting(
           () ->
               client.batchWriteItem(
                   BatchWriteItemRequest.builder().requestItems(requestItems).build()));
@@ -1588,10 +1664,285 @@ public class AffinityQueryPlanInterceptorTest {
     }
   }
 
+  @Test
+  public void testBatchWriteItemMajorityPreferredNodeWins() {
+    String majorityPk = PK_VALUE;
+    String otherPk = findPkValueWithDifferentRoute("other-route-", majorityPk);
+    DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.ANY_WRITE));
+    try {
+      Map<String, List<WriteRequest>> requestItems = new LinkedHashMap<>();
+      requestItems.put(
+          TABLE_NAME,
+          Arrays.asList(
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(makeItem(otherPk)).build())
+                  .build(),
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(makeItem(majorityPk)).build())
+                  .build(),
+              WriteRequest.builder()
+                  .deleteRequest(DeleteRequest.builder().key(makeKey()).build())
+                  .build()));
+
+      URI expectedRoute = firstAffinityRouteForPk(majorityPk);
+
+      mockHttpClient.clearCapturedRequests();
+      client.batchWriteItem(BatchWriteItemRequest.builder().requestItems(requestItems).build());
+      URI actualRoute = mockHttpClient.getLastRequestUri();
+
+      assertSameRoute(
+          "BatchWrite should route to the majority preferred node", expectedRoute, actualRoute);
+    } finally {
+      client.close();
+    }
+  }
+
+  @Test
+  public void testBatchWriteItemNonKeyAttributesDoNotAffectRouting() {
+    String majorityPk = PK_VALUE;
+    String otherPk = findPkValueWithDifferentRoute("other-route-", majorityPk);
+    DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.ANY_WRITE));
+    try {
+      Map<String, AttributeValue> majorityA = makeItem(majorityPk);
+      majorityA.put("data", AttributeValue.builder().s("alpha").build());
+      Map<String, AttributeValue> majorityB = makeItem(majorityPk);
+      majorityB.put("data", AttributeValue.builder().s("zeta").build());
+
+      Map<String, List<WriteRequest>> firstRequestItems = new LinkedHashMap<>();
+      firstRequestItems.put(
+          TABLE_NAME,
+          Arrays.asList(
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(makeItem(otherPk)).build())
+                  .build(),
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(majorityA).build())
+                  .build(),
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(majorityB).build())
+                  .build()));
+
+      Map<String, AttributeValue> majorityC = makeItem(majorityPk);
+      majorityC.put("data", AttributeValue.builder().s("middle").build());
+      Map<String, AttributeValue> majorityD = makeItem(majorityPk);
+      majorityD.put("data", AttributeValue.builder().s("beta").build());
+
+      Map<String, List<WriteRequest>> secondRequestItems = new LinkedHashMap<>();
+      secondRequestItems.put(
+          TABLE_NAME,
+          Arrays.asList(
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(majorityC).build())
+                  .build(),
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(makeItem(otherPk)).build())
+                  .build(),
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(majorityD).build())
+                  .build()));
+
+      mockHttpClient.clearCapturedRequests();
+      client.batchWriteItem(
+          BatchWriteItemRequest.builder().requestItems(firstRequestItems).build());
+      URI firstRoute = mockHttpClient.getLastRequestUri();
+
+      mockHttpClient.clearCapturedRequests();
+      client.batchWriteItem(
+          BatchWriteItemRequest.builder().requestItems(secondRequestItems).build());
+      URI secondRoute = mockHttpClient.getLastRequestUri();
+
+      URI expectedRoute = firstAffinityRouteForPk(majorityPk);
+      assertSameRoute(
+          "First request should route by partition-key votes", expectedRoute, firstRoute);
+      assertSameRoute(
+          "Second request should route by partition-key votes", expectedRoute, secondRoute);
+    } finally {
+      client.close();
+    }
+  }
+
+  @Test
+  public void testBatchWriteItemMissingMetadataContinuesWithUsableCandidate() {
+    KeyRouteAffinityConfig config =
+        KeyRouteAffinityConfig.builder()
+            .withType(KeyRouteAffinity.ANY_WRITE)
+            .withPkInfo(TABLE_NAME, PK_NAME)
+            .build();
+    DynamoDbClient client = createClient(config);
+    try {
+      Map<String, List<WriteRequest>> requestItems = new LinkedHashMap<>();
+      requestItems.put(
+          "unknown_table",
+          Collections.singletonList(
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(makeItem("unknown-pk")).build())
+                  .build()));
+      requestItems.put(
+          TABLE_NAME,
+          Collections.singletonList(
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(makeItem(PK_VALUE)).build())
+                  .build()));
+
+      URI expectedRoute = firstAffinityRouteForPk(PK_VALUE);
+
+      mockHttpClient.clearCapturedRequests();
+      client.batchWriteItem(BatchWriteItemRequest.builder().requestItems(requestItems).build());
+      URI actualRoute = mockHttpClient.getLastRequestUri();
+
+      assertSameRoute(
+          "BatchWrite should continue after missing table metadata", expectedRoute, actualRoute);
+    } finally {
+      client.close();
+    }
+  }
+
+  @Test
+  public void testBatchWriteItemSkipsMissingAndUnsupportedPartitionKeys() {
+    DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.ANY_WRITE));
+    try {
+      Map<String, AttributeValue> missingPk = new HashMap<>();
+      missingPk.put("data", AttributeValue.builder().s("missing").build());
+      Map<String, AttributeValue> unsupportedPk = new HashMap<>();
+      unsupportedPk.put(PK_NAME, AttributeValue.builder().bool(true).build());
+
+      Map<String, List<WriteRequest>> requestItems = new LinkedHashMap<>();
+      requestItems.put(
+          TABLE_NAME,
+          Arrays.asList(
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(missingPk).build())
+                  .build(),
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(unsupportedPk).build())
+                  .build(),
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(makeItem(PK_VALUE)).build())
+                  .build()));
+
+      URI expectedRoute = firstAffinityRouteForPk(PK_VALUE);
+
+      mockHttpClient.clearCapturedRequests();
+      client.batchWriteItem(BatchWriteItemRequest.builder().requestItems(requestItems).build());
+      URI actualRoute = mockHttpClient.getLastRequestUri();
+
+      assertSameRoute(
+          "BatchWrite should route by the supported candidate", expectedRoute, actualRoute);
+    } finally {
+      client.close();
+    }
+  }
+
+  @Test
+  public void testBatchWriteItemTieUsesLexicographicNodeOrder() {
+    String firstPk = PK_VALUE;
+    String secondPk = findPkValueWithDifferentRoute("tie-route-", firstPk);
+    URI firstRoute = firstAffinityRouteForPk(firstPk);
+    URI secondRoute = firstAffinityRouteForPk(secondPk);
+    URI expectedRoute =
+        firstRoute.toString().compareTo(secondRoute.toString()) <= 0 ? firstRoute : secondRoute;
+
+    DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.ANY_WRITE));
+    try {
+      Map<String, List<WriteRequest>> requestItems = new LinkedHashMap<>();
+      requestItems.put(
+          TABLE_NAME,
+          Arrays.asList(
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(makeItem(firstPk)).build())
+                  .build(),
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(makeItem(secondPk)).build())
+                  .build()));
+
+      mockHttpClient.clearCapturedRequests();
+      client.batchWriteItem(BatchWriteItemRequest.builder().requestItems(requestItems).build());
+      URI actualRoute = mockHttpClient.getLastRequestUri();
+
+      assertSameRoute("Tied votes should use lexicographic node order", expectedRoute, actualRoute);
+    } finally {
+      client.close();
+    }
+  }
+
+  @Test
+  public void testBatchWriteItemNoUsableCandidatesFallsBackToRandomRouting() {
+    DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.ANY_WRITE));
+    try {
+      Map<String, AttributeValue> unsupportedPk = new HashMap<>();
+      unsupportedPk.put(PK_NAME, AttributeValue.builder().bool(true).build());
+      Map<String, List<WriteRequest>> requestItems = new LinkedHashMap<>();
+      requestItems.put(
+          TABLE_NAME,
+          Collections.singletonList(
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(unsupportedPk).build())
+                  .build()));
+
+      assertRandomRouting(
+          () ->
+              client.batchWriteItem(
+                  BatchWriteItemRequest.builder().requestItems(requestItems).build()));
+    } finally {
+      client.close();
+    }
+  }
+
+  @Test
+  @CoversRequirements("AFF-REQ-006")
+  public void testBatchWriteItemSkipsDownPreferredNodeUsingStableKnownOrder() {
+    URI downNode = testNodeUris.get(1);
+    MockAlternatorLiveNodes liveNodes =
+        new MockAlternatorLiveNodes(
+            testNodeUris, NodeHealthConfig.builder().withConsecutiveFailureThreshold(1).build());
+    String pkValue = findPkValueWithPreferredRoute("down-route-", testNodeUris, downNode);
+    long hash = AttributeValueHasher.hash(AttributeValue.builder().s(pkValue).build());
+    List<URI> allHealthyOrder =
+        collectNodes(new LazyQueryPlan(new MockAlternatorLiveNodes(testNodeUris), hash));
+    assertEquals(downNode, allHealthyOrder.get(0));
+    URI expectedAfterSkip = allHealthyOrder.get(1);
+
+    liveNodes.reportNodeResult(downNode, NodeHealthObservation.TRAFFIC_FAILURE);
+
+    DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.ANY_WRITE), liveNodes);
+    try {
+      Map<String, List<WriteRequest>> requestItems = new LinkedHashMap<>();
+      requestItems.put(
+          TABLE_NAME,
+          Collections.singletonList(
+              WriteRequest.builder()
+                  .putRequest(PutRequest.builder().item(makeItem(pkValue)).build())
+                  .build()));
+
+      mockHttpClient.clearCapturedRequests();
+      client.batchWriteItem(BatchWriteItemRequest.builder().requestItems(requestItems).build());
+      URI route = mockHttpClient.getLastRequestUri();
+
+      assertNotEquals("Down preferred node should be skipped", downNode.getHost(), route.getHost());
+      assertSameRoute("Batch write should use next healthy node", expectedAfterSkip, route);
+    } finally {
+      client.close();
+    }
+  }
+
+  @Test
+  public void testPutItemUnsupportedPartitionKeyTypeFallsBackToRandomRouting() {
+    DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.ANY_WRITE));
+    try {
+      Map<String, AttributeValue> item = new HashMap<>();
+      item.put(PK_NAME, AttributeValue.builder().bool(true).build());
+
+      assertRandomRouting(
+          () -> client.putItem(PutItemRequest.builder().tableName(TABLE_NAME).item(item).build()));
+    } finally {
+      client.close();
+    }
+  }
+
   // --- BatchGetItem ---
 
   @Test
-  public void testBatchGetItem_AnyWrite_RoundRobin() {
+  public void testBatchGetItem_AnyWrite_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.ANY_WRITE));
     try {
       Map<String, KeysAndAttributes> requestItems = new HashMap<>();
@@ -1599,7 +1950,7 @@ public class AffinityQueryPlanInterceptorTest {
           TABLE_NAME,
           KeysAndAttributes.builder().keys(Collections.singletonList(makeKey())).build());
 
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.batchGetItem(
                   BatchGetItemRequest.builder().requestItems(requestItems).build()));
@@ -1609,7 +1960,7 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testBatchGetItem_Rmw_RoundRobin() {
+  public void testBatchGetItem_Rmw_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.RMW));
     try {
       Map<String, KeysAndAttributes> requestItems = new HashMap<>();
@@ -1617,7 +1968,7 @@ public class AffinityQueryPlanInterceptorTest {
           TABLE_NAME,
           KeysAndAttributes.builder().keys(Collections.singletonList(makeKey())).build());
 
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.batchGetItem(
                   BatchGetItemRequest.builder().requestItems(requestItems).build()));
@@ -1627,7 +1978,7 @@ public class AffinityQueryPlanInterceptorTest {
   }
 
   @Test
-  public void testBatchGetItem_None_RoundRobin() {
+  public void testBatchGetItem_None_RandomRouting() {
     DynamoDbClient client = createClient(buildConfig(KeyRouteAffinity.NONE));
     try {
       Map<String, KeysAndAttributes> requestItems = new HashMap<>();
@@ -1635,7 +1986,7 @@ public class AffinityQueryPlanInterceptorTest {
           TABLE_NAME,
           KeysAndAttributes.builder().keys(Collections.singletonList(makeKey())).build());
 
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.batchGetItem(
                   BatchGetItemRequest.builder().requestItems(requestItems).build()));
@@ -1721,11 +2072,11 @@ public class AffinityQueryPlanInterceptorTest {
   // ========== Null/disabled config ==========
 
   @Test
-  public void testNullConfig_RoundRobin() {
-    // Passing null config should use basic round-robin
+  public void testNullConfig_RandomRouting() {
+    // Passing null config should use basic random query-plan routing
     DynamoDbClient client = createClient(null);
     try {
-      assertRoundRobinRouting(
+      assertRandomRouting(
           () ->
               client.putItem(
                   PutItemRequest.builder().tableName(TABLE_NAME).item(makeItem()).build()));
@@ -1745,41 +2096,44 @@ public class AffinityQueryPlanInterceptorTest {
    *   <li>Does not start any background threads
    *   <li>Provides a fixed list of test nodes
    *   <li>Supports LazyQueryPlan creation for key affinity (via base class)
-   *   <li>Implements round-robin across all test nodes
    * </ul>
    */
   private static class MockAlternatorLiveNodes extends AlternatorLiveNodes {
     private final List<URI> nodes;
-    private final java.util.concurrent.atomic.AtomicInteger counter =
-        new java.util.concurrent.atomic.AtomicInteger(0);
 
     MockAlternatorLiveNodes(List<URI> nodes) {
+      this(nodes, NodeHealthConfig.getDefault());
+    }
+
+    MockAlternatorLiveNodes(List<URI> nodes, NodeHealthConfig nodeHealthConfig) {
       super(
           AlternatorConfig.builder()
-              .withSeedHosts(Collections.singletonList(nodes.get(0).getHost()))
+              .withSeedHosts(nodeHosts(nodes))
               .withScheme(nodes.get(0).getScheme())
               .withPort(nodes.get(0).getPort())
+              .withNodeHealthConfig(nodeHealthConfig)
               .build());
       this.nodes = new ArrayList<>(nodes);
+      for (URI node : nodes) {
+        reportNodeResult(node, NodeHealthObservation.PROBE_SUCCESS);
+      }
     }
 
     @Override
-    protected List<URI> getLiveNodesInternal() {
+    protected List<URI> getDiscoveredNodesInternal() {
       return nodes;
     }
 
     @Override
-    public URI nextAsURI() {
-      return nodes.get(Math.abs(counter.getAndIncrement() % nodes.size()));
-    }
-
-    @Override
     public void start() {}
+  }
 
-    @Override
-    public List<URI> getLiveNodes() {
-      return Collections.unmodifiableList(new ArrayList<>(nodes));
+  private static List<String> nodeHosts(List<URI> nodes) {
+    List<String> hosts = new ArrayList<>();
+    for (URI node : nodes) {
+      hosts.add(node.getHost());
     }
+    return hosts;
   }
 
   /**

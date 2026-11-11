@@ -21,6 +21,15 @@ it do the right thing for Alternator.
 
 This library supports AWS SDK for Java Version 2 (requires 2.20 or above) and requires Java 11 or later.
 
+The language-agnostic feature contracts are maintained in [`feature-specs`](feature-specs/README.md):
+
+- [CCM integration](feature-specs/ccm-integration.md)
+- [Compression](feature-specs/compression.md)
+- [Header optimization](feature-specs/header-optimization.md)
+- [Key-route affinity](feature-specs/key-route-affinity.md)
+- [Node health](feature-specs/node-health.md)
+- [Query plans](feature-specs/query-plan.md)
+
 ## Add `load-balancing` to your project
 
 ### Maven Dependency
@@ -160,6 +169,7 @@ If you provide a fully custom HTTP client via those methods, customizers cannot 
 
 ### Connection pool tuning
 
+The library applies Alternator-optimized connection pool defaults out of the box.
 For common pool settings that apply regardless of which HTTP client implementation is
 used, you can configure them directly on the builder:
 
@@ -167,11 +177,36 @@ used, you can configure them directly on the builder:
 DynamoDbClient client = AlternatorDynamoDbClient.builder()
     .endpointOverride(URI.create("http://localhost:8043"))
     .credentialsProvider(myCredentials)
-    .withMaxConnections(100)
+    .withMaxConnections(200)
     .withConnectionMaxIdleTimeMs(30000)
     .withConnectionTimeToLiveMs(60000)  // Apache and Netty only; ignored by CRT
+    .withConnectionAcquisitionTimeoutMs(5000)
+    .withConnectionTimeoutMs(3000)
     .build();
 ```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `maxConnections` | 400 | Maximum connections in the pool. Higher than SDK defaults to support multi-node clusters. |
+| `connectionMaxIdleTimeMs` | 600,000 (10 min) | Idle connections are closed after this time. Set to 0 to disable idle eviction (a warning is logged). |
+| `connectionTimeToLiveMs` | 0 (unlimited) | Maximum lifetime for any connection. Apache and Netty only; CRT logs a warning and ignores it. |
+| `connectionAcquisitionTimeoutMs` | 10,000 (10 sec) | How long to wait for a connection from an exhausted pool. |
+| `connectionTimeoutMs` | 15,000 (15 sec) | How long to wait for a TCP connection to be established. |
+
+**CRT HTTP client note:** The CRT SDK requires positive durations for timeouts. Setting
+`connectionAcquisitionTimeoutMs` or `connectionTimeoutMs` to 0 with CRT will fall back to
+SDK defaults (an info message is logged).
+
+**CRT sync 5xx connection note:** The AWS SDK CRT sync response handler treats HTTP
+5xx server errors as a condition where the native CRT connection may be closed instead
+of returned to the pool. There is no `AwsCrtHttpClient.Builder` option to disable this;
+`maxConcurrency`, idle timeout, TCP keep-alive, and CRT connection health settings do
+not change that status-code close policy. In this repository's probe using AWS SDK
+2.42.2, five sequential 500 responses reused the same TCP connection locally, while CI
+observed one replacement connection across the same five responses. Treat CRT sync 5xx
+reuse as best-effort: the current probe does not show one new connection per 5xx, but
+application code should still assume a connection can rotate after any 5xx response.
+Use Apache sync if strict single-connection reuse after 5xx responses is required.
 
 These settings are applied as defaults before any customizer callback runs, so the
 customizer can override them if needed.
@@ -224,10 +259,28 @@ code that looks something like this:
         .build();
 ```
 
-The `region()` chosen doesn't matter when the endpoint is explicitly chosen
-with `endpointOverride()`, but nevertheless should be specified otherwise the
-SDK will try to look it up in a configuration file, and complain if it isn't
-set there.
+The AWS region is still part of the AWS SDK client configuration even when
+`endpointOverride()` sends every request to Alternator instead of an AWS
+DynamoDB regional endpoint. Alternator does not use this value for routing; the
+library chooses nodes from `/localnodes` and the configured routing scope.
+However, the SDK requires a region for signing and configuration resolution, and
+the value can appear in tracing, logging, metrics, or debug output.
+
+`AlternatorDynamoDbClient` sets `fake-aws-region` when the application does not
+provide a region so the SDK does not fall back to profile or environment
+discovery and fail before Alternator is contacted. If that placeholder would be
+confusing in observability tools, set a meaningful value explicitly:
+
+```java
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .region(Region.of("us-east-1"))
+    .endpointOverride(URI.create("https://127.0.0.1:8043"))
+    .credentialsProvider(myCredentials)
+    .build();
+```
+
+Use the deployment or Scylla Cloud region that makes sense for your operators;
+it does not change Alternator node selection.
 
 #### Using `AlternatorDynamoDbClient`
 
@@ -385,12 +438,74 @@ complete example. After building with `mvn package`, you can run this demo with:
 mvn exec:java -Dexec.mainClass=com.scylladb.alternator.demo.Demo5 -Dexec.classpathScope=test
 ```
 
-### Request Compression
+### HTTP Compression
+
+The normative, language-agnostic behavior is defined in the
+[compression feature specification](feature-specs/compression.md).
+
+#### Response compression
+
+Response compression is disabled by default. To negotiate compressed responses,
+configure the supported algorithms to advertise on DynamoDB requests. When enabled
+and Alternator returns `Content-Encoding: gzip` or `Content-Encoding: deflate`, the
+response body is decompressed before it reaches the AWS SDK response parser. This
+works for both synchronous and asynchronous clients.
+
+Response compression support:
+- `gzip` - supported
+- `deflate` - supported
+
+To enable response compression for all supported algorithms:
+
+```java
+import com.scylladb.alternator.ResponseCompressionAlgorithm;
+
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://127.0.0.1:8043"))
+    .credentialsProvider(myCredentials)
+    .withResponseCompression(
+        ResponseCompressionAlgorithm.GZIP,
+        ResponseCompressionAlgorithm.DEFLATE)
+    .build();
+```
+
+You can also restrict response compression to a supported subset, and the configured
+order is used for `Accept-Encoding`:
+
+```java
+import com.scylladb.alternator.ResponseCompressionAlgorithm;
+
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://127.0.0.1:8043"))
+    .credentialsProvider(myCredentials)
+    .withResponseCompression(ResponseCompressionAlgorithm.DEFLATE)
+    .build();
+```
+
+To explicitly disable response compression negotiation and decompression:
+
+```java
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://127.0.0.1:8043"))
+    .credentialsProvider(myCredentials)
+    .withResponseCompressionDisabled()
+    .build();
+```
+
+Request compression is separate and remains opt-in.
+
+#### Request compression
 
 The library supports optional GZIP compression for HTTP request bodies, which can
 reduce network bandwidth usage when sending large payloads to Alternator.
 
-#### Why not use AWS SDK's built-in compression?
+> **Known issue:** Request compression is not currently safe in the real AWS SDK pipeline. The
+> interceptor adds `Content-Encoding: gzip` after its opportunity to replace the request body has
+> already passed, so an above-threshold request can send uncompressed JSON under a gzip header.
+> Keep request compression disabled until this is fixed. See the
+> [compression implementation's conformance gaps](feature-specs/implementation/compression.md#known-conformance-gaps).
+
+##### Why not use AWS SDK's built-in compression?
 
 AWS SDK for Java v2 includes a `CompressionConfiguration` feature, but it **only works
 for AWS services that have the `@requestCompression` trait** in their service model
@@ -400,7 +515,7 @@ SDK's built-in compression cannot be used for DynamoDB or Alternator requests.
 This library provides its own compression implementation using an `ExecutionInterceptor`
 that works with any DynamoDB/Alternator operation.
 
-#### Enabling compression
+##### Enabling request compression
 
 To enable request compression, configure the builder with a compression algorithm:
 
@@ -415,7 +530,7 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
     .build();
 ```
 
-#### Compression threshold
+##### Compression threshold
 
 By default, only requests with bodies >= 1024 bytes (1 KB) are compressed. This avoids
 the overhead of compressing small payloads that may not benefit from compression.
@@ -430,7 +545,7 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
     .build();
 ```
 
-#### When to use compression
+##### When to use request compression
 
 Request compression is recommended for:
 - Large item attributes (documents, JSON blobs)
@@ -443,6 +558,9 @@ Request compression may not be beneficial for:
 - Low-latency requirements where CPU overhead matters
 
 ### Headers Optimization
+
+The normative, language-agnostic behavior is defined in the
+[header-optimization feature specification](feature-specs/header-optimization.md).
 
 The library supports optional HTTP headers optimization, which reduces network bandwidth by
 removing headers that Alternator does not use. According to benchmarks, this can reduce
@@ -464,17 +582,21 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
 
 #### Default headers whitelist
 
-When headers optimization is enabled, only the following headers are preserved by default:
+When headers optimization is enabled, the default whitelist preserves the headers required for
+the active configuration:
 - `Host` - Required by HTTP/1.1
 - `X-Amz-Target` - Specifies the DynamoDB operation
 - `Content-Type` - MIME type for DynamoDB API
 - `Content-Length` - Required for request body
-- `Accept-Encoding` - For response compression negotiation
+- `Accept-Encoding` - For response compression negotiation (when enabled)
 - `Content-Encoding` - For request compression (when enabled)
 - `Authorization` - AWS SigV4 signature (when authentication is enabled)
 - `X-Amz-Date` - Timestamp for AWS signature (when authentication is enabled)
+- `X-Amz-Security-Token` - Required with temporary session credentials; currently missing from the
+  computed whitelist (see the known gaps below)
+- `User-Agent` - Reports the ScyllaDB Alternator client version
 
-All other headers (such as `User-Agent`, `X-Amz-Sdk-Invocation-Id`, `amz-sdk-request`, `X-Amz-Content-Sha256`) are removed.
+All other headers (such as `X-Amz-Sdk-Invocation-Id`, `amz-sdk-request`, `X-Amz-Content-Sha256`) are removed.
 
 #### Custom headers whitelist
 
@@ -489,13 +611,63 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
     .withOptimizeHeaders(true)
     .withHeadersWhitelist(Arrays.asList(
         "Host", "X-Amz-Target", "Content-Type", "Content-Length",
-        "Authorization", "X-Amz-Date", "X-Custom-Header"))
+        "Authorization", "X-Amz-Date", "Connection", "User-Agent",
+        "X-Custom-Header"))
     .build();
 ```
 
 **Important:** When using a custom whitelist, make sure to include all headers required for
-authentication (`Authorization`, `X-Amz-Date`) and operation (`Host`, `X-Amz-Target`,
-`Content-Type`, `Content-Length`).
+authentication (`Authorization`, `X-Amz-Date`, and `X-Amz-Security-Token` for temporary
+credentials), operation (`Host`, `X-Amz-Target`,
+`Content-Type`, `Content-Length`), response compression when enabled (`Accept-Encoding`),
+connection reuse (`Connection`), and client reporting (`User-Agent`).
+
+The computed default whitelist currently supports basic credentials only. Do not combine header
+optimization with temporary session credentials until `X-Amz-Security-Token` is included
+automatically. See the
+[header-optimization implementation's conformance gaps](feature-specs/implementation/header-optimization.md#known-conformance-gaps).
+
+#### User-Agent customization
+
+By default, the library sends only the ScyllaDB Alternator client identity:
+
+```text
+scylladb-alternator-client-java/<version>
+```
+
+You can replace it completely:
+
+```java
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://127.0.0.1:8043"))
+    .credentialsProvider(myCredentials)
+    .withUserAgent("my-client/1.2.3")
+    .build();
+```
+
+You can transform the generated value. The function receives the default ScyllaDB Alternator
+user-agent:
+
+```java
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://127.0.0.1:8043"))
+    .credentialsProvider(myCredentials)
+    .withUserAgent(userAgent -> userAgent + " my-app/4.5.6")
+    .build();
+```
+
+You can also remove the header entirely:
+
+```java
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://127.0.0.1:8043"))
+    .credentialsProvider(myCredentials)
+    .withoutUserAgent()
+    .build();
+```
+
+When `withoutUserAgent()` is used with headers optimization, `User-Agent` is removed from the
+effective required whitelist as well.
 
 #### Combining with compression
 
@@ -561,10 +733,37 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
 - **DatacenterScope** - Use only nodes in a specific datacenter
 - **RackScope** - Use only nodes in a specific rack within a datacenter
 
+#### Cluster-Wide Discovery Across Datacenters
+
+For cluster-wide routing, the client queries the configured seed hosts and merges the returned node
+lists. Some Scylla versions return only the contacted node's datacenter from `/localnodes`, even
+with cluster scope. When using those versions across multiple datacenters, configure seed hosts
+from every datacenter that should participate in cluster-wide routing:
+
+```java
+import java.util.Arrays;
+
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://dc1-node.example.com:8043"))
+    .credentialsProvider(myCredentials)
+    .withRoutingScope(ClusterScope.create())
+    .withSeedHosts(Arrays.asList(
+        "dc1-node.example.com",
+        "dc2-node.example.com",
+        "dc3-node.example.com"))
+    .build();
+```
+
 #### Fallback Chains
 
 Each scope can have a fallback scope. When no nodes are available in the current scope,
 the client automatically falls back to the next scope in the chain:
+
+For datacenter or rack scoped routing in a multi-datacenter cluster, include a seed host from the
+target datacenter. The client queries configured seeds with the scope filter and only falls back
+after no seed returns nodes for that scope. Configured seed hosts remain discovery candidates, but
+they are not added to the routing node list unless `/localnodes` returns them for the selected
+scope.
 
 ```java
 // Rack -> Datacenter -> Cluster fallback chain
@@ -598,6 +797,40 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
     .withOptimizeHeaders(true)
     .build();
 ```
+
+### TLS Client Certificate Authentication
+
+Alternator clusters that require TLS client certificates can be used by configuring client key
+material in `TlsConfig`. The certificate file must be PEM-encoded and may contain the full
+certificate chain. The private key file must be an unencrypted PKCS#8 PEM key.
+
+```java
+import com.scylladb.alternator.AlternatorDynamoDbClient;
+import com.scylladb.alternator.HttpClientType;
+import com.scylladb.alternator.TlsConfig;
+import java.nio.file.Paths;
+
+TlsConfig tlsConfig = TlsConfig.builder()
+    .withCaCertPath(Paths.get("/path/to/ca.pem"))
+    .withTrustSystemCaCerts(false)
+    .withClientCertificate(
+        Paths.get("/path/to/client.crt"),
+        Paths.get("/path/to/client.key"))
+    .build();
+
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://localhost:8043"))
+    .withHttpClientType(HttpClientType.APACHE)
+    .withTlsConfig(tlsConfig)
+    .build();
+```
+
+For async clients, use `HttpClientType.NETTY`. The CRT HTTP client does not expose key-manager
+configuration in the AWS SDK, so client certificates are not supported with `HttpClientType.CRT`.
+
+When the cluster authenticates clients by TLS certificate and SigV4 signing is not needed, omit
+`credentialsProvider(...)`. The Alternator builders automatically use anonymous credentials and do
+not generate authentication headers in that mode.
 
 ### TLS Session Tickets
 
@@ -637,6 +870,10 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
     .withTlsSessionCacheConfig(tlsConfig)
     .build();
 ```
+
+Custom session cache settings are applied by the Apache sync HTTP client. The AWS SDK Netty and
+CRT HTTP clients do not expose TLS session cache controls, so non-default session cache settings are
+rejected for those client types instead of being silently ignored.
 
 #### Disabling TLS session caching
 
@@ -691,15 +928,119 @@ The default configuration works well for most use cases. Consider adjusting sett
 - **Long-running connections**: Default settings are optimal; session resumption primarily
   benefits reconnection scenarios
 
+### Node Health
+
+The normative, language-agnostic behavior is defined in the
+[node-health feature specification](feature-specs/node-health.md).
+
+The client tracks active, quarantined, and down nodes while routing requests:
+
+- configured seeds and newly discovered nodes start quarantined
+- a successful direct `GET /localnodes` contact activates a quarantined node
+- DynamoDB transport failures count as traffic health failures
+- consecutive traffic failures mark an active node down
+- down nodes are probed in the background with `GET /localnodes`
+- enough consecutive HTTP 200 probe responses move a down node into quarantine
+- quarantined nodes are also probed directly during each background health cycle
+- enough consecutive successful contacts from a quarantined node promote it back to active
+- traffic failures in quarantine reset promotion progress, and enough consecutive traffic failures
+  return the node to down
+
+For DynamoDB API requests, successful, application-level, and authentication responses count as
+successful health contacts. In particular, body-coded errors such as `InvalidSignatureException`,
+`MissingAuthenticationTokenException`, or `UnrecognizedClientException`, and authentication HTTP
+statuses such as `401` or `403`, do not mark a node unhealthy. Retryable HTTP statuses `500`, `502`,
+`503`, and `504` produce no health observation: they neither advance nor reset health counters
+because Alternator can report coordinator timeouts and unrelated internal failures with the same
+`InternalServerError` type. This avoids removing capacity during cluster-wide overload. Failures
+that occur before an HTTP response is received count as DynamoDB traffic health failures.
+
+For `/localnodes`, any non-200 HTTP status or transport failure is a discovery or recovery-probe
+failure. A successful direct HTTP 200 probe activates a quarantined node; a failed probe leaves it
+quarantined without changing its traffic counters. Probe outcomes do not demote active nodes. For a
+down node, a probe failure resets probe-recovery progress and a successful HTTP 200 probe advances
+it. DynamoDB traffic results received after a node becomes down are treated as stale and do not
+change its state, counters, or probe-recovery progress.
+
+Key route affinity hashes and votes over all known discovered nodes so candidate order is stable
+while health changes. Every request makes two passes over its source order: it first returns active
+nodes, then falls back to quarantined nodes if the active candidates are exhausted. Down nodes are
+always skipped. Regular query plans use a random source order; affinity query plans calculate one
+deterministic order over all discovered nodes, including down nodes, and preserve that order within
+both passes. If the SDK requests another attempt after every eligible endpoint has been tried, the
+plan starts another cycle: regular plans reshuffle, affinity plans reuse their deterministic order.
+If all candidates are down, the request fails locally. The SDK request endpoint is never used as a
+separate fallback.
+
+While a node is quarantined, successful traffic advances promotion and clears the failure streak. A
+traffic failure resets promotion progress while leaving the node in quarantine; 3 consecutive
+traffic failures return it to down by default. A failed probe leaves these counters unchanged, while
+a successful direct probe activates the node immediately.
+
+The defaults are: 10 consecutive DynamoDB traffic failures mark an active node down, 3 consecutive
+successful down-node probes move it into quarantine, 10 consecutive successful quarantined traffic
+contacts promote it to active, 3 consecutive quarantined traffic failures return it to down, and
+background health cycles probe down and quarantined nodes every 30 seconds.
+Legacy quarantine traffic-interval and traffic-idle configuration methods remain available but are
+deprecated and no longer affect routing.
+
+Health probes use 4 concurrent workers by default and time out 5 seconds after starting. Built-in
+polling clients reserve one additional connection for topology traffic. Background cycles enqueue
+probe work without blocking topology refresh. One endpoint has at most one physical probe in flight,
+including concurrent explicit calls.
+
+```java
+import com.scylladb.alternator.NodeHealthConfig;
+
+DynamoDbClient client = AlternatorDynamoDbClient.builder()
+    .endpointOverride(URI.create("https://127.0.0.1:8043"))
+    .credentialsProvider(myCredentials)
+    .withNodeHealthConfig(NodeHealthConfig.builder()
+        .withConsecutiveFailureThreshold(5)
+        .withDownNodeRecoverySuccessThreshold(3)
+        .withDownNodeProbePeriodMs(10_000)
+        .withHealthProbeConcurrency(4)
+        .withHealthProbeTimeoutMs(5_000)
+        .withQuarantineSuccessThreshold(10)
+        .withQuarantineFailureThreshold(3)
+        .build())
+    .build();
+```
+
+Wrappers expose `probeQuarantinedNodes()` and `probeQuarantinedNodesAsync()` to send `GET /localnodes`
+directly to every quarantined endpoint in the current discovered set and return those that answered
+with HTTP 200. Successful probes activate those endpoints; individual failures leave them
+quarantined. Calls after client shutdown fail immediately.
+
+Topology refresh independently shuffles active, quarantined, and down candidate buckets, then tries
+them in that order. Down nodes are used only as final control-plane discovery fallback and topology
+requests do not change their recovery counters.
+
+For custom integrations, `AlternatorLiveNodes` exposes `reportNodeResult(...)`,
+`probeQuarantinedNodes()`, `probeQuarantinedNodesAsync()`, `getActiveNodes()`,
+`getQuarantinedNodes()`, and `getDownNodes()`. Report routed DynamoDB request outcomes as
+`TRAFFIC_SUCCESS` for received HTTP responses other than `500`, `502`, `503`, or `504`. Do not
+report an outcome for those retryable server errors. Report `TRAFFIC_FAILURE` only when no HTTP
+response was received. Report direct node-health probe outcomes with `PROBE_SUCCESS` or
+`PROBE_FAILURE`.
+The down-node probe period must be positive so every down node retains an automatic recovery path.
+Node health, including background probes, can be disabled with
+`AlternatorConfig.builder().withNodeHealthDisabled()`.
+
 ### Key Route Affinity (LWT Optimization)
 
-Key route affinity is an optimization for Lightweight Transactions (LWT) that use Paxos
-consensus. By routing all requests with the same partition key to the same coordinator node,
-it reduces Paxos round-trips and improves latency for conditional writes.
+The normative, language-agnostic behavior is defined in the
+[key-route-affinity feature specification](feature-specs/key-route-affinity.md). Candidate ordering
+and retry traversal are defined separately in the [query-plan specification](feature-specs/query-plan.md).
 
-**Note:** Key route affinity only works reliably with synchronous DynamoDB clients
-(`DynamoDbClient`). Do not use it with `DynamoDbAsyncClient` due to cross-thread
-execution limitations.
+Key route affinity is an optimization for Lightweight Transactions (LWT) that use Paxos
+consensus. It gives requests with the same partition key the same deterministic coordinator
+preference, which can reduce Paxos round-trips and improve latency for conditional writes. Health
+changes, topology changes, and retries can still select another endpoint.
+
+**Note:** Synchronous clients automatically discover missing partition-key names via
+`DescribeTable`. Async clients can use key route affinity with pre-configured partition-key
+names; requests for tables without pre-configured metadata fall back to random query-plan routing.
 
 #### Quick start
 
@@ -720,14 +1061,15 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
 
 | Mode | Description |
 |------|-------------|
-| `KeyRouteAffinity.NONE` | Default — standard round-robin load balancing |
+| `KeyRouteAffinity.NONE` | Default — standard random query-plan load balancing |
 | `KeyRouteAffinity.RMW` | Optimize read-before-write operations (conditional updates/puts/deletes with `ConditionExpression`, `Expected`, or non-NONE `ReturnValues`) |
 | `KeyRouteAffinity.ANY_WRITE` | Optimize all write operations (`PutItem`, `UpdateItem`, `DeleteItem`, `BatchWriteItem`) |
 
 #### Pre-configuring partition key names
 
-By default, the library auto-discovers partition key names via `DescribeTable` on first
-use of each table. To avoid this initial lookup, you can pre-configure them:
+For synchronous clients, the library auto-discovers partition key names via `DescribeTable`
+on first use of each table. To avoid this initial lookup, or when using an async client,
+pre-configure them:
 
 ```java
 import com.scylladb.alternator.keyrouting.KeyRouteAffinityConfig;
@@ -748,10 +1090,12 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
 #### How it works
 
 1. The `AffinityQueryPlanInterceptor` intercepts each DynamoDB request
-2. For qualifying operations, it extracts the partition key value from the request
+2. For qualifying single-item operations, it extracts the partition key value from the request
 3. A deterministic hash (MurmurHash3) of the partition key selects a consistent node
-4. All requests for the same partition key are routed to the same Alternator node
-5. Non-qualifying operations continue to use round-robin load balancing
+4. For `BatchWriteItem`, each usable write votes for its preferred node; voted nodes are tried by
+   vote count, then by node URL
+5. Non-qualifying operations and requests without usable partition keys continue to use
+   random query-plan load balancing
 
 #### When to use key route affinity
 
@@ -763,4 +1107,72 @@ Key route affinity is recommended for:
 Key route affinity may not be beneficial for:
 - Read-heavy workloads (reads don't use Paxos)
 - Workloads with uniformly distributed writes across many keys
-- Async clients (use sync clients only)
+- Async clients where partition-key names cannot be pre-configured
+
+## Integration testing with CCM
+
+Integration tests use [scylla-ccm](https://github.com/scylladb/scylla-ccm) and native Scylla
+relocatable packages. They require Linux, Python 3.9 or newer, OpenSSL, `setsid` from util-linux,
+external `kill` and `ps` executables from procps, and [`uv`](https://docs.astral.sh/uv/). Install the
+repository-pinned CCM revision and run the suite with:
+
+```sh
+make ccm-install
+make test-integration
+```
+
+The Java test harness owns provisioning, endpoint readiness, per-lease table namespaces,
+diagnostics, and cleanup. It keeps at most one physical cluster in a JVM. Matching reusable leases
+share that cluster and receive independent resource prefixes. An idle incompatible cluster is
+replaced; an incompatible or private request made while another lease is active fails immediately.
+Private leases are exclusive.
+
+The default cluster uses Scylla `release:2025.2.5`. Override the package selector or CCM executable
+with `SCYLLA_VERSION` or `SCYLLA_CCM_PATH`. A cluster may have at most nine nodes;
+`SCYLLA_CCM_MAX_NODES` may lower that limit. The harness does not schedule clusters from detected
+host or cgroup memory.
+
+Java stores live CCM runs and address reservations beneath the private, host-shared per-user root
+`/tmp/alternator-client-java-ccm-<uid>`. Set `SCYLLA_CCM_ROOT` to use another private root, and use
+the same override for concurrent processes that must coordinate addresses; distinct roots do not
+share reservations. Normal JVM shutdown attempts to remove the current run and retains it for
+recovery if cleanup fails. After a hard kill, the next test JVM detects the stale run,
+collects diagnostics under `target/ccm`, and attempts cleanup before provisioning. State that is
+malformed or cannot be removed remains quarantined with its address ID reserved, and provisioning
+continues with another ID. Direct IDE or Maven execution uses the same best-effort shutdown and
+next-run recovery; cleanup is not immediate after an uncatchable process kill. Set
+`SCYLLA_CCM_DIAGNOSTICS_DIR` to choose a different external diagnostics directory.
+
+Tests can acquire reusable or private cluster leases directly:
+
+```java
+try (ReusableClusterLease shared = TestClusters.acquireReusable(ClusterSpecs.defaultSpec());
+    AlternatorDynamoDbClientWrapper wrapper =
+        shared.cluster().clientBuilder(AlternatorTransport.HTTP).buildWithAlternatorAPI()) {
+  String tableName = shared.resources().newTableName("example");
+  DynamoDbClient client = wrapper.getClient();
+}
+
+ClusterSpec privateSpec =
+    ClusterSpecs.defaultSpec()
+        .withTopology(ClusterTopology.singleDatacenter(1))
+        .withTransports(AlternatorTransport.HTTP);
+try (PrivateClusterLease privateCluster = TestClusters.provisionPrivate(privateSpec)) {
+  privateCluster.control().stopNode(privateCluster.cluster().nodes().get(0));
+}
+```
+
+Reusable leases may share a matching healthy physical cluster but expose no node controls. Tests
+that stop, start, add, or remove nodes must request a private cluster. Each lease supplies unique
+table names and removes every table in its namespace when released. Private controls are
+serialized with lease and pool shutdown, reject stale or foreign node handles, and never permit
+removal of the final live node. A command with an ambiguous result makes the private cluster dirty;
+further mutation is rejected and whole-cluster cleanup is required.
+
+
+## Releasing
+
+Maintainers use the separate **Release** and **Release dry run** workflows on
+`main`. Dry runs stage real unpublished Central deployments. See
+[release prerequisites and recovery](scripts/release/SIGNING.md) and
+[generated release notes](.github/RELEASE_NOTES.md) before dispatching either.

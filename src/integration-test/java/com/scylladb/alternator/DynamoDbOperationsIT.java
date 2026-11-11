@@ -1,3 +1,18 @@
+/*
+ * Copyright ScyllaDB, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package com.scylladb.alternator;
 
 import static org.junit.Assert.*;
@@ -24,13 +39,12 @@ import software.amazon.awssdk.services.dynamodb.model.*;
  * DeleteItem, DeleteTable) work correctly when requests are distributed across multiple Alternator
  * nodes via the load balancer.
  *
- * <p>Tests run against both HTTP and HTTPS endpoints. Set environment variables to configure:
+ * <p>Tests run against both HTTP and HTTPS endpoints provisioned by the CCM harness. Set
+ * environment variables to configure:
  *
  * <ul>
- *   <li>ALTERNATOR_HOST: Host address (default: 172.39.0.2)
- *   <li>ALTERNATOR_PORT: HTTP port number (default: 9998)
- *   <li>ALTERNATOR_HTTPS_PORT: HTTPS port number (default: 9999)
  *   <li>INTEGRATION_TESTS: Set to "true" to enable these tests
+ *   <li>SCYLLA_VERSION: CCM Scylla package selector
  * </ul>
  */
 @RunWith(Parameterized.class)
@@ -262,7 +276,7 @@ public class DynamoDbOperationsIT {
       // Create table
       client.createTable(createTableRequest(tableName));
 
-      // Write many items - requests will be distributed across nodes via round-robin
+      // Write many items - requests will be distributed across nodes via random query-plan routing
       int itemCount = 30;
       for (int i = 0; i < itemCount; i++) {
         Map<String, AttributeValue> item =

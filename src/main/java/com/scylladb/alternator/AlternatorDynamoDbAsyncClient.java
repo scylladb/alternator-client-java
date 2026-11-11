@@ -1,3 +1,18 @@
+/*
+ * Copyright ScyllaDB, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package com.scylladb.alternator;
 
 import com.scylladb.alternator.internal.AlternatorLiveNodes;
@@ -8,11 +23,15 @@ import com.scylladb.alternator.internal.SyncClientDetector;
 import com.scylladb.alternator.keyrouting.KeyRouteAffinity;
 import com.scylladb.alternator.keyrouting.KeyRouteAffinityConfig;
 import com.scylladb.alternator.queryplan.AffinityQueryPlanInterceptor;
+import com.scylladb.alternator.queryplan.AttemptRoutingSdkAsyncHttpClient;
 import com.scylladb.alternator.queryplan.BasicQueryPlanInterceptor;
 import com.scylladb.alternator.routing.RoutingScope;
 import java.net.URI;
 import java.util.Collection;
+import java.util.Objects;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
+import java.util.function.UnaryOperator;
 import software.amazon.awssdk.auth.credentials.AnonymousCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
 import software.amazon.awssdk.awscore.endpoints.AccountIdEndpointMode;
@@ -26,6 +45,7 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClientBuilder;
 import software.amazon.awssdk.services.dynamodb.endpoints.DynamoDbEndpointProvider;
+import software.amazon.awssdk.utils.AttributeMap;
 
 /**
  * Factory class for creating DynamoDB async clients with Alternator load balancing support.
@@ -56,7 +76,6 @@ import software.amazon.awssdk.services.dynamodb.endpoints.DynamoDbEndpointProvid
  *
  * // Access Alternator-specific functionality
  * List<URI> nodes = client.getLiveNodes();
- * URI nextNode = client.nextAsURI();
  * }</pre>
  *
  * @author dmitry.kropachev
@@ -91,13 +110,18 @@ public class AlternatorDynamoDbAsyncClient {
     private final AlternatorConfig.Builder configBuilder;
     private URI seedUri;
     private Region region;
+    private boolean seedHostsSet = false;
     private boolean disableCertificateChecks = false;
     private boolean httpClientSet = false;
     private boolean credentialsProviderSet = false;
+    private SdkAsyncHttpClient customHttpClient;
+    private SdkAsyncHttpClient.Builder customHttpClientBuilder;
     private Consumer<NettyNioAsyncHttpClient.Builder> nettyCustomizer;
     private Consumer<AwsCrtAsyncHttpClient.Builder> crtAsyncCustomizer;
+    private HttpClientType httpClientType;
+    private UnaryOperator<String> userAgentTransformer = AlternatorUserAgent.defaultUserAgent();
 
-    private AlternatorDynamoDbAsyncClientBuilder() {
+    AlternatorDynamoDbAsyncClientBuilder() {
       this.delegate = DynamoDbAsyncClient.builder();
       this.configBuilder = AlternatorConfig.builder();
     }
@@ -111,6 +135,42 @@ public class AlternatorDynamoDbAsyncClient {
      */
     public AlternatorDynamoDbAsyncClientBuilder withRoutingScope(RoutingScope routingScope) {
       configBuilder.withRoutingScope(routingScope);
+      return this;
+    }
+
+    /**
+     * Sets the seed host addresses used for Alternator node discovery.
+     *
+     * <p>{@link #endpointOverride(URI)} is still required and supplies the scheme and port for
+     * these hosts. When {@code ClusterScope} is used, each configured seed is queried for {@code
+     * /localnodes}; provide seeds from every datacenter that should participate in cluster-wide
+     * routing. For datacenter or rack scoped routing in a multi-datacenter cluster, provide a seed
+     * from the target datacenter.
+     *
+     * @param hosts collection of seed host addresses (IP or hostname)
+     * @return this builder instance
+     * @since 2.0.6
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withSeedHosts(Collection<String> hosts) {
+      if (hosts != null) {
+        configBuilder.withSeedHosts(hosts);
+        seedHostsSet = true;
+      }
+      return this;
+    }
+
+    /**
+     * Sets a single seed host address used for Alternator node discovery.
+     *
+     * @param host seed host address (IP or hostname)
+     * @return this builder instance
+     * @since 2.0.6
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withSeedHost(String host) {
+      if (host != null) {
+        configBuilder.withSeedHost(host);
+        seedHostsSet = true;
+      }
       return this;
     }
 
@@ -140,6 +200,49 @@ public class AlternatorDynamoDbAsyncClient {
     }
 
     /**
+     * Sets the HTTP response compression algorithms to advertise and decode.
+     *
+     * <p>The configured order is used for the {@code Accept-Encoding} header.
+     *
+     * @param algorithms the response compression algorithms to enable
+     * @return this builder instance
+     * @throws IllegalArgumentException if algorithms is null, empty, or contains null
+     * @since 2.0.6
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withResponseCompression(
+        ResponseCompressionAlgorithm... algorithms) {
+      configBuilder.withResponseCompression(algorithms);
+      return this;
+    }
+
+    /**
+     * Sets the HTTP response compression algorithms to advertise and decode.
+     *
+     * <p>The configured order is used for the {@code Accept-Encoding} header.
+     *
+     * @param algorithms the response compression algorithms to enable
+     * @return this builder instance
+     * @throws IllegalArgumentException if algorithms is null, empty, or contains null
+     * @since 2.0.6
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withResponseCompression(
+        Collection<ResponseCompressionAlgorithm> algorithms) {
+      configBuilder.withResponseCompression(algorithms);
+      return this;
+    }
+
+    /**
+     * Disables HTTP response compression negotiation and decompression.
+     *
+     * @return this builder instance
+     * @since 2.0.6
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withResponseCompressionDisabled() {
+      configBuilder.withResponseCompressionDisabled();
+      return this;
+    }
+
+    /**
      * Enables or disables HTTP header optimization.
      *
      * @param optimizeHeaders true to enable header filtering, false to disable
@@ -159,6 +262,53 @@ public class AlternatorDynamoDbAsyncClient {
      */
     public AlternatorDynamoDbAsyncClientBuilder withHeadersWhitelist(Collection<String> headers) {
       configBuilder.withHeadersWhitelist(headers);
+      return this;
+    }
+
+    /**
+     * Replaces the final {@code User-Agent} header with the provided value.
+     *
+     * @param userAgent the exact user-agent value to send
+     * @return this builder instance
+     * @throws IllegalArgumentException if userAgent is null or blank
+     * @since 2.0.5
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withUserAgent(String userAgent) {
+      this.userAgentTransformer = AlternatorUserAgent.replaceWith(userAgent);
+      configBuilder.withUserAgentEnabled(true);
+      return this;
+    }
+
+    /**
+     * Transforms the final {@code User-Agent} header before the request is sent.
+     *
+     * <p>The function receives the default ScyllaDB Alternator client user-agent. Returning null or
+     * blank removes the {@code User-Agent} header.
+     *
+     * @param userAgentTransformer function that maps the generated user-agent to the value to send
+     * @return this builder instance
+     * @throws IllegalArgumentException if userAgentTransformer is null
+     * @since 2.0.5
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withUserAgent(
+        UnaryOperator<String> userAgentTransformer) {
+      this.userAgentTransformer = AlternatorUserAgent.transformDefault(userAgentTransformer);
+      configBuilder.withUserAgentEnabled(true);
+      return this;
+    }
+
+    /**
+     * Removes the {@code User-Agent} header from outgoing requests.
+     *
+     * <p>When header optimization is enabled, {@code User-Agent} is also removed from the required
+     * optimized header whitelist.
+     *
+     * @return this builder instance
+     * @since 2.0.5
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withoutUserAgent() {
+      this.userAgentTransformer = AlternatorUserAgent.disable();
+      configBuilder.withUserAgentEnabled(false);
       return this;
     }
 
@@ -239,9 +389,33 @@ public class AlternatorDynamoDbAsyncClient {
     }
 
     /**
+     * Sets the node health tracking configuration.
+     *
+     * @param nodeHealthConfig the node health configuration, or null to use defaults
+     * @return this builder instance
+     * @since 2.0.6
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withNodeHealthConfig(
+        NodeHealthConfig nodeHealthConfig) {
+      configBuilder.withNodeHealthConfig(nodeHealthConfig);
+      return this;
+    }
+
+    /**
+     * Disables node health tracking.
+     *
+     * @return this builder instance
+     * @since 2.0.6
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withNodeHealthDisabled() {
+      configBuilder.withNodeHealthDisabled();
+      return this;
+    }
+
+    /**
      * Sets the maximum number of connections in the HTTP client connection pool.
      *
-     * @param maxConnections the maximum number of connections, or 0 to use SDK default
+     * @param maxConnections the maximum number of connections (must be positive)
      * @return this builder instance
      * @since 2.0.2
      */
@@ -253,7 +427,7 @@ public class AlternatorDynamoDbAsyncClient {
     /**
      * Sets the maximum idle time for pooled connections in milliseconds.
      *
-     * @param connectionMaxIdleTimeMs the maximum idle time in milliseconds, or 0 to use SDK default
+     * @param connectionMaxIdleTimeMs the maximum idle time in milliseconds (must be non-negative)
      * @return this builder instance
      * @since 2.0.2
      */
@@ -266,14 +440,39 @@ public class AlternatorDynamoDbAsyncClient {
     /**
      * Sets the maximum lifetime for pooled connections in milliseconds.
      *
-     * @param connectionTimeToLiveMs the connection time-to-live in milliseconds, or 0 to use SDK
-     *     default
+     * @param connectionTimeToLiveMs the connection time-to-live in milliseconds (0 for unlimited)
      * @return this builder instance
      * @since 2.0.2
      */
     public AlternatorDynamoDbAsyncClientBuilder withConnectionTimeToLiveMs(
         long connectionTimeToLiveMs) {
       configBuilder.withConnectionTimeToLiveMs(connectionTimeToLiveMs);
+      return this;
+    }
+
+    /**
+     * Sets the maximum time to wait for a connection from the pool in milliseconds.
+     *
+     * @param connectionAcquisitionTimeoutMs the acquisition timeout in milliseconds (must be
+     *     non-negative)
+     * @return this builder instance
+     * @since 2.0.3
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withConnectionAcquisitionTimeoutMs(
+        long connectionAcquisitionTimeoutMs) {
+      configBuilder.withConnectionAcquisitionTimeoutMs(connectionAcquisitionTimeoutMs);
+      return this;
+    }
+
+    /**
+     * Sets the maximum time to wait for a connection to be established in milliseconds.
+     *
+     * @param connectionTimeoutMs the connection timeout in milliseconds (must be non-negative)
+     * @return this builder instance
+     * @since 2.0.3
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withConnectionTimeoutMs(long connectionTimeoutMs) {
+      configBuilder.withConnectionTimeoutMs(connectionTimeoutMs);
       return this;
     }
 
@@ -288,19 +487,37 @@ public class AlternatorDynamoDbAsyncClient {
     @Deprecated
     public AlternatorDynamoDbAsyncClientBuilder withAlternatorConfig(AlternatorConfig config) {
       if (config != null) {
+        if (!config.getSeedHosts().isEmpty()) {
+          configBuilder.withSeedHosts(config.getSeedHosts());
+          seedHostsSet = true;
+        }
         configBuilder.withRoutingScope(config.getRoutingScope());
         configBuilder.withCompressionAlgorithm(config.getCompressionAlgorithm());
         configBuilder.withMinCompressionSizeBytes(config.getMinCompressionSizeBytes());
+        if (config.isResponseCompressionEnabled()) {
+          configBuilder.withResponseCompression(config.getResponseCompressionAlgorithms());
+        } else {
+          configBuilder.withResponseCompressionDisabled();
+        }
         configBuilder.withOptimizeHeaders(config.isOptimizeHeaders());
         configBuilder.withHeadersWhitelist(config.getHeadersWhitelist());
+        configBuilder.withUserAgentEnabled(config.isUserAgentEnabled());
+        userAgentTransformer =
+            config.isUserAgentEnabled()
+                ? AlternatorUserAgent.defaultUserAgent()
+                : AlternatorUserAgent.disable();
         configBuilder.withTlsConfig(config.getTlsConfig());
         configBuilder.withTlsSessionCacheConfig(config.getTlsSessionCacheConfig());
         configBuilder.withKeyRouteAffinity(config.getKeyRouteAffinityConfig());
         configBuilder.withActiveRefreshIntervalMs(config.getActiveRefreshIntervalMs());
         configBuilder.withIdleRefreshIntervalMs(config.getIdleRefreshIntervalMs());
+        configBuilder.withNodeHealthConfig(config.getNodeHealthConfig());
         configBuilder.withMaxConnections(config.getMaxConnections());
         configBuilder.withConnectionMaxIdleTimeMs(config.getConnectionMaxIdleTimeMs());
         configBuilder.withConnectionTimeToLiveMs(config.getConnectionTimeToLiveMs());
+        configBuilder.withConnectionAcquisitionTimeoutMs(
+            config.getConnectionAcquisitionTimeoutMs());
+        configBuilder.withConnectionTimeoutMs(config.getConnectionTimeoutMs());
       }
       return this;
     }
@@ -363,6 +580,31 @@ public class AlternatorDynamoDbAsyncClient {
       return this;
     }
 
+    /**
+     * Explicitly selects which HTTP client implementation to use.
+     *
+     * <p>By default, the builder auto-detects the HTTP client from the classpath (Netty &gt; CRT).
+     * Use this method to force a specific implementation. If the requested implementation is not on
+     * the classpath, the builder will throw {@link IllegalStateException} at build time.
+     *
+     * <p>Only {@link HttpClientType#NETTY}, {@link HttpClientType#CRT}, and {@link
+     * HttpClientType#AUTO} are valid for async clients. Setting {@link HttpClientType#APACHE} will
+     * throw {@link IllegalStateException} since Apache is sync-only.
+     *
+     * <p>This is mutually exclusive with {@link #httpClient(SdkAsyncHttpClient)} and {@link
+     * #httpClientBuilder}. It can be combined with a matching customizer (e.g., {@link
+     * HttpClientType#NETTY} with {@link #withNettyHttpClientCustomizer}), but not with a mismatched
+     * one.
+     *
+     * @param httpClientType the HTTP client type to use
+     * @return this builder instance
+     * @since 2.1.0
+     */
+    public AlternatorDynamoDbAsyncClientBuilder withHttpClientType(HttpClientType httpClientType) {
+      this.httpClientType = Objects.requireNonNull(httpClientType, "httpClientType");
+      return this;
+    }
+
     /** {@inheritDoc} */
     @Override
     public AlternatorDynamoDbAsyncClientBuilder region(Region region) {
@@ -394,7 +636,8 @@ public class AlternatorDynamoDbAsyncClient {
     @Override
     public AlternatorDynamoDbAsyncClientBuilder httpClient(SdkAsyncHttpClient httpClient) {
       this.httpClientSet = true;
-      delegate.httpClient(httpClient);
+      this.customHttpClient = httpClient;
+      this.customHttpClientBuilder = null;
       return this;
     }
 
@@ -403,7 +646,8 @@ public class AlternatorDynamoDbAsyncClient {
     public AlternatorDynamoDbAsyncClientBuilder httpClientBuilder(
         SdkAsyncHttpClient.Builder httpClientBuilder) {
       this.httpClientSet = true;
-      delegate.httpClientBuilder(httpClientBuilder);
+      this.customHttpClient = null;
+      this.customHttpClientBuilder = httpClientBuilder;
       return this;
     }
 
@@ -515,100 +759,122 @@ public class AlternatorDynamoDbAsyncClient {
                 + "Call endpointOverride(URI) with the seed Alternator node URI.");
       }
 
-      // Validate mutually exclusive options
-      validateHttpClientOptions();
+      AsyncClientDetector.AsyncClientType asyncType = validateAndDetectAsyncClientType();
 
-      // Use anonymous credentials if no credentials were provided
       if (!credentialsProviderSet) {
         configBuilder.authenticationEnabled(false);
         delegate.credentialsProvider(AnonymousCredentialsProvider.create());
       }
 
-      // Set the seed node on the config
-      configBuilder.withSeedNode(seedUri);
+      applyEndpointToConfig();
 
-      // If disableCertificateChecks was called, set trust-all TLS config
       if (disableCertificateChecks) {
         configBuilder.withTlsConfig(TlsConfig.trustAll());
       }
 
-      // Build the AlternatorConfig from the internal builder
       AlternatorConfig alternatorConfig = configBuilder.build();
 
-      // Apply SDK-level interceptors from config (compression only)
+      ClientOverrideConfiguration.Builder compressionOverrideBuilder =
+          delegate.overrideConfiguration() != null
+              ? delegate.overrideConfiguration().toBuilder()
+              : ClientOverrideConfiguration.builder();
+      if (alternatorConfig.isResponseCompressionEnabled()) {
+        compressionOverrideBuilder.addExecutionInterceptor(
+            new ResponseCompressionInterceptor(
+                alternatorConfig.getResponseCompressionAlgorithms()));
+      }
       if (alternatorConfig.getCompressionAlgorithm().isEnabled()) {
+        compressionOverrideBuilder.addExecutionInterceptor(
+            new GzipRequestInterceptor(alternatorConfig.getMinCompressionSizeBytes()));
+      }
+      delegate.overrideConfiguration(compressionOverrideBuilder.build());
+
+      SdkHttpClient pollingClient = null;
+      AlternatorLiveNodes liveNodes = null;
+      AlternatorClientResources resources = null;
+      RoutingSdkAsyncHttpClientBuilder routingClientBuilder = null;
+      DynamoDbAsyncClient client = null;
+      try {
+        TlsConfig tlsConfig = alternatorConfig.getTlsConfig();
+        SdkAsyncHttpClient.Builder mainClientBuilder;
+        boolean closeMainClient;
+        if (!httpClientSet) {
+          mainClientBuilder =
+              new FactorySdkAsyncHttpClientBuilder(
+                  () -> createMainAsyncClient(asyncType, alternatorConfig, tlsConfig));
+          closeMainClient = true;
+        } else if (customHttpClient != null) {
+          mainClientBuilder = new FixedSdkAsyncHttpClientBuilder(customHttpClient);
+          closeMainClient = false;
+        } else {
+          mainClientBuilder = customHttpClientBuilder;
+          closeMainClient = true;
+        }
+
+        SyncClientDetector.SyncClientType syncType = SyncClientDetector.detect();
+        pollingClient =
+            createPollingClient(
+                syncType,
+                tlsConfig,
+                alternatorConfig.getNodeHealthConfig().getHealthProbeConcurrency() + 1);
+        pollingClient = configurePollingSyncClient(pollingClient, alternatorConfig);
+        liveNodes = createLiveNodes(alternatorConfig, pollingClient);
+
         ClientOverrideConfiguration.Builder overrideBuilder =
             delegate.overrideConfiguration() != null
                 ? delegate.overrideConfiguration().toBuilder()
                 : ClientOverrideConfiguration.builder();
-        overrideBuilder.addExecutionInterceptor(
-            new GzipRequestInterceptor(alternatorConfig.getMinCompressionSizeBytes()));
-        delegate.overrideConfiguration(overrideBuilder.build());
-      }
 
-      TlsConfig tlsConfig = alternatorConfig.getTlsConfig();
-      boolean optimizeHeaders = alternatorConfig.isOptimizeHeaders();
-
-      // Create the async HTTP client for the SDK
-      if (!httpClientSet) {
-        // Determine which async implementation to use
-        AsyncClientDetector.AsyncClientType asyncType = detectAsyncClientType();
-
-        // Create the main async HTTP client via factory
-        SdkAsyncHttpClient mainClient =
-            createMainAsyncClient(asyncType, alternatorConfig, tlsConfig);
-
-        // Wrap with header filtering if enabled
-        if (optimizeHeaders) {
-          delegate.httpClient(
-              new HeadersFilteringSdkAsyncHttpClient(
-                  mainClient, alternatorConfig.getHeadersWhitelist()));
+        KeyRouteAffinityConfig keyAffinityConfig = alternatorConfig.getKeyRouteAffinityConfig();
+        AffinityQueryPlanInterceptor affinityInterceptor = null;
+        BasicQueryPlanInterceptor queryPlanInterceptor;
+        if (keyAffinityConfig != null
+            && keyAffinityConfig.getType() != null
+            && keyAffinityConfig.getType() != KeyRouteAffinity.NONE) {
+          affinityInterceptor = new AffinityQueryPlanInterceptor(keyAffinityConfig, liveNodes);
+          queryPlanInterceptor = affinityInterceptor;
         } else {
-          delegate.httpClient(mainClient);
+          queryPlanInterceptor = new BasicQueryPlanInterceptor(liveNodes);
         }
+        resources = new AlternatorClientResources(liveNodes, affinityInterceptor, pollingClient);
+        overrideBuilder.addExecutionInterceptor(queryPlanInterceptor);
+        delegate.overrideConfiguration(overrideBuilder.build());
+        routingClientBuilder =
+            new RoutingSdkAsyncHttpClientBuilder(
+                mainClientBuilder,
+                alternatorConfig,
+                queryPlanInterceptor,
+                resources,
+                closeMainClient);
+        delegate.httpClientBuilder(routingClientBuilder);
+
+        delegate.endpointOverride(seedUri);
+        if (region == null) {
+          delegate.region(Region.of("fake-aws-region"));
+        }
+
+        client = delegate.build();
+        AlternatorDynamoDbAsyncClientWrapper wrapper =
+            new AlternatorDynamoDbAsyncClientWrapper(
+                client, liveNodes, alternatorConfig, affinityInterceptor, pollingClient, resources);
+        liveNodes.start();
+        return wrapper;
+      } catch (RuntimeException | Error e) {
+        closeAfterBuildFailure(
+            e, client, routingClientBuilder, resources, liveNodes, pollingClient);
+        throw e;
       }
-
-      // Create a separate sync polling client for LiveNodes (always needed)
-      SyncClientDetector.SyncClientType syncType = SyncClientDetector.detect();
-      SdkHttpClient pollingClient = SyncClientDetector.createPollingClient(syncType, tlsConfig);
-
-      // Create AlternatorLiveNodes and start node discovery
-      AlternatorLiveNodes liveNodes = new AlternatorLiveNodes(alternatorConfig, pollingClient);
-      liveNodes.start();
-
-      // Add query plan interceptor
-      ClientOverrideConfiguration.Builder overrideBuilder =
-          delegate.overrideConfiguration() != null
-              ? delegate.overrideConfiguration().toBuilder()
-              : ClientOverrideConfiguration.builder();
-
-      KeyRouteAffinityConfig keyAffinityConfig = alternatorConfig.getKeyRouteAffinityConfig();
-      if (keyAffinityConfig != null
-          && keyAffinityConfig.getType() != null
-          && keyAffinityConfig.getType() != KeyRouteAffinity.NONE) {
-        overrideBuilder.addExecutionInterceptor(
-            new AffinityQueryPlanInterceptor(keyAffinityConfig, liveNodes));
-      } else {
-        overrideBuilder.addExecutionInterceptor(new BasicQueryPlanInterceptor(liveNodes));
-      }
-      delegate.overrideConfiguration(overrideBuilder.build());
-
-      // Use seed URI as base endpoint - interceptor will override with actual target node
-      delegate.endpointOverride(seedUri);
-
-      // Set default region if not specified
-      if (region == null) {
-        delegate.region(Region.of("fake-aws-region"));
-      }
-
-      // Build the underlying client and wrap it
-      DynamoDbAsyncClient client = delegate.build();
-      return new AlternatorDynamoDbAsyncClientWrapper(
-          client, liveNodes, alternatorConfig, pollingClient);
     }
 
-    private void validateHttpClientOptions() {
+    /**
+     * Validates mutually exclusive HTTP client options and detects the async client type.
+     *
+     * @return the resolved client type, or {@code null} if a custom HTTP client was provided via
+     *     {@link #httpClient} / {@link #httpClientBuilder}
+     */
+    AsyncClientDetector.AsyncClientType validateAndDetectAsyncClientType() {
       boolean hasCustomizer = nettyCustomizer != null || crtAsyncCustomizer != null;
+
       if (httpClientSet && hasCustomizer) {
         throw new IllegalStateException(
             "Cannot use httpClient()/httpClientBuilder() together with "
@@ -620,21 +886,56 @@ public class AlternatorDynamoDbAsyncClient {
             "Cannot set both withNettyHttpClientCustomizer() and "
                 + "withCrtAsyncHttpClientCustomizer(). Choose one HTTP client implementation.");
       }
+      if (httpClientType != null && httpClientSet) {
+        throw new IllegalStateException(
+            "Cannot use httpClient()/httpClientBuilder() together with withHttpClientType(). "
+                + "Use one approach or the other.");
+      }
+
+      if (httpClientSet) {
+        return null;
+      }
+
+      HttpClientType effectiveType = httpClientType != null ? httpClientType : HttpClientType.AUTO;
+
+      switch (effectiveType) {
+        case NETTY:
+          if (crtAsyncCustomizer != null) {
+            throw new IllegalStateException(
+                "HttpClientType.NETTY was set, but withCrtAsyncHttpClientCustomizer() was also "
+                    + "called. Use withNettyHttpClientCustomizer() or change HttpClientType to CRT.");
+          }
+          AsyncClientDetector.requireAvailableHttpClient(AsyncClientDetector.AsyncClientType.NETTY);
+          return AsyncClientDetector.AsyncClientType.NETTY;
+        case CRT:
+          if (nettyCustomizer != null) {
+            throw new IllegalStateException(
+                "HttpClientType.CRT was set, but withNettyHttpClientCustomizer() was also called. "
+                    + "Use withCrtAsyncHttpClientCustomizer() or change HttpClientType to NETTY.");
+          }
+          AsyncClientDetector.requireAvailableHttpClient(AsyncClientDetector.AsyncClientType.CRT);
+          return AsyncClientDetector.AsyncClientType.CRT;
+        case APACHE:
+          throw new IllegalStateException(
+              "HttpClientType.APACHE does not support asynchronous clients. "
+                  + "Use HttpClientType.NETTY, HttpClientType.CRT, or HttpClientType.AUTO.");
+        case AUTO:
+          if (nettyCustomizer != null) {
+            AsyncClientDetector.requireAvailableHttpClient(
+                AsyncClientDetector.AsyncClientType.NETTY);
+            return AsyncClientDetector.AsyncClientType.NETTY;
+          }
+          if (crtAsyncCustomizer != null) {
+            AsyncClientDetector.requireAvailableHttpClient(AsyncClientDetector.AsyncClientType.CRT);
+            return AsyncClientDetector.AsyncClientType.CRT;
+          }
+          return AsyncClientDetector.detect();
+        default:
+          throw new IllegalStateException("Unknown HttpClientType: " + effectiveType);
+      }
     }
 
-    private AsyncClientDetector.AsyncClientType detectAsyncClientType() {
-      // If a customizer was set, use the corresponding type
-      if (nettyCustomizer != null) {
-        return AsyncClientDetector.AsyncClientType.NETTY;
-      }
-      if (crtAsyncCustomizer != null) {
-        return AsyncClientDetector.AsyncClientType.CRT;
-      }
-      // Auto-detect from classpath
-      return AsyncClientDetector.detect();
-    }
-
-    private SdkAsyncHttpClient createMainAsyncClient(
+    SdkAsyncHttpClient createMainAsyncClient(
         AsyncClientDetector.AsyncClientType asyncType,
         AlternatorConfig config,
         TlsConfig tlsConfig) {
@@ -646,6 +947,187 @@ public class AlternatorDynamoDbAsyncClient {
         default:
           throw new IllegalStateException("Unknown async client type: " + asyncType);
       }
+    }
+
+    SdkHttpClient createPollingClient(
+        SyncClientDetector.SyncClientType clientType, TlsConfig tlsConfig, int maxConnections) {
+      return SyncClientDetector.createPollingClient(clientType, tlsConfig, maxConnections);
+    }
+
+    AlternatorLiveNodes createLiveNodes(
+        AlternatorConfig alternatorConfig, SdkHttpClient pollingClient) {
+      return new AlternatorLiveNodes(alternatorConfig, pollingClient);
+    }
+
+    private SdkAsyncHttpClient configureMainAsyncClient(
+        SdkAsyncHttpClient mainClient,
+        AlternatorConfig alternatorConfig,
+        BasicQueryPlanInterceptor queryPlanInterceptor,
+        AlternatorClientResources resources,
+        boolean closeMainClient) {
+      SdkAsyncHttpClient configuredClient = mainClient;
+      if (userAgentTransformer != null) {
+        configuredClient = new UserAgentSdkAsyncHttpClient(configuredClient, userAgentTransformer);
+      }
+      if (alternatorConfig.isOptimizeHeaders()) {
+        configuredClient =
+            new HeadersFilteringSdkAsyncHttpClient(
+                configuredClient, alternatorConfig.getHeadersWhitelist());
+      }
+      configuredClient =
+          new AttemptRoutingSdkAsyncHttpClient(configuredClient, queryPlanInterceptor);
+      return new LifecycleSdkAsyncHttpClient(configuredClient, resources, closeMainClient);
+    }
+
+    private final class RoutingSdkAsyncHttpClientBuilder
+        implements SdkAsyncHttpClient.Builder<RoutingSdkAsyncHttpClientBuilder> {
+      private final SdkAsyncHttpClient.Builder delegateBuilder;
+      private final AlternatorConfig alternatorConfig;
+      private final BasicQueryPlanInterceptor queryPlanInterceptor;
+      private final AlternatorClientResources resources;
+      private final boolean closeDelegate;
+      private SdkAsyncHttpClient builtClient;
+
+      private RoutingSdkAsyncHttpClientBuilder(
+          SdkAsyncHttpClient.Builder delegateBuilder,
+          AlternatorConfig alternatorConfig,
+          BasicQueryPlanInterceptor queryPlanInterceptor,
+          AlternatorClientResources resources,
+          boolean closeDelegate) {
+        this.delegateBuilder = delegateBuilder;
+        this.alternatorConfig = alternatorConfig;
+        this.queryPlanInterceptor = queryPlanInterceptor;
+        this.resources = resources;
+        this.closeDelegate = closeDelegate;
+      }
+
+      @Override
+      public synchronized SdkAsyncHttpClient build() {
+        return configure(delegateBuilder.build());
+      }
+
+      @Override
+      public synchronized SdkAsyncHttpClient buildWithDefaults(AttributeMap serviceDefaults) {
+        return configure(delegateBuilder.buildWithDefaults(serviceDefaults));
+      }
+
+      private SdkAsyncHttpClient configure(SdkAsyncHttpClient client) {
+        if (builtClient != null) {
+          if (closeDelegate) {
+            client.close();
+          }
+          throw new IllegalStateException("HTTP client builder may only build one client");
+        }
+        try {
+          builtClient =
+              configureMainAsyncClient(
+                  client, alternatorConfig, queryPlanInterceptor, resources, closeDelegate);
+          return builtClient;
+        } catch (RuntimeException | Error e) {
+          if (closeDelegate) {
+            try {
+              client.close();
+            } catch (RuntimeException closeFailure) {
+              e.addSuppressed(closeFailure);
+            }
+          }
+          throw e;
+        }
+      }
+
+      private synchronized void closeBuiltClient() {
+        if (builtClient != null) {
+          builtClient.close();
+        }
+      }
+    }
+
+    private static final class FixedSdkAsyncHttpClientBuilder
+        implements SdkAsyncHttpClient.Builder<FixedSdkAsyncHttpClientBuilder> {
+      private final SdkAsyncHttpClient client;
+
+      private FixedSdkAsyncHttpClientBuilder(SdkAsyncHttpClient client) {
+        this.client = client;
+      }
+
+      @Override
+      public SdkAsyncHttpClient build() {
+        return client;
+      }
+
+      @Override
+      public SdkAsyncHttpClient buildWithDefaults(AttributeMap serviceDefaults) {
+        return client;
+      }
+    }
+
+    private static final class FactorySdkAsyncHttpClientBuilder
+        implements SdkAsyncHttpClient.Builder<FactorySdkAsyncHttpClientBuilder> {
+      private final Supplier<SdkAsyncHttpClient> clientFactory;
+
+      private FactorySdkAsyncHttpClientBuilder(Supplier<SdkAsyncHttpClient> clientFactory) {
+        this.clientFactory = clientFactory;
+      }
+
+      @Override
+      public SdkAsyncHttpClient build() {
+        return clientFactory.get();
+      }
+
+      @Override
+      public SdkAsyncHttpClient buildWithDefaults(AttributeMap serviceDefaults) {
+        return clientFactory.get();
+      }
+    }
+
+    private void closeAfterBuildFailure(
+        Throwable failure,
+        DynamoDbAsyncClient client,
+        RoutingSdkAsyncHttpClientBuilder routingClientBuilder,
+        AlternatorClientResources resources,
+        AlternatorLiveNodes liveNodes,
+        SdkHttpClient pollingClient) {
+      if (client != null) {
+        runCleanupAfterBuildFailure(failure, client::close);
+      }
+      if (routingClientBuilder != null) {
+        runCleanupAfterBuildFailure(failure, routingClientBuilder::closeBuiltClient);
+      }
+      if (resources != null) {
+        runCleanupAfterBuildFailure(failure, resources::close);
+      } else {
+        if (liveNodes != null) {
+          runCleanupAfterBuildFailure(failure, liveNodes::shutdownAndWait);
+        }
+        if (pollingClient != null) {
+          runCleanupAfterBuildFailure(failure, pollingClient::close);
+        }
+      }
+    }
+
+    private void runCleanupAfterBuildFailure(Throwable failure, Runnable cleanup) {
+      try {
+        cleanup.run();
+      } catch (RuntimeException closeFailure) {
+        failure.addSuppressed(closeFailure);
+      }
+    }
+
+    private SdkHttpClient configurePollingSyncClient(
+        SdkHttpClient pollingClient, AlternatorConfig alternatorConfig) {
+      if (alternatorConfig.isUserAgentEnabled()) {
+        return new UserAgentSdkHttpClient(pollingClient, userAgentTransformer);
+      }
+      return pollingClient;
+    }
+
+    private void applyEndpointToConfig() {
+      if (seedHostsSet) {
+        configBuilder.withScheme(seedUri.getScheme());
+        configBuilder.withPort(seedUri.getPort());
+        return;
+      }
+      configBuilder.withSeedNode(seedUri);
     }
   }
 }

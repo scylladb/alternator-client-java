@@ -1,9 +1,25 @@
+/*
+ * Copyright ScyllaDB, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package com.scylladb.alternator;
 
 import com.scylladb.alternator.internal.AlternatorLiveNodes;
 import com.scylladb.alternator.queryplan.AffinityQueryPlanInterceptor;
 import java.net.URI;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import software.amazon.awssdk.http.SdkHttpClient;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 
@@ -28,7 +44,6 @@ import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
  *
  * // Access Alternator-specific functionality
  * List<URI> nodes = wrapper.getLiveNodes();
- * URI nextNode = wrapper.nextAsURI();
  * }</pre>
  *
  * @author dmitry.kropachev
@@ -39,8 +54,8 @@ public class AlternatorDynamoDbClientWrapper implements AutoCloseable {
   private final DynamoDbClient client;
   private final AlternatorLiveNodes liveNodes;
   private final AlternatorConfig config;
-  private final AffinityQueryPlanInterceptor affinityInterceptor;
-  private final SdkHttpClient pollingHttpClient;
+  private final AlternatorClientResources resources;
+  private boolean closed;
 
   /**
    * Creates a new wrapper with the given client and live nodes.
@@ -97,11 +112,26 @@ public class AlternatorDynamoDbClientWrapper implements AutoCloseable {
       AlternatorConfig config,
       AffinityQueryPlanInterceptor affinityInterceptor,
       SdkHttpClient pollingHttpClient) {
+    this(
+        client,
+        liveNodes,
+        config,
+        affinityInterceptor,
+        pollingHttpClient,
+        new AlternatorClientResources(liveNodes, affinityInterceptor, pollingHttpClient));
+  }
+
+  AlternatorDynamoDbClientWrapper(
+      DynamoDbClient client,
+      AlternatorLiveNodes liveNodes,
+      AlternatorConfig config,
+      AffinityQueryPlanInterceptor affinityInterceptor,
+      SdkHttpClient pollingHttpClient,
+      AlternatorClientResources resources) {
     this.client = client;
     this.liveNodes = liveNodes;
     this.config = config;
-    this.affinityInterceptor = affinityInterceptor;
-    this.pollingHttpClient = pollingHttpClient;
+    this.resources = resources;
 
     // Enable auto-discovery by providing the built client to the interceptor
     if (affinityInterceptor != null) {
@@ -119,9 +149,19 @@ public class AlternatorDynamoDbClientWrapper implements AutoCloseable {
   }
 
   /**
-   * Returns a snapshot of the current live nodes list.
+   * Returns a snapshot of the current discovered nodes list.
    *
-   * @return an unmodifiable list of the current live node URIs
+   * @return an unmodifiable list of the current discovered node URIs
+   * @since 2.1.0
+   */
+  public List<URI> getDiscoveredNodes() {
+    return liveNodes.getDiscoveredNodes();
+  }
+
+  /**
+   * Returns a snapshot of the current discovered nodes list.
+   *
+   * @return an unmodifiable list of the current discovered node URIs
    */
   public List<URI> getLiveNodes() {
     return liveNodes.getLiveNodes();
@@ -130,10 +170,32 @@ public class AlternatorDynamoDbClientWrapper implements AutoCloseable {
   /**
    * Returns the next node URI using round-robin selection.
    *
-   * @return the next {@link URI} in the round-robin sequence
+   * @return the next eligible node URI
+   * @deprecated Request routing is automatic; use {@link #getLiveNodes()} to inspect topology.
    */
+  @Deprecated
   public URI nextAsURI() {
     return liveNodes.nextAsURI();
+  }
+
+  /**
+   * Directly probes and activates reachable quarantined nodes in the current discovered set.
+   *
+   * @return endpoints that returned HTTP 200 during this probe operation
+   * @since 2.1.0
+   */
+  public List<URI> probeQuarantinedNodes() {
+    return liveNodes.probeQuarantinedNodes();
+  }
+
+  /**
+   * Asynchronously probes and activates reachable quarantined nodes.
+   *
+   * @return future containing endpoints that returned HTTP 200 in snapshot order
+   * @since 2.1.0
+   */
+  public CompletableFuture<List<URI>> probeQuarantinedNodesAsync() {
+    return liveNodes.probeQuarantinedNodesAsync();
   }
 
   /**
@@ -173,22 +235,38 @@ public class AlternatorDynamoDbClientWrapper implements AutoCloseable {
    * <ul>
    *   <li>Shutting down the partition key resolver's discovery executor if key route affinity is
    *       enabled
-   *   <li>Interrupting the LiveNodes background thread
+   *   <li>Stopping the LiveNodes background thread
    *   <li>Closing the polling HTTP client
    *   <li>Closing the underlying DynamoDB client
+   *   <li>Closing the main HTTP client when it is owned by the Alternator builder
    * </ul>
    */
   @Override
-  public void close() {
-    if (affinityInterceptor != null) {
-      affinityInterceptor.getPartitionKeyResolver().shutdown();
+  public synchronized void close() {
+    if (closed) {
+      return;
     }
-    // Interrupt the LiveNodes thread to stop polling
-    liveNodes.interrupt();
-    // Close the polling HTTP client
-    if (pollingHttpClient != null) {
-      pollingHttpClient.close();
+    closed = true;
+
+    RuntimeException failure = null;
+    try {
+      resources.close();
+    } catch (RuntimeException e) {
+      failure = e;
     }
-    client.close();
+
+    try {
+      client.close();
+    } catch (RuntimeException e) {
+      if (failure == null) {
+        failure = e;
+      } else {
+        failure.addSuppressed(e);
+      }
+    }
+
+    if (failure != null) {
+      throw failure;
+    }
   }
 }

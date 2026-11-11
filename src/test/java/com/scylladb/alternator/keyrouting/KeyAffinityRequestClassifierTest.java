@@ -1,10 +1,30 @@
+/*
+ * Copyright ScyllaDB, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package com.scylladb.alternator.keyrouting;
 
 import static org.junit.Assert.*;
 
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.junit.Test;
 import software.amazon.awssdk.services.dynamodb.model.*;
 
@@ -320,9 +340,17 @@ public class KeyAffinityRequestClassifierTest {
 
   @Test
   public void testRmwModeBatchWriteItem() {
-    // BatchWriteItem is not supported for key route affinity because it can contain
-    // items for multiple tables with different partition keys
-    BatchWriteItemRequest request = BatchWriteItemRequest.builder().build();
+    BatchWriteItemRequest request =
+        BatchWriteItemRequest.builder()
+            .requestItems(
+                Collections.singletonMap(
+                    "test",
+                    Collections.singletonList(
+                        WriteRequest.builder()
+                            .putRequest(
+                                PutRequest.builder().item(createItem("pk", "value")).build())
+                            .build())))
+            .build();
     assertFalse(KeyAffinityRequestClassifier.shouldApply(KeyRouteAffinity.RMW, request));
   }
 
@@ -354,8 +382,22 @@ public class KeyAffinityRequestClassifierTest {
 
   @Test
   public void testAnyWriteModeBatchWriteItem() {
-    // BatchWriteItem is not supported for key route affinity because it can contain
-    // items for multiple tables with different partition keys
+    BatchWriteItemRequest request =
+        BatchWriteItemRequest.builder()
+            .requestItems(
+                Collections.singletonMap(
+                    "test",
+                    Collections.singletonList(
+                        WriteRequest.builder()
+                            .putRequest(
+                                PutRequest.builder().item(createItem("pk", "value")).build())
+                            .build())))
+            .build();
+    assertTrue(KeyAffinityRequestClassifier.shouldApply(KeyRouteAffinity.ANY_WRITE, request));
+  }
+
+  @Test
+  public void testAnyWriteModeEmptyBatchWriteItem() {
     BatchWriteItemRequest request = BatchWriteItemRequest.builder().build();
     assertFalse(KeyAffinityRequestClassifier.shouldApply(KeyRouteAffinity.ANY_WRITE, request));
   }
@@ -420,6 +462,22 @@ public class KeyAffinityRequestClassifierTest {
 
   @Test
   public void testExtractTableNameFromBatchWriteItem() {
+    BatchWriteItemRequest request =
+        BatchWriteItemRequest.builder()
+            .requestItems(
+                Collections.singletonMap(
+                    "orders",
+                    Collections.singletonList(
+                        WriteRequest.builder()
+                            .putRequest(
+                                PutRequest.builder().item(createItem("order_id", "o456")).build())
+                            .build())))
+            .build();
+    assertEquals("orders", KeyAffinityRequestClassifier.extractTableName(request));
+  }
+
+  @Test
+  public void testExtractTableNameFromEmptyBatchWriteItem() {
     BatchWriteItemRequest request = BatchWriteItemRequest.builder().build();
     assertNull(KeyAffinityRequestClassifier.extractTableName(request));
   }
@@ -467,6 +525,83 @@ public class KeyAffinityRequestClassifierTest {
   }
 
   @Test
+  public void testExtractPartitionKeyFromBatchWriteItemPutRequest() {
+    BatchWriteItemRequest request =
+        BatchWriteItemRequest.builder()
+            .requestItems(
+                Collections.singletonMap(
+                    "orders",
+                    Collections.singletonList(
+                        WriteRequest.builder()
+                            .putRequest(
+                                PutRequest.builder().item(createItem("order_id", "o456")).build())
+                            .build())))
+            .build();
+
+    AttributeValue pk = KeyAffinityRequestClassifier.extractPartitionKey(request, "order_id");
+    assertNotNull(pk);
+    assertEquals("o456", pk.s());
+  }
+
+  @Test
+  public void testExtractPartitionKeyFromBatchWriteItemDeleteRequest() {
+    BatchWriteItemRequest request =
+        BatchWriteItemRequest.builder()
+            .requestItems(
+                Collections.singletonMap(
+                    "sessions",
+                    Collections.singletonList(
+                        WriteRequest.builder()
+                            .deleteRequest(
+                                DeleteRequest.builder()
+                                    .key(createKey("session_id", "s789"))
+                                    .build())
+                            .build())))
+            .build();
+
+    AttributeValue pk = KeyAffinityRequestClassifier.extractPartitionKey(request, "session_id");
+    assertNotNull(pk);
+    assertEquals("s789", pk.s());
+  }
+
+  @Test
+  public void testBatchWriteItemExtractionIncludesMultipleTables() {
+    BatchWriteItemRequest first = batchWriteRequest("orders", "z-order", "audit", "a-audit");
+
+    List<KeyAffinityRequestClassifier.BatchWriteRoutingTarget> targets =
+        KeyAffinityRequestClassifier.extractBatchWriteRoutingTargets(first);
+
+    assertEquals(2, targets.size());
+    Set<String> tableAndPk = new HashSet<>();
+    for (KeyAffinityRequestClassifier.BatchWriteRoutingTarget target : targets) {
+      tableAndPk.add(target.tableName() + ":" + target.partitionKeyValue("pk").s());
+    }
+    assertTrue(tableAndPk.contains("orders:z-order"));
+    assertTrue(tableAndPk.contains("audit:a-audit"));
+  }
+
+  @Test
+  public void testBatchWriteItemExtractionIncludesMultipleWrites() {
+    BatchWriteItemRequest request =
+        BatchWriteItemRequest.builder()
+            .requestItems(
+                Collections.singletonMap(
+                    "orders", Arrays.asList(batchPut("z-route"), batchPut("a-route"))))
+            .build();
+
+    List<KeyAffinityRequestClassifier.BatchWriteRoutingTarget> targets =
+        KeyAffinityRequestClassifier.extractBatchWriteRoutingTargets(request);
+
+    assertEquals(2, targets.size());
+    Set<String> pkValues = new HashSet<>();
+    for (KeyAffinityRequestClassifier.BatchWriteRoutingTarget target : targets) {
+      pkValues.add(target.partitionKeyValue("pk").s());
+    }
+    assertTrue(pkValues.contains("z-route"));
+    assertTrue(pkValues.contains("a-route"));
+  }
+
+  @Test
   public void testExtractPartitionKeyWithWrongKeyName() {
     Map<String, AttributeValue> key = createKey("user_id", "u123");
     UpdateItemRequest request = UpdateItemRequest.builder().tableName("users").key(key).build();
@@ -497,5 +632,19 @@ public class KeyAffinityRequestClassifierTest {
     item.put(keyName, AttributeValue.builder().s(keyValue).build());
     item.put("data", AttributeValue.builder().s("some data").build());
     return item;
+  }
+
+  private BatchWriteItemRequest batchWriteRequest(
+      String firstTable, String firstPk, String secondTable, String secondPk) {
+    Map<String, List<WriteRequest>> requestItems = new LinkedHashMap<>();
+    requestItems.put(firstTable, Collections.singletonList(batchPut(firstPk)));
+    requestItems.put(secondTable, Collections.singletonList(batchPut(secondPk)));
+    return BatchWriteItemRequest.builder().requestItems(requestItems).build();
+  }
+
+  private WriteRequest batchPut(String pk) {
+    return WriteRequest.builder()
+        .putRequest(PutRequest.builder().item(createItem("pk", pk)).build())
+        .build();
   }
 }

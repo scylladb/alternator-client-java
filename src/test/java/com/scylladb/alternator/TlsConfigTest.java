@@ -1,3 +1,18 @@
+/*
+ * Copyright ScyllaDB, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package com.scylladb.alternator;
 
 import static org.junit.Assert.*;
@@ -23,6 +38,7 @@ public class TlsConfigTest {
     assertFalse("trustSystemCaCerts should be false", config.isTrustSystemCaCerts());
     assertFalse("verifyHostname should be false", config.isVerifyHostname());
     assertTrue("customCaCertPaths should be empty", config.getCustomCaCertPaths().isEmpty());
+    assertFalse("client certificate should not be configured", config.hasClientCertificate());
     assertNotNull("sessionCacheConfig should not be null", config.getSessionCacheConfig());
   }
 
@@ -34,6 +50,7 @@ public class TlsConfigTest {
     assertTrue("trustSystemCaCerts should be true", config.isTrustSystemCaCerts());
     assertTrue("verifyHostname should be true", config.isVerifyHostname());
     assertTrue("customCaCertPaths should be empty", config.getCustomCaCertPaths().isEmpty());
+    assertFalse("client certificate should not be configured", config.hasClientCertificate());
     assertNotNull("sessionCacheConfig should not be null", config.getSessionCacheConfig());
   }
 
@@ -98,6 +115,21 @@ public class TlsConfigTest {
   }
 
   @Test
+  public void testBuilderWithClientCertificate() {
+    Path certPath = Paths.get("/path/to/client.crt");
+    Path keyPath = Paths.get("/path/to/client.key");
+    TlsConfig config =
+        TlsConfig.builder()
+            .withTrustSystemCaCerts(true)
+            .withClientCertificate(certPath, keyPath)
+            .build();
+
+    assertTrue("client certificate should be configured", config.hasClientCertificate());
+    assertEquals(certPath, config.getClientCertificatePath());
+    assertEquals(keyPath, config.getClientPrivateKeyPath());
+  }
+
+  @Test
   public void testBuilderWithSessionCacheConfig() {
     TlsSessionCacheConfig sessionConfig =
         TlsSessionCacheConfig.builder()
@@ -125,6 +157,16 @@ public class TlsConfigTest {
   @Test(expected = IllegalArgumentException.class)
   public void testBuilderRejectsNullCaCertPath() {
     TlsConfig.builder().withCaCertPath(null).build();
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testBuilderRejectsNullClientCertPath() {
+    TlsConfig.builder().withClientCertificate(null, Paths.get("/path/to/client.key")).build();
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testBuilderRejectsNullClientKeyPath() {
+    TlsConfig.builder().withClientCertificate(Paths.get("/path/to/client.crt"), null).build();
   }
 
   @Test(expected = IllegalStateException.class)
@@ -173,6 +215,10 @@ public class TlsConfigTest {
 
     String str = config.toString();
     assertTrue("toString should contain customCaCertPaths", str.contains("customCaCertPaths"));
+    assertTrue(
+        "toString should contain clientCertificatePath", str.contains("clientCertificatePath"));
+    assertTrue(
+        "toString should contain clientPrivateKeyPath", str.contains("clientPrivateKeyPath"));
     assertTrue("toString should contain trustSystemCaCerts", str.contains("trustSystemCaCerts"));
     assertTrue(
         "toString should contain trustAllCertificates", str.contains("trustAllCertificates"));
@@ -183,15 +229,29 @@ public class TlsConfigTest {
   @Test
   public void testEqualsAndHashCode() {
     Path certPath = Paths.get("/path/to/ca.pem");
+    Path clientCertPath = Paths.get("/path/to/client.crt");
+    Path clientKeyPath = Paths.get("/path/to/client.key");
 
     TlsConfig config1 =
-        TlsConfig.builder().withCaCertPath(certPath).withTrustSystemCaCerts(false).build();
+        TlsConfig.builder()
+            .withCaCertPath(certPath)
+            .withTrustSystemCaCerts(false)
+            .withClientCertificate(clientCertPath, clientKeyPath)
+            .build();
 
     TlsConfig config2 =
-        TlsConfig.builder().withCaCertPath(certPath).withTrustSystemCaCerts(false).build();
+        TlsConfig.builder()
+            .withCaCertPath(certPath)
+            .withTrustSystemCaCerts(false)
+            .withClientCertificate(clientCertPath, clientKeyPath)
+            .build();
 
     TlsConfig config3 =
-        TlsConfig.builder().withCaCertPath(certPath).withTrustSystemCaCerts(true).build();
+        TlsConfig.builder()
+            .withCaCertPath(certPath)
+            .withTrustSystemCaCerts(false)
+            .withClientCertificate(clientCertPath, Paths.get("/path/to/other-client.key"))
+            .build();
 
     assertEquals(config1, config2);
     assertEquals(config1.hashCode(), config2.hashCode());

@@ -1,3 +1,18 @@
+/*
+ * Copyright ScyllaDB, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package com.scylladb.alternator;
 
 import com.scylladb.alternator.keyrouting.KeyRouteAffinity;
@@ -12,6 +27,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.logging.Logger;
 
 /**
  * Configuration class for Alternator load balancing settings.
@@ -47,6 +63,8 @@ import java.util.Set;
  * @since 2.0.0
  */
 public class AlternatorConfig {
+  private static final Logger logger = Logger.getLogger(AlternatorConfig.class.getName());
+
   /** Default minimum request body size (in bytes) that triggers compression. */
   public static final int DEFAULT_MIN_COMPRESSION_SIZE_BYTES = 1024;
 
@@ -56,12 +74,63 @@ public class AlternatorConfig {
   /** Default refresh interval (in milliseconds) when the client is idle. */
   public static final long DEFAULT_IDLE_REFRESH_INTERVAL_MS = 60000;
 
+  /** Default maximum number of connections in the HTTP client pool. */
+  public static final int DEFAULT_MAX_CONNECTIONS = 400;
+
   /**
-   * Default value for connection pool settings, indicating that the SDK default should be used.
+   * Recommended maximum retry attempts for partition key discovery (currently hard-coded).
    *
-   * @since 2.0.2
+   * <p><strong>Note:</strong> This value is currently hard-coded in PartitionKeyResolver and cannot
+   * be configured at runtime. It is exposed here for documentation and future configurability.
    */
-  public static final int CONNECTION_POOL_DEFAULT = 0;
+  public static final int RECOMMENDED_PARTITION_KEY_DISCOVERY_MAX_RETRIES = 3;
+
+  /**
+   * Recommended initial retry delay for partition key discovery in milliseconds (currently
+   * hard-coded).
+   *
+   * <p><strong>Note:</strong> This value is currently hard-coded in PartitionKeyResolver and cannot
+   * be configured at runtime. It is exposed here for documentation and future configurability.
+   */
+  public static final long RECOMMENDED_PARTITION_KEY_DISCOVERY_INITIAL_DELAY_MS = 100;
+
+  /**
+   * Recommended maximum retry delay for partition key discovery in milliseconds (currently
+   * hard-coded).
+   *
+   * <p><strong>Note:</strong> This value is currently hard-coded in PartitionKeyResolver and cannot
+   * be configured at runtime. It is exposed here for documentation and future configurability.
+   */
+  public static final long RECOMMENDED_PARTITION_KEY_DISCOVERY_MAX_DELAY_MS = 2000;
+
+  /**
+   * Recommended cooldown period after permanent failure for partition key discovery in milliseconds
+   * (currently hard-coded).
+   *
+   * <p>After a permanent failure (e.g., table doesn't exist), the library waits this long before
+   * allowing another discovery attempt for the same table. Default is 5 minutes.
+   *
+   * <p><strong>Note:</strong> This constant is currently hard-coded in PartitionKeyResolver and
+   * cannot be configured at runtime. It is exposed here for documentation and future
+   * configurability.
+   */
+  public static final long RECOMMENDED_PARTITION_KEY_DISCOVERY_COOLDOWN_MS = 5 * 60 * 1000;
+
+  /** Default maximum idle time for pooled connections in milliseconds (10 minutes). */
+  public static final long DEFAULT_CONNECTION_MAX_IDLE_TIME_MS = 600_000;
+
+  /**
+   * Default maximum lifetime for pooled connections in milliseconds (0 = unlimited).
+   *
+   * <p>A value of 0 means connections are not closed based on age.
+   */
+  public static final long DEFAULT_CONNECTION_TIME_TO_LIVE_MS = 0;
+
+  /** Default timeout for acquiring a connection from the pool in milliseconds (10 seconds). */
+  public static final long DEFAULT_CONNECTION_ACQUISITION_TIMEOUT_MS = 10_000;
+
+  /** Default timeout for establishing a TCP connection in milliseconds (15 seconds). */
+  public static final long DEFAULT_CONNECTION_TIMEOUT_MS = 15_000;
 
   /**
    * Base HTTP headers required for proper operation with Alternator.
@@ -73,7 +142,6 @@ public class AlternatorConfig {
    *   <li>{@code X-Amz-Target} - Specifies the DynamoDB operation
    *   <li>{@code Content-Type} - MIME type for DynamoDB API (application/x-amz-json-1.0)
    *   <li>{@code Content-Length} - Required for request body
-   *   <li>{@code Accept-Encoding} - For response compression negotiation
    *   <li>{@code Connection} - HTTP keep-alive for connection reuse
    * </ul>
    *
@@ -83,12 +151,31 @@ public class AlternatorConfig {
       Collections.unmodifiableSet(
           new HashSet<>(
               Arrays.asList(
-                  "Host",
-                  "X-Amz-Target",
-                  "Content-Type",
-                  "Content-Length",
-                  "Accept-Encoding",
-                  "Connection")));
+                  "Host", "X-Amz-Target", "Content-Type", "Content-Length", "Connection")));
+
+  /**
+   * HTTP headers required when response compression is enabled.
+   *
+   * <ul>
+   *   <li>{@code Accept-Encoding} - For response compression negotiation
+   * </ul>
+   *
+   * @since 2.0.6
+   */
+  public static final Set<String> RESPONSE_COMPRESSION_HEADERS =
+      Collections.unmodifiableSet(new HashSet<>(Arrays.asList("Accept-Encoding")));
+
+  /**
+   * HTTP headers required when user-agent reporting is enabled.
+   *
+   * <ul>
+   *   <li>{@code User-Agent} - Reports the ScyllaDB Alternator client version
+   * </ul>
+   *
+   * @since 2.0.5
+   */
+  public static final Set<String> USER_AGENT_HEADERS =
+      Collections.unmodifiableSet(new HashSet<>(Arrays.asList("User-Agent")));
 
   /**
    * HTTP headers required when compression is enabled.
@@ -121,8 +208,10 @@ public class AlternatorConfig {
   private final RoutingScope routingScope;
   private final RequestCompressionAlgorithm compressionAlgorithm;
   private final int minCompressionSizeBytes;
+  private final List<ResponseCompressionAlgorithm> responseCompressionAlgorithms;
   private final boolean optimizeHeaders;
   private final Set<String> headersWhitelist;
+  private final boolean userAgentEnabled;
   private final boolean authenticationEnabled;
   private final TlsSessionCacheConfig tlsSessionCacheConfig;
   private final TlsConfig tlsConfig;
@@ -132,9 +221,12 @@ public class AlternatorConfig {
   private final int maxConnections;
   private final long connectionMaxIdleTimeMs;
   private final long connectionTimeToLiveMs;
+  private final long connectionAcquisitionTimeoutMs;
+  private final long connectionTimeoutMs;
+  private final NodeHealthConfig nodeHealthConfig;
 
   /**
-   * Package-private constructor. Use {@link AlternatorConfig#builder()} to create instances.
+   * Protected constructor kept for source and binary compatibility with 2.0.x subclasses.
    *
    * @param seedHosts the list of seed host addresses (IP or hostname) for cluster discovery
    * @param scheme the URI scheme (http or https)
@@ -142,19 +234,24 @@ public class AlternatorConfig {
    * @param routingScope the routing scope for node targeting
    * @param compressionAlgorithm the compression algorithm to use
    * @param minCompressionSizeBytes minimum request size in bytes to trigger compression
+   * @param responseCompressionAlgorithms response compression algorithms to advertise and decode
    * @param optimizeHeaders whether to enable HTTP header optimization
    * @param headersWhitelist the set of headers to preserve when optimization is enabled
+   * @param userAgentEnabled whether user-agent reporting is enabled
    * @param authenticationEnabled whether authentication is enabled
    * @param tlsSessionCacheConfig the TLS session cache configuration for quick TLS renegotiation
    * @param tlsConfig the TLS configuration including CA certificates and verification settings
    * @param keyRouteAffinityConfig the key route affinity configuration
    * @param activeRefreshIntervalMs refresh interval when there are active requests
    * @param idleRefreshIntervalMs refresh interval when the client is idle
-   * @param maxConnections maximum number of connections in the HTTP client pool (0 = SDK default)
-   * @param connectionMaxIdleTimeMs maximum idle time for pooled connections in milliseconds (0 =
-   *     SDK default)
-   * @param connectionTimeToLiveMs maximum lifetime for pooled connections in milliseconds (0 = SDK
-   *     default)
+   * @param maxConnections maximum number of connections in the HTTP client pool
+   * @param connectionMaxIdleTimeMs maximum idle time for pooled connections in milliseconds
+   * @param connectionTimeToLiveMs maximum lifetime for pooled connections in milliseconds (0 =
+   *     unlimited)
+   * @param connectionAcquisitionTimeoutMs maximum time to wait for a connection from the pool in
+   *     milliseconds
+   * @param connectionTimeoutMs maximum time to wait for a connection to be established in
+   *     milliseconds
    */
   protected AlternatorConfig(
       List<String> seedHosts,
@@ -163,8 +260,10 @@ public class AlternatorConfig {
       RoutingScope routingScope,
       RequestCompressionAlgorithm compressionAlgorithm,
       int minCompressionSizeBytes,
+      List<ResponseCompressionAlgorithm> responseCompressionAlgorithms,
       boolean optimizeHeaders,
       Set<String> headersWhitelist,
+      boolean userAgentEnabled,
       boolean authenticationEnabled,
       TlsSessionCacheConfig tlsSessionCacheConfig,
       TlsConfig tlsConfig,
@@ -173,7 +272,86 @@ public class AlternatorConfig {
       long idleRefreshIntervalMs,
       int maxConnections,
       long connectionMaxIdleTimeMs,
-      long connectionTimeToLiveMs) {
+      long connectionTimeToLiveMs,
+      long connectionAcquisitionTimeoutMs,
+      long connectionTimeoutMs) {
+    this(
+        seedHosts,
+        scheme,
+        port,
+        routingScope,
+        compressionAlgorithm,
+        minCompressionSizeBytes,
+        responseCompressionAlgorithms,
+        optimizeHeaders,
+        headersWhitelist,
+        userAgentEnabled,
+        authenticationEnabled,
+        tlsSessionCacheConfig,
+        tlsConfig,
+        keyRouteAffinityConfig,
+        activeRefreshIntervalMs,
+        idleRefreshIntervalMs,
+        maxConnections,
+        connectionMaxIdleTimeMs,
+        connectionTimeToLiveMs,
+        connectionAcquisitionTimeoutMs,
+        connectionTimeoutMs,
+        NodeHealthConfig.getDefault());
+  }
+
+  /**
+   * Private constructor. Use {@link AlternatorConfig#builder()} to create instances.
+   *
+   * @param seedHosts the list of seed host addresses (IP or hostname) for cluster discovery
+   * @param scheme the URI scheme (http or https)
+   * @param port the port number
+   * @param routingScope the routing scope for node targeting
+   * @param compressionAlgorithm the compression algorithm to use
+   * @param minCompressionSizeBytes minimum request size in bytes to trigger compression
+   * @param responseCompressionAlgorithms response compression algorithms to advertise and decode
+   * @param optimizeHeaders whether to enable HTTP header optimization
+   * @param headersWhitelist the set of headers to preserve when optimization is enabled
+   * @param userAgentEnabled whether user-agent reporting is enabled
+   * @param authenticationEnabled whether authentication is enabled
+   * @param tlsSessionCacheConfig the TLS session cache configuration for quick TLS renegotiation
+   * @param tlsConfig the TLS configuration including CA certificates and verification settings
+   * @param keyRouteAffinityConfig the key route affinity configuration
+   * @param activeRefreshIntervalMs refresh interval when there are active requests
+   * @param idleRefreshIntervalMs refresh interval when the client is idle
+   * @param maxConnections maximum number of connections in the HTTP client pool
+   * @param connectionMaxIdleTimeMs maximum idle time for pooled connections in milliseconds
+   * @param connectionTimeToLiveMs maximum lifetime for pooled connections in milliseconds (0 =
+   *     unlimited)
+   * @param connectionAcquisitionTimeoutMs maximum time to wait for a connection from the pool in
+   *     milliseconds
+   * @param connectionTimeoutMs maximum time to wait for a connection to be established in
+   *     milliseconds
+   * @param nodeHealthConfig configuration for node health tracking
+   */
+  private AlternatorConfig(
+      List<String> seedHosts,
+      String scheme,
+      int port,
+      RoutingScope routingScope,
+      RequestCompressionAlgorithm compressionAlgorithm,
+      int minCompressionSizeBytes,
+      List<ResponseCompressionAlgorithm> responseCompressionAlgorithms,
+      boolean optimizeHeaders,
+      Set<String> headersWhitelist,
+      boolean userAgentEnabled,
+      boolean authenticationEnabled,
+      TlsSessionCacheConfig tlsSessionCacheConfig,
+      TlsConfig tlsConfig,
+      KeyRouteAffinityConfig keyRouteAffinityConfig,
+      long activeRefreshIntervalMs,
+      long idleRefreshIntervalMs,
+      int maxConnections,
+      long connectionMaxIdleTimeMs,
+      long connectionTimeToLiveMs,
+      long connectionAcquisitionTimeoutMs,
+      long connectionTimeoutMs,
+      NodeHealthConfig nodeHealthConfig) {
     this.seedHosts =
         seedHosts != null
             ? Collections.unmodifiableList(new ArrayList<>(seedHosts))
@@ -185,7 +363,12 @@ public class AlternatorConfig {
         compressionAlgorithm != null ? compressionAlgorithm : RequestCompressionAlgorithm.NONE;
     this.minCompressionSizeBytes =
         minCompressionSizeBytes >= 0 ? minCompressionSizeBytes : DEFAULT_MIN_COMPRESSION_SIZE_BYTES;
+    this.responseCompressionAlgorithms =
+        responseCompressionAlgorithms != null
+            ? Collections.unmodifiableList(new ArrayList<>(responseCompressionAlgorithms))
+            : Collections.emptyList();
     this.optimizeHeaders = optimizeHeaders;
+    this.userAgentEnabled = userAgentEnabled;
     this.authenticationEnabled = authenticationEnabled;
 
     // Compute default whitelist based on configuration if not provided
@@ -208,6 +391,10 @@ public class AlternatorConfig {
     this.maxConnections = maxConnections;
     this.connectionMaxIdleTimeMs = connectionMaxIdleTimeMs;
     this.connectionTimeToLiveMs = connectionTimeToLiveMs;
+    this.connectionAcquisitionTimeoutMs = connectionAcquisitionTimeoutMs;
+    this.connectionTimeoutMs = connectionTimeoutMs;
+    this.nodeHealthConfig =
+        nodeHealthConfig != null ? nodeHealthConfig : NodeHealthConfig.getDefault();
   }
 
   /**
@@ -288,6 +475,29 @@ public class AlternatorConfig {
   }
 
   /**
+   * Gets the configured HTTP response compression algorithms.
+   *
+   * <p>The algorithms are ordered as they will be sent in the {@code Accept-Encoding} header. The
+   * default is an empty list, which means response compression is disabled.
+   *
+   * @return response compression algorithms, never null
+   * @since 2.0.6
+   */
+  public List<ResponseCompressionAlgorithm> getResponseCompressionAlgorithms() {
+    return responseCompressionAlgorithms;
+  }
+
+  /**
+   * Checks if HTTP response compression negotiation and decompression are enabled.
+   *
+   * @return true if at least one response compression algorithm is configured
+   * @since 2.0.6
+   */
+  public boolean isResponseCompressionEnabled() {
+    return !responseCompressionAlgorithms.isEmpty();
+  }
+
+  /**
    * Checks if HTTP header optimization is enabled.
    *
    * <p>When enabled, outgoing requests will have their HTTP headers filtered to include only those
@@ -313,6 +523,20 @@ public class AlternatorConfig {
    */
   public Set<String> getHeadersWhitelist() {
     return headersWhitelist;
+  }
+
+  /**
+   * Checks if user-agent reporting is enabled.
+   *
+   * <p>When enabled, the client sends a {@code User-Agent} header that includes the ScyllaDB
+   * Alternator client version. When disabled, optimized header whitelists do not require {@code
+   * User-Agent}.
+   *
+   * @return true if user-agent reporting is enabled, false otherwise
+   * @since 2.0.5
+   */
+  public boolean isUserAgentEnabled() {
+    return userAgentEnabled;
   }
 
   /**
@@ -349,8 +573,8 @@ public class AlternatorConfig {
   /**
    * Gets the TLS configuration.
    *
-   * <p>The TLS configuration controls certificate validation, custom CA certificates, hostname
-   * verification, and session caching settings.
+   * <p>The TLS configuration controls certificate validation, custom CA certificates, client TLS
+   * certificates, hostname verification, and session caching settings.
    *
    * @return the TLS configuration, never null
    * @since 1.0.9
@@ -407,9 +631,7 @@ public class AlternatorConfig {
   /**
    * Gets the maximum number of connections in the HTTP client connection pool.
    *
-   * <p>A value of 0 means the SDK default will be used.
-   *
-   * @return the maximum number of connections, or 0 for SDK default
+   * @return the maximum number of connections
    * @since 2.0.2
    */
   public int getMaxConnections() {
@@ -419,10 +641,9 @@ public class AlternatorConfig {
   /**
    * Gets the maximum idle time for pooled connections in milliseconds.
    *
-   * <p>Connections that have been idle longer than this value will be closed. A value of 0 means
-   * the SDK default will be used.
+   * <p>Connections that have been idle longer than this value will be closed.
    *
-   * @return the maximum idle time in milliseconds, or 0 for SDK default
+   * @return the maximum idle time in milliseconds
    * @since 2.0.2
    */
   public long getConnectionMaxIdleTimeMs() {
@@ -433,9 +654,9 @@ public class AlternatorConfig {
    * Gets the maximum lifetime for pooled connections in milliseconds.
    *
    * <p>Connections older than this value will be closed regardless of activity. A value of 0 means
-   * the SDK default will be used.
+   * unlimited lifetime.
    *
-   * @return the connection time-to-live in milliseconds, or 0 for SDK default
+   * @return the connection time-to-live in milliseconds
    * @since 2.0.2
    */
   public long getConnectionTimeToLiveMs() {
@@ -443,12 +664,39 @@ public class AlternatorConfig {
   }
 
   /**
-   * Checks whether any custom connection pool settings have been configured.
+   * Returns the maximum time to wait for a connection from the pool in milliseconds.
    *
-   * @return true if any connection pool setting differs from the default
+   * <p>When the connection pool is exhausted, this controls how long the client will wait for a
+   * connection to become available before failing.
+   *
+   * @return the connection acquisition timeout in milliseconds
+   * @since 2.0.3
    */
-  boolean hasCustomConnectionPoolSettings() {
-    return maxConnections > 0 || connectionMaxIdleTimeMs > 0 || connectionTimeToLiveMs > 0;
+  public long getConnectionAcquisitionTimeoutMs() {
+    return connectionAcquisitionTimeoutMs;
+  }
+
+  /**
+   * Returns the maximum time to wait for a connection to be established in milliseconds.
+   *
+   * <p>This controls how long the client will wait for the TCP connection handshake to complete
+   * when connecting to a node.
+   *
+   * @return the connection timeout in milliseconds
+   * @since 2.0.3
+   */
+  public long getConnectionTimeoutMs() {
+    return connectionTimeoutMs;
+  }
+
+  /**
+   * Gets the node health tracking configuration.
+   *
+   * @return the node health configuration, never null
+   * @since 2.0.6
+   */
+  public NodeHealthConfig getNodeHealthConfig() {
+    return nodeHealthConfig;
   }
 
   /**
@@ -462,8 +710,14 @@ public class AlternatorConfig {
    */
   public Set<String> getRequiredHeaders() {
     Set<String> required = new HashSet<>(BASE_REQUIRED_HEADERS);
+    if (isResponseCompressionEnabled()) {
+      required.addAll(RESPONSE_COMPRESSION_HEADERS);
+    }
     if (compressionAlgorithm != null && compressionAlgorithm != RequestCompressionAlgorithm.NONE) {
       required.addAll(COMPRESSION_HEADERS);
+    }
+    if (userAgentEnabled) {
+      required.addAll(USER_AGENT_HEADERS);
     }
     if (authenticationEnabled) {
       required.addAll(AUTHENTICATION_HEADERS);
@@ -487,18 +741,25 @@ public class AlternatorConfig {
     private RoutingScope routingScope = null;
     private RequestCompressionAlgorithm compressionAlgorithm = RequestCompressionAlgorithm.NONE;
     private int minCompressionSizeBytes = DEFAULT_MIN_COMPRESSION_SIZE_BYTES;
+    private List<ResponseCompressionAlgorithm> responseCompressionAlgorithms =
+        Collections.emptyList();
     private boolean optimizeHeaders = false;
     private Set<String> headersWhitelist = null; // null means use default based on config
     private boolean headersWhitelistWasSet = false;
+    private boolean userAgentEnabled = true;
     private boolean authenticationEnabled = true;
     private TlsSessionCacheConfig tlsSessionCacheConfig = null; // null means use default
     private TlsConfig tlsConfig = null; // null means use default (trust-all for backwards compat)
     private KeyRouteAffinityConfig keyRouteAffinityConfig = null;
     private long activeRefreshIntervalMs = DEFAULT_ACTIVE_REFRESH_INTERVAL_MS;
     private long idleRefreshIntervalMs = DEFAULT_IDLE_REFRESH_INTERVAL_MS;
-    private int maxConnections = CONNECTION_POOL_DEFAULT;
-    private long connectionMaxIdleTimeMs = CONNECTION_POOL_DEFAULT;
-    private long connectionTimeToLiveMs = CONNECTION_POOL_DEFAULT;
+    private int maxConnections = DEFAULT_MAX_CONNECTIONS;
+    private long connectionMaxIdleTimeMs = DEFAULT_CONNECTION_MAX_IDLE_TIME_MS;
+    private boolean connectionMaxIdleTimeMsSet = false;
+    private long connectionTimeToLiveMs = DEFAULT_CONNECTION_TIME_TO_LIVE_MS;
+    private long connectionAcquisitionTimeoutMs = DEFAULT_CONNECTION_ACQUISITION_TIMEOUT_MS;
+    private long connectionTimeoutMs = DEFAULT_CONNECTION_TIMEOUT_MS;
+    private NodeHealthConfig nodeHealthConfig = NodeHealthConfig.getDefault();
 
     /** Package-private constructor. Use {@link AlternatorConfig#builder()} to create instances. */
     Builder() {}
@@ -512,6 +773,11 @@ public class AlternatorConfig {
      */
     Builder authenticationEnabled(boolean authenticationEnabled) {
       this.authenticationEnabled = authenticationEnabled;
+      return this;
+    }
+
+    Builder withUserAgentEnabled(boolean userAgentEnabled) {
+      this.userAgentEnabled = userAgentEnabled;
       return this;
     }
 
@@ -607,7 +873,7 @@ public class AlternatorConfig {
      *
      * Set<String> required = builder.getRequiredHeaders();
      * // required contains: Host, X-Amz-Target, Content-Type, Content-Length,
-     * //                    Accept-Encoding, Content-Encoding, Authorization, X-Amz-Date
+     * //                    Content-Encoding, Authorization, X-Amz-Date
      * }</pre>
      *
      * @return an unmodifiable set of required header names for the current configuration
@@ -615,8 +881,14 @@ public class AlternatorConfig {
      */
     public Set<String> getRequiredHeaders() {
       Set<String> required = new HashSet<>(BASE_REQUIRED_HEADERS);
+      if (!responseCompressionAlgorithms.isEmpty()) {
+        required.addAll(RESPONSE_COMPRESSION_HEADERS);
+      }
       if (compressionAlgorithm != null && compressionAlgorithm.isEnabled()) {
         required.addAll(COMPRESSION_HEADERS);
+      }
+      if (userAgentEnabled) {
+        required.addAll(USER_AGENT_HEADERS);
       }
       if (authenticationEnabled) {
         required.addAll(AUTHENTICATION_HEADERS);
@@ -699,6 +971,56 @@ public class AlternatorConfig {
      */
     public Builder withMinCompressionSizeBytes(int minCompressionSizeBytes) {
       this.minCompressionSizeBytes = minCompressionSizeBytes;
+      return this;
+    }
+
+    /**
+     * Sets the HTTP response compression algorithms to advertise and decode.
+     *
+     * <p>The configured order is used for the {@code Accept-Encoding} header. Response compression
+     * is disabled by default.
+     *
+     * @param algorithms the response compression algorithms to enable
+     * @return this builder instance
+     * @throws IllegalArgumentException if algorithms is null, empty, or contains null
+     * @since 2.0.6
+     */
+    public Builder withResponseCompression(ResponseCompressionAlgorithm... algorithms) {
+      if (algorithms == null) {
+        throw new IllegalArgumentException(
+            "responseCompressionAlgorithms cannot be null or empty. "
+                + "Use withResponseCompressionDisabled() to disable response compression.");
+      }
+      return withResponseCompression(Arrays.asList(algorithms));
+    }
+
+    /**
+     * Sets the HTTP response compression algorithms to advertise and decode.
+     *
+     * <p>The configured order is used for the {@code Accept-Encoding} header. Response compression
+     * is disabled by default.
+     *
+     * @param algorithms the response compression algorithms to enable
+     * @return this builder instance
+     * @throws IllegalArgumentException if algorithms is null, empty, or contains null
+     * @since 2.0.6
+     */
+    public Builder withResponseCompression(Collection<ResponseCompressionAlgorithm> algorithms) {
+      this.responseCompressionAlgorithms = ResponseCompressionAlgorithm.validatedList(algorithms);
+      return this;
+    }
+
+    /**
+     * Disables HTTP response compression negotiation and decompression.
+     *
+     * <p>When disabled, the client does not set {@code Accept-Encoding} and does not decompress
+     * compressed response bodies.
+     *
+     * @return this builder instance
+     * @since 2.0.6
+     */
+    public Builder withResponseCompressionDisabled() {
+      this.responseCompressionAlgorithms = Collections.emptyList();
       return this;
     }
 
@@ -830,6 +1152,18 @@ public class AlternatorConfig {
      *         .build())
      *     .build();
      *
+     * // Use mutual TLS client certificate authentication
+     * AlternatorConfig config = AlternatorConfig.builder()
+     *     .withSeedNode(URI.create("https://localhost:8043"))
+     *     .withTlsConfig(TlsConfig.builder()
+     *         .withCaCertPath(Paths.get("/path/to/ca.pem"))
+     *         .withClientCertificate(
+     *             Paths.get("/path/to/client.crt"),
+     *             Paths.get("/path/to/client.key"))
+     *         .withTrustSystemCaCerts(false)
+     *         .build())
+     *     .build();
+     *
      * // Trust all certificates (development/testing only)
      * AlternatorConfig config = AlternatorConfig.builder()
      *     .withSeedNode(URI.create("https://localhost:8043"))
@@ -950,9 +1284,9 @@ public class AlternatorConfig {
      * this value is recommended for multi-node Alternator clusters to allow concurrent requests to
      * different nodes.
      *
-     * <p>Default: 0 (use SDK default)
+     * <p>Default: {@link #DEFAULT_MAX_CONNECTIONS} (400)
      *
-     * @param maxConnections the maximum number of connections, or 0 to use SDK default
+     * @param maxConnections the maximum number of connections (must be positive)
      * @return this builder instance
      * @since 2.0.2
      */
@@ -967,31 +1301,100 @@ public class AlternatorConfig {
      * <p>Connections that have been idle longer than this value will be closed and removed from the
      * pool. This helps reclaim resources when the cluster is underutilized.
      *
-     * <p>Default: 0 (use SDK default)
+     * <p>Default: {@link #DEFAULT_CONNECTION_MAX_IDLE_TIME_MS} (10 minutes)
      *
-     * @param connectionMaxIdleTimeMs the maximum idle time in milliseconds, or 0 to use SDK default
+     * @param connectionMaxIdleTimeMs the maximum idle time in milliseconds (must be non-negative)
      * @return this builder instance
      * @since 2.0.2
      */
     public Builder withConnectionMaxIdleTimeMs(long connectionMaxIdleTimeMs) {
       this.connectionMaxIdleTimeMs = connectionMaxIdleTimeMs;
+      this.connectionMaxIdleTimeMsSet = true;
       return this;
     }
 
     /**
      * Sets the maximum lifetime for pooled connections in milliseconds.
      *
-     * <p>Connections older than this value will be closed regardless of activity.
+     * <p>Connections older than this value will be closed regardless of activity. A value of 0
+     * means unlimited lifetime.
      *
-     * <p>Default: 0 (use SDK default)
+     * <p>Default: {@link #DEFAULT_CONNECTION_TIME_TO_LIVE_MS} (0, unlimited)
      *
-     * @param connectionTimeToLiveMs the connection time-to-live in milliseconds, or 0 to use SDK
-     *     default
+     * @param connectionTimeToLiveMs the connection time-to-live in milliseconds (must be
+     *     non-negative, 0 for unlimited)
      * @return this builder instance
      * @since 2.0.2
      */
     public Builder withConnectionTimeToLiveMs(long connectionTimeToLiveMs) {
       this.connectionTimeToLiveMs = connectionTimeToLiveMs;
+      return this;
+    }
+
+    /**
+     * Sets the maximum time to wait for a connection from the pool in milliseconds.
+     *
+     * <p>When the connection pool is exhausted, this controls how long the client will wait for a
+     * connection to become available before failing with a timeout exception.
+     *
+     * <p>A value of 0 means "unlimited" (wait indefinitely) for Apache and Netty HTTP clients. The
+     * CRT HTTP client does not support zero-duration timeouts; setting 0 with CRT will fall back to
+     * the SDK default and log an info message.
+     *
+     * <p>Default: {@link #DEFAULT_CONNECTION_ACQUISITION_TIMEOUT_MS} (10 seconds)
+     *
+     * @param connectionAcquisitionTimeoutMs the acquisition timeout in milliseconds (must be
+     *     non-negative)
+     * @return this builder instance
+     * @since 2.0.3
+     */
+    public Builder withConnectionAcquisitionTimeoutMs(long connectionAcquisitionTimeoutMs) {
+      this.connectionAcquisitionTimeoutMs = connectionAcquisitionTimeoutMs;
+      return this;
+    }
+
+    /**
+     * Sets the maximum time to wait for a connection to be established in milliseconds.
+     *
+     * <p>This controls how long the client will wait for the TCP connection handshake to complete
+     * when connecting to a node.
+     *
+     * <p>A value of 0 means "unlimited" (wait indefinitely) for Apache and Netty HTTP clients. The
+     * CRT HTTP client does not support zero-duration timeouts; setting 0 with CRT will fall back to
+     * the SDK default and log an info message.
+     *
+     * <p>Default: {@link #DEFAULT_CONNECTION_TIMEOUT_MS} (15 seconds)
+     *
+     * @param connectionTimeoutMs the connection timeout in milliseconds (must be non-negative)
+     * @return this builder instance
+     * @since 2.0.3
+     */
+    public Builder withConnectionTimeoutMs(long connectionTimeoutMs) {
+      this.connectionTimeoutMs = connectionTimeoutMs;
+      return this;
+    }
+
+    /**
+     * Sets node health tracking configuration.
+     *
+     * @param nodeHealthConfig node health configuration, or null to use defaults
+     * @return this builder instance
+     * @since 2.0.6
+     */
+    public Builder withNodeHealthConfig(NodeHealthConfig nodeHealthConfig) {
+      this.nodeHealthConfig =
+          nodeHealthConfig != null ? nodeHealthConfig : NodeHealthConfig.getDefault();
+      return this;
+    }
+
+    /**
+     * Disables node health tracking.
+     *
+     * @return this builder instance
+     * @since 2.0.6
+     */
+    public Builder withNodeHealthDisabled() {
+      this.nodeHealthConfig = NodeHealthConfig.disabled();
       return this;
     }
 
@@ -1010,9 +1413,9 @@ public class AlternatorConfig {
       }
 
       // Validate connection pool settings
-      if (maxConnections < 0) {
+      if (maxConnections <= 0) {
         throw new IllegalArgumentException(
-            "maxConnections must be non-negative, but was: " + maxConnections);
+            "maxConnections must be positive, but was: " + maxConnections);
       }
       if (connectionMaxIdleTimeMs < 0) {
         throw new IllegalArgumentException(
@@ -1021,6 +1424,22 @@ public class AlternatorConfig {
       if (connectionTimeToLiveMs < 0) {
         throw new IllegalArgumentException(
             "connectionTimeToLiveMs must be non-negative, but was: " + connectionTimeToLiveMs);
+      }
+      if (connectionAcquisitionTimeoutMs < 0) {
+        throw new IllegalArgumentException(
+            "connectionAcquisitionTimeoutMs must be non-negative, but was: "
+                + connectionAcquisitionTimeoutMs);
+      }
+      if (connectionTimeoutMs < 0) {
+        throw new IllegalArgumentException(
+            "connectionTimeoutMs must be non-negative, but was: " + connectionTimeoutMs);
+      }
+
+      // Warn when idle connection eviction is explicitly disabled
+      if (connectionMaxIdleTimeMsSet && connectionMaxIdleTimeMs == 0) {
+        logger.warning(
+            "connectionMaxIdleTimeMs is set to 0, which disables idle connection eviction. "
+                + "This can lead to stale connections in long-running applications.");
       }
 
       // Validate headersWhitelist if it was explicitly set
@@ -1078,8 +1497,10 @@ public class AlternatorConfig {
           effectiveRoutingScope,
           compressionAlgorithm,
           minCompressionSizeBytes,
+          responseCompressionAlgorithms,
           optimizeHeaders,
           headersWhitelist,
+          userAgentEnabled,
           authenticationEnabled,
           tlsSessionCacheConfig,
           effectiveTlsConfig,
@@ -1088,7 +1509,10 @@ public class AlternatorConfig {
           idleRefreshIntervalMs,
           maxConnections,
           connectionMaxIdleTimeMs,
-          connectionTimeToLiveMs);
+          connectionTimeToLiveMs,
+          connectionAcquisitionTimeoutMs,
+          connectionTimeoutMs,
+          nodeHealthConfig);
     }
   }
 }

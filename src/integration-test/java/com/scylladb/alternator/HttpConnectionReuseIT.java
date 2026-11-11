@@ -1,3 +1,18 @@
+/*
+ * Copyright ScyllaDB, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package com.scylladb.alternator;
 
 import static org.junit.Assert.*;
@@ -28,13 +43,12 @@ import software.amazon.awssdk.services.dynamodb.model.ListTablesResponse;
  * <p>These tests verify that rapid sequential and parallel requests succeed without connection
  * errors, which implicitly validates that HTTP connection reuse and pooling work correctly.
  *
- * <p>Tests run against both HTTP and HTTPS endpoints. Set environment variables to configure:
+ * <p>Tests run against both HTTP and HTTPS endpoints provisioned by the CCM harness. Set
+ * environment variables to configure:
  *
  * <ul>
- *   <li>ALTERNATOR_HOST: Host address (default: 172.39.0.2)
- *   <li>ALTERNATOR_PORT: HTTP port number (default: 9998)
- *   <li>ALTERNATOR_HTTPS_PORT: HTTPS port number (default: 9999)
  *   <li>INTEGRATION_TESTS: Set to "true" to enable these tests
+ *   <li>SCYLLA_VERSION: CCM Scylla package selector
  * </ul>
  */
 @RunWith(Parameterized.class)

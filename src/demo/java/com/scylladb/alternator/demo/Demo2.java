@@ -1,3 +1,18 @@
+/*
+ * Copyright ScyllaDB, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package com.scylladb.alternator.demo;
 
 import com.scylladb.alternator.AlternatorDynamoDbClient;
@@ -160,21 +175,19 @@ public class Demo2 {
       ddb = getTraditionalClient(URI.create(endpoint), myCredentials);
     }
 
-    // run DescribeEndpoints several times
-    for (int i = 0; i < 10; i++) {
-      DescribeEndpointsRequest request = DescribeEndpointsRequest.builder().build();
-      DescribeEndpointsResponse response = ddb.describeEndpoints(request);
-      System.out.println(response);
+    try {
+      // run DescribeEndpoints several times
+      for (int i = 0; i < 10; i++) {
+        DescribeEndpointsRequest request = DescribeEndpointsRequest.builder().build();
+        DescribeEndpointsResponse response = ddb.describeEndpoints(request);
+        System.out.println(response);
+      }
+    } finally {
+      ddb.close();
     }
-    // FIXME: The AWS SDK leaves behind an IdleConnectionReaper thread,
-    // which causes mvn to hang waiting for it to shut down (which it
-    // won't). Perhaps if we hold the HttpClient object and close() it,
-    // it will get rid of this reaper object.
-    // https://sdk.amazonaws.com/java/api/latest/software/amazon/awssdk/core/client/builder/SdkSyncClientBuilder.html#httpClient-software.amazon.awssdk.http.SdkHttpClient-
-    // explains that with httpClient(), "This client must be closed by the
-    // user when it is ready to be disposed. The SDK will not close the
-    // HTTP client when the service client is closed." Maybe we should
-    // use httpClientBuilder() instead, which doesn't have this problem?
+
+    System.out.println("Done");
+    System.exit(0);
   }
 
   // A hack to disable SSL certificate checks. Useful when running with
@@ -204,7 +217,7 @@ public class Demo2 {
       sc.init(null, trustAllCerts, new java.security.SecureRandom());
       HttpsURLConnection.setDefaultSSLSocketFactory(sc.getSocketFactory());
     } catch (Exception e) {
-      e.printStackTrace();
+      System.err.println("Failed to configure SSL: " + e.getMessage());
     }
     HttpsURLConnection.setDefaultHostnameVerifier(
         new HostnameVerifier() {

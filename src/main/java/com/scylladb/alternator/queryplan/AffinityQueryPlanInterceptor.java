@@ -1,24 +1,48 @@
+/*
+ * Copyright ScyllaDB, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package com.scylladb.alternator.queryplan;
 
 import com.scylladb.alternator.internal.AlternatorLiveNodes;
 import com.scylladb.alternator.internal.LazyQueryPlan;
 import com.scylladb.alternator.keyrouting.AttributeValueHasher;
 import com.scylladb.alternator.keyrouting.KeyAffinityRequestClassifier;
+import com.scylladb.alternator.keyrouting.KeyAffinityRequestClassifier.BatchWriteRoutingTarget;
 import com.scylladb.alternator.keyrouting.KeyRouteAffinityConfig;
 import com.scylladb.alternator.keyrouting.PartitionKeyResolver;
+import java.net.URI;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import software.amazon.awssdk.core.SdkRequest;
 import software.amazon.awssdk.core.interceptor.Context;
 import software.amazon.awssdk.core.interceptor.ExecutionAttributes;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
+import software.amazon.awssdk.services.dynamodb.model.BatchWriteItemRequest;
 
 /**
  * Execution interceptor that implements key-based route affinity.
  *
- * <p>This interceptor extends {@link BasicQueryPlanInterceptor} to provide deterministic routing
- * based on partition key values. When key affinity conditions are met, it creates a {@link
- * LazyQueryPlan} with a seed derived from the partition key hash, ensuring that requests for the
- * same partition key are routed to the same node.
+ * <p>This interceptor extends {@link BasicQueryPlanInterceptor} to provide deterministic
+ * discovered-node candidate order based on partition key values. When key affinity conditions are
+ * met, it creates a {@link LazyQueryPlan} with a seed derived from the partition key hash. Final
+ * node-health eligibility is applied by {@link BasicQueryPlanInterceptor} as each request attempt
+ * is routed.
  *
  * <p>When key affinity conditions are not met (e.g., request type doesn't qualify, partition key
  * not found), the interceptor falls back to the random plan created by the base class.
@@ -92,6 +116,10 @@ public class AffinityQueryPlanInterceptor extends BasicQueryPlanInterceptor {
       return null;
     }
 
+    if (request instanceof BatchWriteItemRequest) {
+      return getBatchWriteQueryPlan((BatchWriteItemRequest) request);
+    }
+
     // Extract table name
     String tableName = KeyAffinityRequestClassifier.extractTableName(request);
     if (tableName == null) {
@@ -117,21 +145,75 @@ public class AffinityQueryPlanInterceptor extends BasicQueryPlanInterceptor {
       return null;
     }
 
-    // Hash the partition key and create a deterministic query plan
-    long hash = AttributeValueHasher.hash(pkValue);
-    return new LazyQueryPlan(liveNodes, hash);
+    // Hash the partition key and create a deterministic known-node candidate order.
+    try {
+      long hash = AttributeValueHasher.hash(pkValue);
+      return new LazyQueryPlan(liveNodes, hash);
+    } catch (IllegalArgumentException e) {
+      // Unsupported partition-key shapes cannot be routed by key affinity.
+      return null;
+    }
+  }
+
+  private LazyQueryPlan getBatchWriteQueryPlan(BatchWriteItemRequest request) {
+    Map<URI, Integer> votes = new HashMap<>();
+    for (BatchWriteRoutingTarget target :
+        KeyAffinityRequestClassifier.extractBatchWriteRoutingTargets(request)) {
+      String tableName = target.tableName();
+      String pkName = pkResolver.getPartitionKeyName(tableName);
+      if (pkName == null) {
+        if (clientForDiscovery != null) {
+          pkResolver.triggerDiscovery(tableName, clientForDiscovery);
+        }
+        continue;
+      }
+
+      AttributeValue pkValue = target.partitionKeyValue(pkName);
+      if (pkValue == null) {
+        continue;
+      }
+
+      try {
+        long hash = AttributeValueHasher.hash(pkValue);
+        URI preferredNode = liveNodes.getPreferredQueryPlanNodeForHash(hash);
+        if (preferredNode != null) {
+          votes.merge(preferredNode, 1, Integer::sum);
+        }
+      } catch (IllegalArgumentException e) {
+        // Unsupported partition-key shapes cannot be routed by key affinity.
+      }
+    }
+
+    List<URI> preferredNodes = votePreferenceOrder(votes);
+    if (preferredNodes.isEmpty()) {
+      return null;
+    }
+    return new LazyQueryPlan(liveNodes, preferredNodes);
+  }
+
+  private static List<URI> votePreferenceOrder(Map<URI, Integer> votes) {
+    List<Map.Entry<URI, Integer>> votedNodes = new ArrayList<>(votes.entrySet());
+    votedNodes.sort(
+        Comparator.<Map.Entry<URI, Integer>, Integer>comparing(Map.Entry::getValue)
+            .reversed()
+            .thenComparing(entry -> entry.getKey().toString()));
+
+    List<URI> preferredNodes = new ArrayList<>(votedNodes.size());
+    for (Map.Entry<URI, Integer> entry : votedNodes) {
+      preferredNodes.add(entry.getKey());
+    }
+    return preferredNodes;
   }
 
   @Override
-  public void beforeExecution(
+  protected void initializeQueryPlan(
       Context.BeforeExecution context, ExecutionAttributes executionAttributes) {
     LazyQueryPlan plan = getQueryPlan(context.request());
+    boolean affinity = plan != null;
     if (plan == null) {
       plan = new LazyQueryPlan(liveNodes);
     }
-
-    // Override the random plan with the deterministic one
-    executionAttributes.putAttribute(QUERY_PLAN, plan);
+    setQueryPlan(executionAttributes, plan, affinity);
   }
 
   /**

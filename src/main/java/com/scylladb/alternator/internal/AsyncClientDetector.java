@@ -1,3 +1,18 @@
+/*
+ * Copyright ScyllaDB, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package com.scylladb.alternator.internal;
 
 import java.util.logging.Level;
@@ -14,7 +29,9 @@ public final class AsyncClientDetector {
 
   private static final Logger logger = Logger.getLogger(AsyncClientDetector.class.getName());
 
-  // Class names split to satisfy checkstyle (no fully-qualified names inline)
+  // WARNING: String concatenation is intentional — do not "simplify" into a single literal.
+  // The checkstyle RegexpMultiline rule bans fully-qualified class names outside imports;
+  // splitting the string prevents the regex from matching the constant value.
   private static final String NETTY_CLASS =
       "software.amazon.awssdk" + ".http.nio.netty.NettyNioAsyncHttpClient";
   private static final String CRT_CLASS =
@@ -37,11 +54,11 @@ public final class AsyncClientDetector {
    * @throws IllegalStateException if no supported implementation is found
    */
   public static AsyncClientType detect() {
-    if (isClassAvailable(NETTY_CLASS)) {
+    if (ClasspathUtil.isClassAvailable(NETTY_CLASS)) {
       logger.log(Level.FINE, "Detected Netty NIO async HTTP client on classpath");
       return AsyncClientType.NETTY;
     }
-    if (isClassAvailable(CRT_CLASS)) {
+    if (ClasspathUtil.isClassAvailable(CRT_CLASS)) {
       logger.log(Level.FINE, "Detected AWS CRT async HTTP client on classpath");
       return AsyncClientType.CRT;
     }
@@ -52,12 +69,30 @@ public final class AsyncClientDetector {
             + "software.amazon.awssdk:aws-crt-client");
   }
 
-  private static boolean isClassAvailable(String className) {
-    try {
-      Class.forName(className);
-      return true;
-    } catch (ClassNotFoundException e) {
-      return false;
+  /**
+   * Verifies that the specified async HTTP client implementation is available on the classpath.
+   *
+   * @param type the client type to check
+   * @throws IllegalStateException if the implementation is not on the classpath
+   */
+  public static void requireAvailableHttpClient(AsyncClientType type) {
+    switch (type) {
+      case NETTY:
+        if (!ClasspathUtil.isClassAvailable(NETTY_CLASS)) {
+          throw new IllegalStateException(
+              "HttpClientType.NETTY was requested, but Netty NIO HTTP client is not on the "
+                  + "classpath. Add dependency: software.amazon.awssdk:netty-nio-client");
+        }
+        return;
+      case CRT:
+        if (!ClasspathUtil.isClassAvailable(CRT_CLASS)) {
+          throw new IllegalStateException(
+              "HttpClientType.CRT was requested, but AWS CRT async HTTP client is not on the "
+                  + "classpath. Add dependency: software.amazon.awssdk:aws-crt-client");
+        }
+        return;
+      default:
+        throw new IllegalStateException("Unknown async client type: " + type);
     }
   }
 }

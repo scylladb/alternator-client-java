@@ -1,3 +1,18 @@
+/*
+ * Copyright ScyllaDB, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package com.scylladb.alternator;
 
 import static org.junit.Assert.*;
@@ -26,13 +41,12 @@ import software.amazon.awssdk.services.dynamodb.model.*;
  * when not pre-configured, and that key-based routing produces consistent node selection for the
  * same partition key.
  *
- * <p>Tests run against both HTTP and HTTPS endpoints. Set environment variables to configure:
+ * <p>Tests run against both HTTP and HTTPS endpoints provisioned by the CCM harness. Set
+ * environment variables to configure:
  *
  * <ul>
- *   <li>ALTERNATOR_HOST: Host address (default: 172.39.0.2)
- *   <li>ALTERNATOR_PORT: HTTP port number (default: 9998)
- *   <li>ALTERNATOR_HTTPS_PORT: HTTPS port number (default: 9999)
  *   <li>INTEGRATION_TESTS: Set to "true" to enable these tests
+ *   <li>SCYLLA_VERSION: CCM Scylla package selector
  * </ul>
  */
 @RunWith(Parameterized.class)
@@ -125,7 +139,7 @@ public class KeyRouteAffinityAutodiscoveryIT {
       Thread.sleep(2000);
 
       // Second write should now benefit from cached PK info.
-      // If autodiscovery failed, this would still succeed (falls back to round-robin),
+      // If autodiscovery failed, this would still succeed (falls back to random query-plan routing),
       // but we verify the data is correct regardless.
       client.putItem(
           PutItemRequest.builder()
@@ -142,6 +156,7 @@ public class KeyRouteAffinityAutodiscoveryIT {
               GetItemRequest.builder()
                   .tableName(tableName)
                   .key(Map.of("user_id", AttributeValue.builder().s("user-001").build()))
+                  .consistentRead(true)
                   .build());
       assertNotNull("First item should exist", response1.item());
       assertEquals("Alice", response1.item().get("name").s());
@@ -151,6 +166,7 @@ public class KeyRouteAffinityAutodiscoveryIT {
               GetItemRequest.builder()
                   .tableName(tableName)
                   .key(Map.of("user_id", AttributeValue.builder().s("user-002").build()))
+                  .consistentRead(true)
                   .build());
       assertNotNull("Second item should exist", response2.item());
       assertEquals("Bob", response2.item().get("name").s());
@@ -226,6 +242,7 @@ public class KeyRouteAffinityAutodiscoveryIT {
               GetItemRequest.builder()
                   .tableName(tableName)
                   .key(Map.of("user_id", AttributeValue.builder().s("route-test").build()))
+                  .consistentRead(true)
                   .build());
 
       assertNotNull("Item should exist after repeated writes", finalResponse.item());
@@ -254,6 +271,7 @@ public class KeyRouteAffinityAutodiscoveryIT {
                 GetItemRequest.builder()
                     .tableName(tableName)
                     .key(Map.of("user_id", AttributeValue.builder().s(pk).build()))
+                    .consistentRead(true)
                     .build());
         assertNotNull("Item " + pk + " should exist", response.item());
         assertEquals("val-" + i, response.item().get("value").s());
@@ -316,6 +334,7 @@ public class KeyRouteAffinityAutodiscoveryIT {
               GetItemRequest.builder()
                   .tableName(tableName)
                   .key(Map.of("user_id", AttributeValue.builder().s("preconf-user").build()))
+                  .consistentRead(true)
                   .build());
 
       assertNotNull("Item should exist", response.item());
@@ -342,6 +361,7 @@ public class KeyRouteAffinityAutodiscoveryIT {
                 GetItemRequest.builder()
                     .tableName(tableName)
                     .key(Map.of("user_id", AttributeValue.builder().s("user-" + i).build()))
+                    .consistentRead(true)
                     .build());
         assertNotNull("Item user-" + i + " should exist", readResponse.item());
         assertEquals("data-" + i, readResponse.item().get("data").s());
