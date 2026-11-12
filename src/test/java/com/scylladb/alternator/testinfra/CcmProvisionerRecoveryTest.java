@@ -573,11 +573,7 @@ public class CcmProvisionerRecoveryTest {
     TestClusterNode node = cluster.nodes().get(0);
     Path nodeDirectory = Files.createDirectories(cluster.ccmDirectory().resolve("cluster/node1"));
     Path executable = Files.createDirectories(nodeDirectory.resolve("bin")).resolve("scylla");
-    Files.copy(resolveExecutable("sleep"), executable);
-    Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwx------"));
-    ProcessBuilder processBuilder = new ProcessBuilder(executable.toString(), "30");
-    processBuilder.environment().put("SCYLLA_CCM_RUN_DIR", provisioner.runDirectory().toString());
-    Process process = processBuilder.start();
+    Process process = startOwnedNodeProcess(executable, provisioner.runDirectory());
     try {
       Files.writeString(
           nodeDirectory.resolve("node.conf"),
@@ -717,12 +713,7 @@ public class CcmProvisionerRecoveryTest {
     Path otherNodeExecutable =
         Files.createDirectories(cluster.ccmDirectory().resolve("cluster/node2/bin"))
             .resolve("scylla");
-    Files.copy(resolveExecutable("sleep"), otherNodeExecutable);
-    Files.setPosixFilePermissions(
-        otherNodeExecutable, PosixFilePermissions.fromString("rwx------"));
-    ProcessBuilder helperBuilder = new ProcessBuilder(otherNodeExecutable.toString(), "30");
-    helperBuilder.environment().put("SCYLLA_CCM_RUN_DIR", provisioner.runDirectory().toString());
-    Process helper = helperBuilder.start();
+    Process helper = startOwnedNodeProcess(otherNodeExecutable, provisioner.runDirectory());
     try {
       Files.writeString(
           nodeDirectory.resolve("node.conf"),
@@ -766,11 +757,7 @@ public class CcmProvisionerRecoveryTest {
     TestClusterNode node = cluster.nodes().get(0);
     Path nodeDirectory = Files.createDirectories(cluster.ccmDirectory().resolve("cluster/node1"));
     Path executable = Files.createDirectories(nodeDirectory.resolve("bin")).resolve("scylla");
-    Files.copy(resolveExecutable("sleep"), executable);
-    Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwx------"));
-    ProcessBuilder processBuilder = new ProcessBuilder(executable.toString(), "30");
-    processBuilder.environment().put("SCYLLA_CCM_RUN_DIR", provisioner.runDirectory().toString());
-    Process process = processBuilder.start();
+    Process process = startOwnedNodeProcess(executable, provisioner.runDirectory());
     try {
       Files.writeString(
           nodeDirectory.resolve("node.conf"),
@@ -808,11 +795,7 @@ public class CcmProvisionerRecoveryTest {
     TestClusterNode node = cluster.nodes().get(0);
     Path nodeDirectory = Files.createDirectories(cluster.ccmDirectory().resolve("cluster/node1"));
     Path executable = Files.createDirectories(nodeDirectory.resolve("bin")).resolve("scylla");
-    Files.copy(resolveExecutable("sleep"), executable);
-    Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwx------"));
-    ProcessBuilder processBuilder = new ProcessBuilder(executable.toString(), "30");
-    processBuilder.environment().put("SCYLLA_CCM_RUN_DIR", provisioner.runDirectory().toString());
-    Process process = processBuilder.start();
+    Process process = startOwnedNodeProcess(executable, provisioner.runDirectory());
     try {
       Files.writeString(
           nodeDirectory.resolve("node.conf"),
@@ -1037,6 +1020,18 @@ public class CcmProvisionerRecoveryTest {
     TestClusterNode node = new TestClusterNode("node1", "127.0." + ccmId + ".1", "dc1", "RAC1");
     return new PhysicalTestCluster(
         provisioner, instanceId, ccmId, ccmDirectory, oneNodeSpec(), List.of(node), null, null);
+  }
+
+  private static Process startOwnedNodeProcess(Path executable, Path runDirectory)
+      throws IOException {
+    // Multicall implementations of sleep reject the renamed "scylla" executable. Bash's read
+    // builtin waits on the parent's open stdin pipe without creating a child process.
+    Files.copy(resolveExecutable("bash"), executable);
+    Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwx------"));
+    ProcessBuilder processBuilder =
+        new ProcessBuilder(executable.toString(), "-c", "read -r -t 30");
+    processBuilder.environment().put("SCYLLA_CCM_RUN_DIR", runDirectory.toString());
+    return processBuilder.start();
   }
 
   private static Path writeExecutable(Path directory, String name, String contents)
