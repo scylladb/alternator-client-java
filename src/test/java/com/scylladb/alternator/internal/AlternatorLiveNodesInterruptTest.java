@@ -15,10 +15,16 @@
  */
 package com.scylladb.alternator.internal;
 
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import com.scylladb.alternator.AlternatorConfig;
+import com.scylladb.alternator.keyrouting.KeyRouteAffinity;
+import com.scylladb.alternator.keyrouting.KeyRouteAffinityConfig;
+import com.scylladb.alternator.queryplan.AffinityQueryPlanInterceptor;
+import com.scylladb.alternator.routing.RackScope;
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CountDownLatch;
@@ -33,6 +39,45 @@ import software.amazon.awssdk.http.SdkHttpClient;
 import software.amazon.awssdk.http.SdkHttpFullResponse;
 
 public class AlternatorLiveNodesInterruptTest {
+
+  @Test
+  public void testLateAffinityInterceptorDoesNotForceEarlyRefresh() throws Exception {
+    CountingSuccessHttpClient client = new CountingSuccessHttpClient();
+    CountDownLatch initialRefreshCompleted = new CountDownLatch(1);
+    AlternatorConfig config =
+        AlternatorConfig.builder()
+            .withSeedNode(URI.create("http://127.0.0.1:8000"))
+            .withRoutingScope(RackScope.of("A", "r1", null))
+            .withNodeHealthDisabled()
+            .withActiveRefreshIntervalMs(60_000)
+            .withIdleRefreshIntervalMs(60_000)
+            .build();
+    AlternatorLiveNodes liveNodes =
+        new AlternatorLiveNodes(config, client) {
+          @Override
+          void refreshDiscoveredNodes() throws IOException {
+            super.refreshDiscoveredNodes();
+            initialRefreshCompleted.countDown();
+          }
+        };
+    AffinityQueryPlanInterceptor interceptor = null;
+    try {
+      liveNodes.start();
+      assertTrue(
+          "initial refresh must complete", initialRefreshCompleted.await(5, TimeUnit.SECONDS));
+      interceptor =
+          new AffinityQueryPlanInterceptor(
+              KeyRouteAffinityConfig.builder().withType(KeyRouteAffinity.RMW).build(), liveNodes);
+      assertFalse(
+          "activation must preserve polling deadline",
+          client.secondCall.await(200, TimeUnit.MILLISECONDS));
+    } finally {
+      if (interceptor != null) {
+        interceptor.getPartitionKeyResolver().shutdown();
+      }
+      assertTrue("live-node thread must stop", liveNodes.shutdownAndWait(5_000));
+    }
+  }
 
   @Test
   public void testExternalInterruptDoesNotStopThread() throws Exception {
