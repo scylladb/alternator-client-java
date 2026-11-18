@@ -314,11 +314,17 @@ public class FeatureSpecFormatTest {
       }
       boolean hasTestEvidence = LINK.matcher(evidence).find();
       if ("conformant".equals(status) || hasTestEvidence) {
-        TestEvidence testEvidence = requireMappedTestEvidence(file, id, evidence, errors);
-        if (testEvidence != null) {
-          evidenceByRequirement
-              .computeIfAbsent(id, ignored -> new LinkedHashSet<>())
-              .add(testEvidence);
+        Matcher links = LINK.matcher(evidence);
+        if (!hasTestEvidence) {
+          requireMappedTestEvidence(file, id, evidence, errors);
+        }
+        while (links.find()) {
+          TestEvidence testEvidence = requireMappedTestEvidence(file, id, links.group(), errors);
+          if (testEvidence != null) {
+            evidenceByRequirement
+                .computeIfAbsent(id, ignored -> new LinkedHashSet<>())
+                .add(testEvidence);
+          }
         }
       }
     }
