@@ -18,8 +18,10 @@ dependency changes remains visible in its entirety. Titles, authors, and other
 labels do not determine exclusion.
 
 Classification runs on open, synchronize, reopen, edit, and close. Runs for one PR
-are serialized, including manual runs. The workflow checks out trusted repository
-event tooling, never PR head code or the old PR base revision. Manual dispatch
+are serialized, including manual runs. The workflow uses the default self-checkout of
+trusted repository event tooling at `github.sha`, never PR head code or the old PR
+base revision. Omitting an explicit `ref` keeps checkout's fork guard from rejecting
+a merged fork PR, whose merge SHA equals the event SHA. Manual dispatch
 must select the default branch before checkout. It confirms the exact PR number
 from the trusted event or a successful manual PR lookup before checkout or label
 changes; ordinary issues and unavailable targets do not receive label writes.

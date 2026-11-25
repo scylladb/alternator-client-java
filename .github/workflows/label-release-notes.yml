@@ -61,7 +61,8 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         id: checkout
         with:
-          ref: ${{ github.sha }}
+          # Default checkout uses the trusted event ref/SHA. An explicit SHA can
+          # trip the fork guard when a merged PR's merge SHA equals github.sha.
           persist-credentials: false
       - name: Apply verified classification or attempt omission-label cleanup
         if: always()
