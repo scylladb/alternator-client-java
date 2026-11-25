@@ -963,14 +963,17 @@ it. DynamoDB traffic results received after a node becomes down are treated as s
 change its state, counters, or probe-recovery progress.
 
 Key route affinity hashes and votes over all known discovered nodes so candidate order is stable
-while health changes. Every request makes two passes over its source order: it first returns active
-nodes, then falls back to quarantined nodes if the active candidates are exhausted. Down nodes are
-always skipped. Regular query plans use a random source order; affinity query plans calculate one
-deterministic order over all discovered nodes, including down nodes, and preserve that order within
-both passes. If the SDK requests another attempt after every eligible endpoint has been tried, the
-plan starts another cycle: regular plans reshuffle, affinity plans reuse their deterministic order.
-If all candidates are down, the request fails locally. The SDK request endpoint is never used as a
-separate fallback.
+while health changes. When the configured scope chain contains a built-in rack, qualifying affinity
+requests use a view that replaces every built-in rack restriction with its named datacenter and
+preserves every explicit fallback in order. Reads and other non-qualifying requests keep the
+configured scope. Every request makes two passes over its source order: it first returns
+active nodes, then falls back to quarantined nodes if the active candidates are exhausted. Down
+nodes are always skipped. Regular query plans use a random source order; affinity query plans
+calculate one deterministic order over all nodes in the selected affinity ring, including down
+nodes, and preserve that order within both passes. If the SDK requests another attempt after every
+eligible endpoint has been tried, the plan starts another cycle: regular plans reshuffle, affinity
+plans reuse their deterministic order. If all candidates are down, the request fails locally. The
+SDK request endpoint is never used as a separate fallback.
 
 While a node is quarantined, successful traffic advances promotion and clears the failure streak. A
 traffic failure resets promotion progress while leaving the node in quarantine; 3 consecutive
@@ -1093,9 +1096,32 @@ DynamoDbClient client = AlternatorDynamoDbClient.builder()
 2. For qualifying single-item operations, it extracts the partition key value from the request
 3. A deterministic hash (MurmurHash3) of the partition key selects a consistent node
 4. For `BatchWriteItem`, each usable write votes for its preferred node; voted nodes are tried by
-   vote count, then by node URL
+   vote count, then by node URL. All votes and retries use one request-scoped affinity-ring snapshot
 5. Non-qualifying operations and requests without usable partition keys continue to use
    random query-plan load balancing
+
+When key route affinity reaches a built-in rack restriction, qualifying writes use its named
+datacenter. The built-in prefix is resolved and deduplicated once when affinity is enabled; built-in
+only chains resolve completely then. Opaque custom scopes keep their objects and runtime queries.
+Their fallback links resolve once when first needed and successful resolutions are retained safely
+per occurrence across concurrent refreshes. Built-ins behind custom boundaries are also deferred;
+repeated object identity does not truncate finite stateful chains. Arbitrary custom fallback code
+can still fail to terminate if discovery needs it.
+
+Fixed built-in operations are deduplicated by first occurrence. Current matching custom operations
+share refresh-local outcomes by query and seed aggregation behavior, including empty and failed
+outcomes; later refreshes retry discovery. Actual ordinary query and fallback observations are
+reused per occurrence without extra custom metadata evaluations. For example,
+`rack(A,r1) → rack(B,r2) → cluster` becomes `DC(A) → DC(B) → cluster`. Explicit fallback order stays
+intact; no fallback is added. Each named datacenter uses `/localnodes?dc=<configured-dc>`, without
+merging unrelated datacenter responses. Affinity-disabled clients and matching ordinary discovery
+need no additional view. With matching candidate membership, clients in different racks of the
+selected datacenter choose the same preferred coordinator. Final selection retains existing health
+eligibility. Reads and other non-qualifying operations keep their configured scope. Existing
+startup, refresh timing and failure fallback remain available; failed refreshes keep the previous
+ring. Enabling affinity does not wake or start discovery. Both views use existing node-health
+registration and recovery without synchronous verification or a readiness requirement. Explicit
+cluster routing retains its own discovery path.
 
 #### When to use key route affinity
 
