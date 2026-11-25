@@ -204,6 +204,7 @@ public class HeadersFilteringSdkHttpClientTest {
             .appendHeader("X-Amz-Date", "20240101T000000Z")
             .appendHeader("Accept-Encoding", "gzip")
             .appendHeader("User-Agent", "aws-sdk-java/2.x")
+            .appendHeader(AlternatorRequestOptions.SERVER_TIMEOUT_HEADER, "1500ms")
             // SDK metadata headers that should be filtered
             .appendHeader("X-Amz-Sdk-Invocation-Id", "some-id")
             .appendHeader("amz-sdk-request", "attempt=1")
@@ -228,6 +229,12 @@ public class HeadersFilteringSdkHttpClientTest {
     assertTrue(mockClient.capturedRequest.headers().containsKey("User-Agent"));
     assertEquals(
         "aws-sdk-java/2.x", mockClient.capturedRequest.firstMatchingHeader("User-Agent").get());
+    assertEquals(
+        "1500ms",
+        mockClient
+            .capturedRequest
+            .firstMatchingHeader(AlternatorRequestOptions.SERVER_TIMEOUT_HEADER)
+            .get());
     assertFalse(mockClient.capturedRequest.headers().containsKey("X-Amz-Sdk-Invocation-Id"));
     assertFalse(mockClient.capturedRequest.headers().containsKey("amz-sdk-request"));
   }
